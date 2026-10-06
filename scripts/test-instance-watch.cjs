@@ -83,6 +83,18 @@ test('selects dungeon floors independently from WMO group and coordinate bounds'
   assert.equal(getParticipantDungeonFloor({ position_x: 20, position_y: 20, position_z: 0, wmoGroupId: -1 }, floors).id, 10);
 });
 
+test('patched Shadowfang Keep chunks switch a shared WMO group at its Z threshold', () => {
+  // M patch: group 1380 maps to DungeonMap 144 below Z=127 and 145 above it.
+  const bounds = { minX: -194, maxX: -91, minY: 2103, maxY: 2257 };
+  const floors = [
+    { id: 144, floorIndex: 3, bounds, chunks: [{ wmoGroupId: 1380, minZ: -10000 }] },
+    { id: 145, floorIndex: 4, bounds, chunks: [{ wmoGroupId: 1380, minZ: 127 }] },
+  ];
+  const position = { position_x: -150, position_y: 2200, wmoGroupId: 1380 };
+  assert.equal(getParticipantDungeonFloor({ ...position, position_z: 126 }, floors).id, 144);
+  assert.equal(getParticipantDungeonFloor({ ...position, position_z: 127 }, floors).id, 145);
+});
+
 test('auto-fit projection keeps a single-player session visible', () => {
   const players = [player('Solo', 33, 4, 500, -200)];
   const bounds = getInstanceCoordinateBounds(players);

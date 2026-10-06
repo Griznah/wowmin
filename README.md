@@ -438,6 +438,18 @@ The extractor stitches the continent tiles and writes these files into `assets/m
 - `530.jpg` — Outland
 - `571.jpg` — Northrend
 
+To regenerate only Outland/map 530 without touching the other continents:
+
+```bash
+npm run extract:maps -- --source "/path/to/WoW" --map 530 --output ./assets/maps
+```
+
+Map 530 includes detached starting-zone islands. Some client `common.MPQ`
+textures contain opaque white/grey padding around their edges; the extractor
+removes those pixels only for exact audited source texture hashes on map 530.
+It preserves real water pixels, image dimensions, and tile-coordinate bounds.
+Different replacement textures and artwork on other maps are not filtered.
+
 Useful flags:
 
 - `--output /custom/dir` to write somewhere else
@@ -458,6 +470,31 @@ npm run extract:maps --source "/path/to/WoW" --map 489
 # Every instance, raid, battleground, and arena (recommended once)
 npm run extract:maps --source "/path/to/WoW" --all-instances
 ```
+
+#### Classic/TBC dungeon artwork with WDM patches
+
+For proper classic/TBC dungeon floor plans rather than stitched exterior
+minimaps, install the optional [WDM client patches](https://github.com/Trimitor/WDM-patch)
+into your own client's `Data/<locale>/` before extracting:
+
+- `patch-<locale>-M.MPQ`: dungeon artwork, floor-coordinate bounds, and
+  WMO-group/Z floor membership tables.
+- `patch-<locale>-N.MPQ`: optional outdoor caves/entrances and area overrides;
+  the patch author requires M plus the WDM/Astrolabe addons for these in-game maps.
+
+Then run the same `--all-instances` command above. The extractor loads lettered
+patches after numbered patches (N after M), uses `WorldMapArea.dbc` directory
+aliases to find the artwork, and reads the patched `DungeonMap.dbc` and
+`DungeonMapChunk.dbc` tables. WoWMin uses those bounds and its existing telemetry
+WMO-group/Z floor selector; it does **not** run or require addon Lua at runtime.
+
+WDM supplies in-game navigation/UI for the optional microdungeons, while
+Astrolabe supplies marker-position translation. Those outdoor microdungeon
+menus and the client's native fallback/transform rules are not fully reproduced
+by WoWMin's instance viewer. Individual floor transitions still need in-game
+comparison; having the artwork does not by itself prove exact client parity.
+
+Patch artwork remains locally extracted, not bundled in this repository.
 
 Outputs go to `assets/instances/` (`<mapId>.jpg`, per-floor
 `<mapId>-floor-<n>.jpg`, plus JSON metadata and an `index.json`). These

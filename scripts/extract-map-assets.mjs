@@ -5,6 +5,8 @@ import path from 'node:path';
 import os from 'node:os';
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
+import { createHash } from 'node:crypto';
 
 import jpeg from 'jpeg-js';
 import BLPFile from 'js-blp';
@@ -35,6 +37,40 @@ const CONTINENTS = [
     candidates: ['Northrend'],
   },
 ];
+
+// Audited common.MPQ map-530 edge textures. Both js-blp and Pillow show
+// these opaque white/grey placeholders in the original BLP pixels. Gate by
+// exact source content, not tile coordinates or generic colour heuristics:
+// a corrected texture supplied by a different client/patch must remain intact.
+const MAP_530_PLACEHOLDERS = new Map([
+  ['87f8863a2dea243d8e17dc650f0cd169a66f16e6d466bff60562a3236dba9347', 'grey'],
+  ['7338b4910f9e3dd2ab6d85aba69eb97703bb51576cbbae4e1a277b2cc452cc3a', 'grey'],
+  ['3968917077e7068aa0d37a44e60881b77bc406904268835b5d3f6499f3bea75a', 'white'],
+  ['c74344bc87317479ef1c746633f33cfa2048e8d30250dc98c1d1d409a320b3f7', 'white'],
+  ['7d60609e9fe95938b26d53fa23319f932fea6a399970565fbe52a989445f9a49', 'white'],
+  ['b4ac262ef4aafffa80c05bf1ba4c2c617b9f27f34d8f8b38edd2c343aa8a27d6', 'white'],
+  ['e485773cb19adf5400e575ee95367358eb5d9bf40b9017643d28b59664e2e847', 'white'],
+  ['9f6a07521b74b8518d90203bc2e1ec9f0e2244d15dc1ba96c3fd8e4c4ffa2227', 'white'],
+  ['cefefcce1a2da4f8ef610f5d93e99138c6d3ea4e68473ecf7007f1672ef4726d', 'white'],
+]);
+
+export function cleanMap530Placeholder(image, mapId) {
+  const kind = mapId === 530 ? MAP_530_PLACEHOLDERS.get(image.sourceHash) : undefined;
+  if (!kind) return 0;
+  let cleaned = 0;
+  for (let offset = 0; offset < image.data.length; offset += 4) {
+    const r = image.data[offset];
+    const g = image.data[offset + 1];
+    const b = image.data[offset + 2];
+    if (kind !== 'grey' && !(Math.min(r, g, b) >= 230 && Math.max(r, g, b) - Math.min(r, g, b) <= 12)) continue;
+    // Composite the placeholder onto black before JPEG encoding, which does
+    // not preserve alpha. Keep the real water pixels on the texture's edge.
+    image.data.fill(0, offset, offset + 3);
+    image.data[offset + 3] = 255;
+    cleaned += 1;
+  }
+  return cleaned;
+}
 
 const DEFAULTS = {
   output: path.resolve(process.cwd(), 'assets/maps'),
@@ -69,7 +105,7 @@ Usage:
 Options:
   --source, -s        WoW client root, Data dir, or extracted World/Minimaps dir
   --output, -o        Output directory (defaults to assets/maps or assets/instances for targeted modes)
-  --map, -m           Extract only this map ID (repeatable; does not rerun continents)
+  --map, -m           Extract only these map IDs (repeatable; no unrelated maps are regenerated)
   --all-instances     Extract every instance, raid, battleground, and arena from Map.dbc
   --map-dir           Client map directory override (single --map only)
   --workspace, -w     Temp/work directory used while extracting MPQs
@@ -296,15 +332,20 @@ function canListMpqArchive(tool, archivePath) {
   return !result.error && result.status === 0;
 }
 
-function archivePriority(filePath) {
+export function archivePriority(filePath) {
   const name = path.basename(filePath).toLowerCase();
   if (/^common-2.*\.mpq$/.test(name)) return 15;
   if (/^common.*\.mpq$/.test(name)) return 10;
   if (/^expansion.*\.mpq$/.test(name)) return 20;
   if (/^lichking.*\.mpq$/.test(name)) return 25;
   if (/^locale-.*\.mpq$/.test(name)) return 30;
-  const patch = name.match(/^patch(?:-[a-z]{4})?(?:-(\d+))?\.mpq$/);
-  if (patch) return 50 + Number.parseInt(patch[1] ?? '0', 10);
+  const patch = name.match(/^patch(?:-[a-z]{4})?(?:-([0-9]+|[a-z]))?\.mpq$/);
+  if (patch) {
+    const suffix = patch[1] ?? '0';
+    // Custom lettered patches must override base/numbered patches, with N
+    // taking precedence over M. Previously they fell into the generic bucket.
+    return 50 + (/^\d+$/.test(suffix) ? Number(suffix) : 100 + suffix.charCodeAt(0) - 97);
+  }
   return 40;
 }
 
@@ -348,7 +389,7 @@ function parseMapDbc(buffer, requestedMapIds, allInstances = false) {
   return entries;
 }
 
-function parseWorldMapAreaDbc(buffer) {
+export function parseWorldMapAreaDbc(buffer) {
   if (buffer.subarray(0, 4).toString('ascii') !== 'WDBC') return new Map();
   const recordCount = buffer.readUInt32LE(4);
   const fieldCount = buffer.readUInt32LE(8);
@@ -356,6 +397,7 @@ function parseWorldMapAreaDbc(buffer) {
   if (fieldCount < 8 || recordSize < 32) return new Map();
 
   const boundsByMap = new Map();
+  const stringBlockOffset = 20 + recordCount * recordSize;
   for (let index = 0; index < recordCount; index += 1) {
     const offset = 20 + index * recordSize;
     const mapId = buffer.readUInt32LE(offset + 4);
@@ -364,11 +406,23 @@ function parseWorldMapAreaDbc(buffer) {
     const x1 = buffer.readFloatLE(offset + 24);
     const x2 = buffer.readFloatLE(offset + 28);
     if (![x1, x2, y1, y2].every(Number.isFinite) || x1 === x2 || y1 === y2) continue;
+    const directory = readDbcString(buffer, stringBlockOffset, buffer.readUInt32LE(offset + 12));
+    const existing = boundsByMap.get(mapId);
+    // Preserve all directory aliases without letting a sub-area overwrite the
+    // full-map projection (N adds many microdungeon WorldMapArea entries).
+    const aliases = [...new Set([...(existing?.directories ?? []), directory].filter(Boolean))];
+    if (existing && buffer.readUInt32LE(offset + 8) !== 0) {
+      existing.directories = aliases;
+      continue;
+    }
     boundsByMap.set(mapId, {
-      minX: Math.min(x1, x2),
-      maxX: Math.max(x1, x2),
-      minY: Math.min(y1, y2),
-      maxY: Math.max(y1, y2),
+      bounds: {
+        minX: Math.min(x1, x2),
+        maxX: Math.max(x1, x2),
+        minY: Math.min(y1, y2),
+        maxY: Math.max(y1, y2),
+      },
+      directories: aliases,
     });
   }
   return boundsByMap;
@@ -688,7 +742,10 @@ function tryExtractMinimapsWithStormlib(
         targets = [{ mapId: requestedMapIds[0], label: `Map ${requestedMapIds[0]}`, candidates: [mapDirOverride] }];
       } else {
         if (!mapDbcBuffer) throw new Error('Could not extract DBFilesClient/Map.dbc; pass --map-dir explicitly.');
-        targets = parseMapDbc(mapDbcBuffer, requestedMapIds, allInstances);
+        targets = parseMapDbc(mapDbcBuffer, requestedMapIds, allInstances).map((target) => {
+          const continent = target.mapType === 0 ? CONTINENTS.find((entry) => entry.mapId === target.mapId) : null;
+          return continent ? { ...target, ...continent } : target;
+        });
         const resolvedIds = new Set(targets.map((target) => target.mapId));
         const missing = requestedMapIds.filter((mapId) => !resolvedIds.has(mapId));
         if (missing.length > 0) throw new Error(`Map ID(s) not found in Map.dbc: ${missing.join(', ')}`);
@@ -697,7 +754,17 @@ function tryExtractMinimapsWithStormlib(
 
     if (worldMapAreaDbcBuffer) {
       const boundsByMap = parseWorldMapAreaDbc(worldMapAreaDbcBuffer);
-      targets = targets.map((target) => ({ ...target, worldMapBounds: boundsByMap.get(target.mapId) ?? null }));
+      targets = targets.map((target) => {
+        // A continent spans many WorldMapArea zones. Keep the terrain atlas,
+        // rather than accidentally choosing one zone's parchment and bounds.
+        if (target.mapType === 0 && CONTINENTS.some((entry) => entry.mapId === target.mapId)) return target;
+        const area = boundsByMap.get(target.mapId);
+        return {
+          ...target,
+          worldMapBounds: area?.bounds ?? null,
+          candidates: [...new Set([...(area?.directories ?? []), ...target.candidates])],
+        };
+      });
     }
     if (dungeonMapDbcBuffer) {
       const floorsByMap = parseDungeonMapDbc(dungeonMapDbcBuffer);
@@ -707,7 +774,7 @@ function tryExtractMinimapsWithStormlib(
 
     let resolvedTargets = [];
     if (requestedMapIds.length > 0 || allInstances) {
-      resolvedTargets = tryExtractWorldMapArtwork(openedArchives, targets, workspaceDir);
+      resolvedTargets = tryExtractWorldMapArtwork(openedArchives, targets.filter((target) => target.mapType !== 0), workspaceDir);
       if (resolvedTargets.length > 0) {
         console.log(`• Using Interface/WorldMap artwork for ${resolvedTargets.length} map(s)`);
       }
@@ -962,6 +1029,7 @@ function decodeImage(filePath) {
       width: blp.width,
       height: blp.height,
       data: Buffer.from(pixels.raw),
+      sourceHash: createHash('sha256').update(buffer).digest('hex'),
     };
   }
 
@@ -1061,6 +1129,9 @@ function stitchContinent(
   for (const tile of tiles) {
     try {
       const image = decodeImage(tile.filePath);
+      if (assetKind === 'minimap' && cleanMap530Placeholder(image, continent.mapId)) {
+        console.log(`  ✓ Removed audited source placeholder pixels from ${path.basename(tile.filePath)}`);
+      }
       minTileX = Math.min(minTileX, tile.tileX);
       minTileY = Math.min(minTileY, tile.tileY);
       maxTileX = Math.max(maxTileX, tile.tileX);
@@ -1330,7 +1401,7 @@ async function main() {
     console.log(`  ✓ Wrote ${indexPath}`);
   }
 
-  console.log(`\nDone. Generated ${targetedExtraction ? 'instance' : 'continent'} maps:`);
+  console.log(`\nDone. Generated ${targetedExtraction ? 'targeted' : 'continent'} maps:`);
   for (const summary of summaries) {
     console.log(`  - ${summary.continent.label}: ${summary.outputPath}`);
   }
@@ -1342,6 +1413,8 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  fail(error instanceof Error ? error.message : String(error));
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    fail(error instanceof Error ? error.message : String(error));
+  });
+}
