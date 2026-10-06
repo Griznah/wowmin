@@ -68,7 +68,10 @@ Usage:
 
 Options:
   --source, -s        WoW client root, Data dir, or extracted World/Minimaps dir
-  --output, -o        Output directory for 0.jpg / 1.jpg / 530.jpg / 571.jpg
+  --output, -o        Output directory (defaults to assets/maps or assets/instances for targeted modes)
+  --map, -m           Extract only this map ID (repeatable; does not rerun continents)
+  --all-instances     Extract every instance, raid, battleground, and arena from Map.dbc
+  --map-dir           Client map directory override (single --map only)
   --workspace, -w     Temp/work directory used while extracting MPQs
   --quality, -q       JPEG quality (1-100, default: 90)
   --keep-workspace    Keep extracted minimap tiles instead of deleting temp files
@@ -78,16 +81,24 @@ Notes:
   - A plain positional path is also accepted as the source for npm convenience.
   - npm config-style flags also work, e.g. npm run extract:maps --source /path --output ./maps.
   - If --source already contains World/Minimaps, the script stitches tiles directly.
+  - With --map or --all-instances, targets are resolved from DBFilesClient/Map.dbc.
+    For an already-extracted minimap tree, also pass --map-dir when Map.dbc is unavailable.
   - If --source is a WoW 3.3.5a client, the script will try to extract World/Minimaps
     from MPQ archives using 7zz, 7z, or bsdtar if one is installed.
 `);
 }
 
 function parseArgs(argv) {
+  const npmOutput = readNpmConfigValue('output');
+  const npmMaps = readNpmConfigValue('map');
   const options = {
     ...DEFAULTS,
     source: readNpmConfigValue('source'),
-    output: readNpmConfigValue('output') ?? DEFAULTS.output,
+    output: npmOutput ?? DEFAULTS.output,
+    outputExplicit: Boolean(npmOutput),
+    mapIds: npmMaps ? npmMaps.split(',').map((value) => Number.parseInt(value, 10)) : [],
+    allInstances: readNpmConfigBoolean('all_instances') ?? false,
+    mapDir: readNpmConfigValue('map_dir'),
     workspace: readNpmConfigValue('workspace'),
     quality: Number.parseInt(readNpmConfigValue('quality') ?? String(DEFAULTS.quality), 10),
     keepWorkspace: readNpmConfigBoolean('keep_workspace') ?? DEFAULTS.keepWorkspace,
@@ -104,6 +115,17 @@ function parseArgs(argv) {
       case '--output':
       case '-o':
         options.output = argv[++i];
+        options.outputExplicit = true;
+        break;
+      case '--map':
+      case '-m':
+        options.mapIds.push(Number.parseInt(argv[++i] ?? '', 10));
+        break;
+      case '--all-instances':
+        options.allInstances = true;
+        break;
+      case '--map-dir':
+        options.mapDir = argv[++i];
         break;
       case '--workspace':
       case '-w':
@@ -146,7 +168,9 @@ function parseArgs(argv) {
     throw new Error(`Unexpected extra positional arguments: ${positional.slice(4).join(', ')}`);
   }
 
-  if (options.output) {
+  if ((options.mapIds.length > 0 || options.allInstances) && !options.outputExplicit) {
+    options.output = path.resolve(process.cwd(), 'assets/instances');
+  } else if (options.output) {
     options.output = path.resolve(process.cwd(), options.output);
   }
   if (options.workspace) {
@@ -274,13 +298,141 @@ function canListMpqArchive(tool, archivePath) {
 
 function archivePriority(filePath) {
   const name = path.basename(filePath).toLowerCase();
-  if (/^common.*\.mpq$/.test(name)) return 10;
   if (/^common-2.*\.mpq$/.test(name)) return 15;
+  if (/^common.*\.mpq$/.test(name)) return 10;
   if (/^expansion.*\.mpq$/.test(name)) return 20;
   if (/^lichking.*\.mpq$/.test(name)) return 25;
   if (/^locale-.*\.mpq$/.test(name)) return 30;
-  if (/^patch-.*\.mpq$/.test(name)) return 50;
+  const patch = name.match(/^patch(?:-[a-z]{4})?(?:-(\d+))?\.mpq$/);
+  if (patch) return 50 + Number.parseInt(patch[1] ?? '0', 10);
   return 40;
+}
+
+function readDbcString(buffer, stringBlockOffset, stringOffset) {
+  if (stringOffset === 0) return '';
+  const start = stringBlockOffset + stringOffset;
+  let end = start;
+  while (end < buffer.length && buffer[end] !== 0) end += 1;
+  return buffer.toString('utf8', start, end);
+}
+
+function parseMapDbc(buffer, requestedMapIds, allInstances = false) {
+  if (buffer.subarray(0, 4).toString('ascii') !== 'WDBC') {
+    throw new Error('DBFilesClient/Map.dbc has an unsupported header.');
+  }
+  const recordCount = buffer.readUInt32LE(4);
+  const fieldCount = buffer.readUInt32LE(8);
+  const recordSize = buffer.readUInt32LE(12);
+  if (fieldCount < 6 || recordSize < 24) {
+    throw new Error(`DBFilesClient/Map.dbc has an unexpected layout (${fieldCount} fields, ${recordSize}-byte records).`);
+  }
+  const stringBlockOffset = 20 + recordCount * recordSize;
+  const requested = new Set(requestedMapIds);
+  const entries = [];
+  const mapTypeLabels = ['world', 'instance', 'raid', 'battleground', 'arena'];
+  for (let index = 0; index < recordCount; index += 1) {
+    const offset = 20 + index * recordSize;
+    const mapId = buffer.readUInt32LE(offset);
+    const mapType = buffer.readUInt32LE(offset + 8);
+    if (!(allInstances ? mapType >= 1 && mapType <= 4 : requested.has(mapId))) continue;
+    const internalName = readDbcString(buffer, stringBlockOffset, buffer.readUInt32LE(offset + 4));
+    const displayName = readDbcString(buffer, stringBlockOffset, buffer.readUInt32LE(offset + 20));
+    entries.push({
+      mapId,
+      mapType,
+      mapTypeLabel: mapTypeLabels[mapType] ?? `type-${mapType}`,
+      label: displayName || internalName || `Map ${mapId}`,
+      candidates: [internalName],
+    });
+  }
+  return entries;
+}
+
+function parseWorldMapAreaDbc(buffer) {
+  if (buffer.subarray(0, 4).toString('ascii') !== 'WDBC') return new Map();
+  const recordCount = buffer.readUInt32LE(4);
+  const fieldCount = buffer.readUInt32LE(8);
+  const recordSize = buffer.readUInt32LE(12);
+  if (fieldCount < 8 || recordSize < 32) return new Map();
+
+  const boundsByMap = new Map();
+  for (let index = 0; index < recordCount; index += 1) {
+    const offset = 20 + index * recordSize;
+    const mapId = buffer.readUInt32LE(offset + 4);
+    const y1 = buffer.readFloatLE(offset + 16);
+    const y2 = buffer.readFloatLE(offset + 20);
+    const x1 = buffer.readFloatLE(offset + 24);
+    const x2 = buffer.readFloatLE(offset + 28);
+    if (![x1, x2, y1, y2].every(Number.isFinite) || x1 === x2 || y1 === y2) continue;
+    boundsByMap.set(mapId, {
+      minX: Math.min(x1, x2),
+      maxX: Math.max(x1, x2),
+      minY: Math.min(y1, y2),
+      maxY: Math.max(y1, y2),
+    });
+  }
+  return boundsByMap;
+}
+
+function parseDungeonMapDbc(buffer) {
+  if (buffer.subarray(0, 4).toString('ascii') !== 'WDBC') return new Map();
+  const recordCount = buffer.readUInt32LE(4);
+  const fieldCount = buffer.readUInt32LE(8);
+  const recordSize = buffer.readUInt32LE(12);
+  if (fieldCount !== 8 || recordSize !== 32) return new Map();
+
+  const floorsByMap = new Map();
+  for (let index = 0; index < recordCount; index += 1) {
+    const offset = 20 + index * recordSize;
+    const id = buffer.readUInt32LE(offset);
+    const mapId = buffer.readUInt32LE(offset + 4);
+    const floorIndex = buffer.readUInt32LE(offset + 8);
+    const clientMinX = buffer.readFloatLE(offset + 12);
+    const clientMaxX = buffer.readFloatLE(offset + 16);
+    const clientMinY = buffer.readFloatLE(offset + 20);
+    const clientMaxY = buffer.readFloatLE(offset + 24);
+    if (![clientMinX, clientMaxX, clientMinY, clientMaxY].every(Number.isFinite)) continue;
+    if (!floorsByMap.has(mapId)) floorsByMap.set(mapId, []);
+    floorsByMap.get(mapId).push({
+      id,
+      floorIndex,
+      bounds: {
+        minX: Math.min(clientMinY, clientMaxY),
+        maxX: Math.max(clientMinY, clientMaxY),
+        minY: Math.min(clientMinX, clientMaxX),
+        maxY: Math.max(clientMinX, clientMaxX),
+      },
+      chunks: [],
+    });
+  }
+  for (const floors of floorsByMap.values()) floors.sort((left, right) => left.floorIndex - right.floorIndex);
+  return floorsByMap;
+}
+
+function parseDungeonMapChunkDbc(buffer, floorsByMap) {
+  if (buffer.subarray(0, 4).toString('ascii') !== 'WDBC') return;
+  const recordCount = buffer.readUInt32LE(4);
+  const fieldCount = buffer.readUInt32LE(8);
+  const recordSize = buffer.readUInt32LE(12);
+  if (fieldCount !== 5 || recordSize !== 20) return;
+
+  const floorsById = new Map();
+  for (const floors of floorsByMap.values()) {
+    for (const floor of floors) floorsById.set(floor.id, floor);
+  }
+  for (let index = 0; index < recordCount; index += 1) {
+    const offset = 20 + index * recordSize;
+    const mapId = buffer.readUInt32LE(offset + 4);
+    const wmoGroupId = buffer.readUInt32LE(offset + 8);
+    const dungeonMapId = buffer.readUInt32LE(offset + 12);
+    const minZ = buffer.readFloatLE(offset + 16);
+    const floor = floorsById.get(dungeonMapId);
+    if (!floor || !floorsByMap.has(mapId) || !Number.isFinite(minZ)) continue;
+    floor.chunks.push({ wmoGroupId, minZ });
+  }
+  for (const floors of floorsByMap.values()) {
+    for (const floor of floors) floor.chunks.sort((left, right) => left.minZ - right.minZ);
+  }
 }
 
 function findMpqArchives(dataDir) {
@@ -298,10 +450,6 @@ function findMpqArchives(dataDir) {
   });
 
   return archives;
-}
-
-function isTopLevelDataArchive(archivePath, dataDir) {
-  return path.dirname(archivePath) === dataDir;
 }
 
 function extractMpqFile(archive, fileNames) {
@@ -366,15 +514,113 @@ function canDecodeBlp(buffer) {
   }
 }
 
-function tryExtractMinimapsWithStormlib(dataDir, archives, workspaceDir) {
-  const topLevelArchives = archives.filter((archivePath) => isTopLevelDataArchive(archivePath, dataDir));
-  if (topLevelArchives.length === 0) {
-    return null;
+function tryExtractWorldMapArtwork(openedArchives, targets, workspaceDir) {
+  const filesByFolder = new Map();
+  for (const openedArchive of openedArchives) {
+    for (const fileName of openedArchive.archive.getFileList()) {
+      const match = fileName.match(/^interface\\worldmap\\([^\\]+)\\([^\\]+)\.blp$/i);
+      if (!match) continue;
+      const directory = match[1];
+      const fileBase = match[2];
+      if (!fileBase.toLowerCase().startsWith(directory.toLowerCase())) continue;
+      const tileSuffix = fileBase.slice(directory.length);
+      const folderKey = normalizeName(directory);
+      if (!filesByFolder.has(folderKey)) {
+        filesByFolder.set(folderKey, { directory, files: new Map(), floorFiles: new Map() });
+      }
+      const folder = filesByFolder.get(folderKey);
+      const floorMatch = tileSuffix.match(/^(\d+)_(\d{1,2})$/);
+      if (floorMatch) {
+        const floorIndex = Number.parseInt(floorMatch[1], 10);
+        const tileIndex = Number.parseInt(floorMatch[2], 10);
+        if (tileIndex < 1 || tileIndex > 12) continue;
+        if (!folder.floorFiles.has(floorIndex)) folder.floorFiles.set(floorIndex, new Map());
+        const floorFiles = folder.floorFiles.get(floorIndex);
+        if (!floorFiles.has(tileIndex)) floorFiles.set(tileIndex, []);
+        floorFiles.get(tileIndex).push({ ...openedArchive, fileName });
+        continue;
+      }
+      if (!/^\d{1,2}$/.test(tileSuffix)) continue;
+      const tileIndex = Number.parseInt(tileSuffix, 10);
+      if (tileIndex < 1 || tileIndex > 12) continue;
+      if (!folder.files.has(tileIndex)) folder.files.set(tileIndex, []);
+      folder.files.get(tileIndex).push({ ...openedArchive, fileName });
+    }
   }
+
+  const extractTiles = (files, targetDir) => {
+    ensureDir(targetDir);
+    let extracted = 0;
+    for (const [tileIndex, candidates] of files.entries()) {
+      for (let index = candidates.length - 1; index >= 0; index -= 1) {
+        const candidate = candidates[index];
+        const data = extractMpqFile(candidate.archive, [candidate.fileName]);
+        if (!data || !canDecodeBlp(data)) continue;
+        fs.writeFileSync(path.join(targetDir, `${tileIndex}.blp`), data);
+        extracted += 1;
+        break;
+      }
+    }
+    return extracted;
+  };
+
+  const resolvedTargets = [];
+  const worldMapRoot = path.join(workspaceDir, 'Interface', 'WorldMap');
+  for (const target of targets) {
+    const aliases = [target.label, ...target.candidates].map(normalizeName);
+    const folder = [...filesByFolder.values()].find((candidate) => aliases.includes(normalizeName(candidate.directory)));
+    if (!folder) continue;
+
+    const floorDefinitions = target.floors ?? [];
+    const floors = [];
+    for (const definition of floorDefinitions) {
+      const files = folder.floorFiles.get(definition.floorIndex);
+      if (!files?.size) continue;
+      const floorDir = path.join(worldMapRoot, folder.directory, `floor-${definition.floorIndex}`);
+      const extracted = extractTiles(files, floorDir);
+      if (!extracted) continue;
+      floors.push({ ...definition, folderPath: floorDir });
+      console.log(`  ✓ ${folder.directory} floor ${definition.floorIndex}: extracted ${extracted} tile(s)`);
+    }
+    if (floors.length > 0) {
+      resolvedTargets.push({
+        ...target,
+        candidates: [folder.directory],
+        assetKind: 'worldmapFloors',
+        floors,
+      });
+      continue;
+    }
+
+    if (folder.files.size === 0) continue;
+    const targetDir = path.join(worldMapRoot, folder.directory);
+    const extracted = extractTiles(folder.files, targetDir);
+    if (!extracted) continue;
+    console.log(`  ✓ ${folder.directory}: extracted ${extracted} Interface/WorldMap tile(s)`);
+    resolvedTargets.push({
+      ...target,
+      candidates: [folder.directory],
+      assetKind: 'worldmap',
+      folderPath: targetDir,
+    });
+  }
+
+  return resolvedTargets;
+}
+
+function tryExtractMinimapsWithStormlib(
+  dataDir,
+  archives,
+  workspaceDir,
+  requestedMapIds,
+  mapDirOverride,
+  allInstances,
+) {
+  if (archives.length === 0) return null;
 
   const openedArchives = [];
   try {
-    for (const archivePath of topLevelArchives) {
+    for (const archivePath of archives) {
       try {
         openedArchives.push({
           archivePath,
@@ -391,20 +637,85 @@ function tryExtractMinimapsWithStormlib(dataDir, archives, workspaceDir) {
     }
 
     let trsBuffer = null;
+    let mapDbcBuffer = null;
+    let worldMapAreaDbcBuffer = null;
+    let dungeonMapDbcBuffer = null;
+    let dungeonMapChunkDbcBuffer = null;
     for (const { archive } of openedArchives) {
-      trsBuffer = extractMpqFile(archive, [
+      const candidateTrs = extractMpqFile(archive, [
         'textures\\Minimap\\md5translate.trs',
         'textures/minimap/md5translate.trs',
         'Textures\\Minimap\\md5translate.trs',
         'Textures/Minimap/md5translate.trs',
       ]);
-      if (trsBuffer) {
-        break;
+      if (candidateTrs) trsBuffer = candidateTrs;
+      const candidateMapDbc = extractMpqFile(archive, [
+        'DBFilesClient\\Map.dbc',
+        'DBFilesClient/Map.dbc',
+        'dbfilesclient\\map.dbc',
+        'dbfilesclient/map.dbc',
+      ]);
+      if (candidateMapDbc) mapDbcBuffer = candidateMapDbc;
+      const candidateWorldMapAreaDbc = extractMpqFile(archive, [
+        'DBFilesClient\\WorldMapArea.dbc',
+        'DBFilesClient/WorldMapArea.dbc',
+        'dbfilesclient\\worldmaparea.dbc',
+        'dbfilesclient/worldmaparea.dbc',
+      ]);
+      if (candidateWorldMapAreaDbc) worldMapAreaDbcBuffer = candidateWorldMapAreaDbc;
+      const candidateDungeonMapDbc = extractMpqFile(archive, [
+        'DBFilesClient\\DungeonMap.dbc',
+        'DBFilesClient/DungeonMap.dbc',
+        'dbfilesclient\\dungeonmap.dbc',
+        'dbfilesclient/dungeonmap.dbc',
+      ]);
+      if (candidateDungeonMapDbc) dungeonMapDbcBuffer = candidateDungeonMapDbc;
+      const candidateDungeonMapChunkDbc = extractMpqFile(archive, [
+        'DBFilesClient\\DungeonMapChunk.dbc',
+        'DBFilesClient/DungeonMapChunk.dbc',
+        'dbfilesclient\\dungeonmapchunk.dbc',
+        'dbfilesclient/dungeonmapchunk.dbc',
+      ]);
+      if (candidateDungeonMapChunkDbc) dungeonMapChunkDbcBuffer = candidateDungeonMapChunkDbc;
+    }
+
+    if (!trsBuffer) return null;
+
+    let targets = CONTINENTS;
+    if (requestedMapIds.length > 0 || allInstances) {
+      if (mapDirOverride) {
+        if (requestedMapIds.length !== 1) throw new Error('--map-dir can only be used with one --map value.');
+        targets = [{ mapId: requestedMapIds[0], label: `Map ${requestedMapIds[0]}`, candidates: [mapDirOverride] }];
+      } else {
+        if (!mapDbcBuffer) throw new Error('Could not extract DBFilesClient/Map.dbc; pass --map-dir explicitly.');
+        targets = parseMapDbc(mapDbcBuffer, requestedMapIds, allInstances);
+        const resolvedIds = new Set(targets.map((target) => target.mapId));
+        const missing = requestedMapIds.filter((mapId) => !resolvedIds.has(mapId));
+        if (missing.length > 0) throw new Error(`Map ID(s) not found in Map.dbc: ${missing.join(', ')}`);
       }
     }
 
-    if (!trsBuffer) {
-      return null;
+    if (worldMapAreaDbcBuffer) {
+      const boundsByMap = parseWorldMapAreaDbc(worldMapAreaDbcBuffer);
+      targets = targets.map((target) => ({ ...target, worldMapBounds: boundsByMap.get(target.mapId) ?? null }));
+    }
+    if (dungeonMapDbcBuffer) {
+      const floorsByMap = parseDungeonMapDbc(dungeonMapDbcBuffer);
+      if (dungeonMapChunkDbcBuffer) parseDungeonMapChunkDbc(dungeonMapChunkDbcBuffer, floorsByMap);
+      targets = targets.map((target) => ({ ...target, floors: floorsByMap.get(target.mapId) ?? [] }));
+    }
+
+    let resolvedTargets = [];
+    if (requestedMapIds.length > 0 || allInstances) {
+      resolvedTargets = tryExtractWorldMapArtwork(openedArchives, targets, workspaceDir);
+      if (resolvedTargets.length > 0) {
+        console.log(`• Using Interface/WorldMap artwork for ${resolvedTargets.length} map(s)`);
+      }
+    }
+    const resolvedMapIds = new Set(resolvedTargets.map((target) => target.mapId));
+    const minimapTargets = targets.filter((target) => !resolvedMapIds.has(target.mapId));
+    if (minimapTargets.length === 0) {
+      return { minimapRoot: workspaceDir, targets: resolvedTargets, missingTargets: [] };
     }
 
     const minimapIndex = new Map();
@@ -429,8 +740,9 @@ function tryExtractMinimapsWithStormlib(dataDir, archives, workspaceDir) {
     const minimapRoot = path.join(workspaceDir, 'World', 'Minimaps');
     let extractedCount = 0;
 
-    for (const continent of CONTINENTS) {
-      const directoryName = continent.candidates.find((candidate) => byDirectory.has(candidate));
+    for (const continent of minimapTargets) {
+      const directoryName = [...byDirectory.keys()].find((directory) =>
+        continent.candidates.some((candidate) => normalizeName(candidate) === normalizeName(directory)));
       if (!directoryName) {
         continue;
       }
@@ -438,6 +750,7 @@ function tryExtractMinimapsWithStormlib(dataDir, archives, workspaceDir) {
       const targetDir = path.join(minimapRoot, directoryName);
       ensureDir(targetDir);
       const tiles = byDirectory.get(directoryName);
+      let targetExtractedCount = 0;
 
       for (const [logicalName, hashedName] of tiles.entries()) {
         const minimapKey = `textures\\minimap\\${hashedName}`.toLowerCase();
@@ -467,17 +780,25 @@ function tryExtractMinimapsWithStormlib(dataDir, archives, workspaceDir) {
 
         fs.writeFileSync(path.join(targetDir, logicalName), selectedData);
         extractedCount += 1;
+        targetExtractedCount += 1;
       }
 
-      console.log(`  ✓ ${directoryName}: ${tiles.size} tile mapping(s) processed`);
+      console.log(`  ✓ ${directoryName}: ${targetExtractedCount}/${tiles.size} minimap tile(s) extracted`);
+      if (targetExtractedCount === 0) continue;
+      resolvedTargets.push({
+        ...continent,
+        candidates: [directoryName],
+        assetKind: 'minimap',
+        folderPath: targetDir,
+      });
     }
 
-    if (extractedCount === 0) {
-      return null;
-    }
-
-    console.log(`• Extracted ${extractedCount} minimap tile(s) directly from MPQ archives`);
-    return locateMinimapRoot(workspaceDir);
+    if (resolvedTargets.length === 0) return null;
+    if (extractedCount > 0) console.log(`• Extracted ${extractedCount} minimap tile(s) directly from MPQ archives`);
+    const resolvedIds = new Set(resolvedTargets.map((target) => target.mapId));
+    const missingTargets = targets.filter((target) => !resolvedIds.has(target.mapId));
+    if (missingTargets.length > 0) console.warn(`  ! No map artwork found for ${missingTargets.length} target(s)`);
+    return { minimapRoot: workspaceDir, targets: resolvedTargets, missingTargets };
   } finally {
     for (const { archive } of openedArchives) {
       try {
@@ -516,7 +837,7 @@ function runExtraction(tool, archivePath, workspaceDir) {
   });
 }
 
-function extractMinimapsFromMpqs(sourcePath, workspaceDir) {
+function extractMinimapsFromMpqs(sourcePath, workspaceDir, requestedMapIds, mapDirOverride, allInstances) {
   const dataDir = locateDataDir(sourcePath);
   if (!dataDir) {
     return null;
@@ -529,7 +850,14 @@ function extractMinimapsFromMpqs(sourcePath, workspaceDir) {
 
   ensureDir(workspaceDir);
 
-  const stormlibRoot = tryExtractMinimapsWithStormlib(dataDir, archives, workspaceDir);
+  const stormlibRoot = tryExtractMinimapsWithStormlib(
+    dataDir,
+    archives,
+    workspaceDir,
+    requestedMapIds,
+    mapDirOverride,
+    allInstances,
+  );
   if (stormlibRoot) {
     return stormlibRoot;
   }
@@ -577,7 +905,15 @@ function extractMinimapsFromMpqs(sourcePath, workspaceDir) {
     console.warn('  ! No archive reported extracted files. Checking the workspace anyway...');
   }
 
-  return locateMinimapRoot(workspaceDir);
+  const minimapRoot = locateMinimapRoot(workspaceDir);
+  if (!minimapRoot) return null;
+  if ((requestedMapIds.length > 0 || allInstances) && !mapDirOverride) {
+    throw new Error('External MPQ extraction cannot resolve map targets automatically; use built-in MPQ support.');
+  }
+  const targets = requestedMapIds.length > 0
+    ? [{ mapId: requestedMapIds[0], label: `Map ${requestedMapIds[0]}`, candidates: [mapDirOverride] }]
+    : CONTINENTS;
+  return { minimapRoot, targets, missingTargets: [] };
 }
 
 function findContinentFolder(minimapRoot, candidateNames) {
@@ -650,14 +986,22 @@ function decodeImage(filePath) {
   throw new Error(`Unsupported image format: ${filePath}`);
 }
 
-function collectTiles(folderPath) {
+function collectTiles(folderPath, assetKind = 'minimap') {
   const files = walkFiles(folderPath)
     .filter((filePath) => /\.(blp|png|jpe?g)$/i.test(filePath))
     .sort((a, b) => a.localeCompare(b));
 
   const tiles = [];
   for (const filePath of files) {
-    const coords = parseTileCoordinates(filePath);
+    let coords;
+    if (assetKind === 'worldmap') {
+      const tileIndex = Number.parseInt(path.basename(filePath, path.extname(filePath)), 10);
+      coords = Number.isInteger(tileIndex) && tileIndex > 0
+        ? { tileX: (tileIndex - 1) % 4, tileY: Math.floor((tileIndex - 1) / 4) }
+        : null;
+    } else {
+      coords = parseTileCoordinates(filePath);
+    }
     if (!coords) {
       continue;
     }
@@ -694,8 +1038,16 @@ function blitTile(target, targetWidth, targetHeight, tileData, tileWidth, tileHe
   }
 }
 
-function stitchContinent(folderPath, continent, outputDir, quality) {
-  const tiles = collectTiles(folderPath);
+function stitchContinent(
+  folderPath,
+  continent,
+  outputDir,
+  quality,
+  writeMetadata = false,
+  outputBase = String(continent.mapId),
+) {
+  const assetKind = continent.assetKind ?? 'minimap';
+  const tiles = collectTiles(folderPath, assetKind);
   if (tiles.length === 0) {
     throw new Error(`No tile files were found under ${folderPath}.`);
   }
@@ -736,8 +1088,12 @@ function stitchContinent(folderPath, continent, outputDir, quality) {
     }
   }
 
-  const outputWidth = (maxTileX - minTileX + 1) * tileWidth;
-  const outputHeight = (maxTileY - minTileY + 1) * tileHeight;
+  const tiledWidth = (maxTileX - minTileX + 1) * tileWidth;
+  const tiledHeight = (maxTileY - minTileY + 1) * tileHeight;
+  // Interface/WorldMap art is stored as twelve 256px tiles, but the client
+  // displays the logical 1002×668 map area and clips the unused tile edges.
+  const outputWidth = assetKind === 'worldmap' ? Math.min(1002, tiledWidth) : tiledWidth;
+  const outputHeight = assetKind === 'worldmap' ? Math.min(668, tiledHeight) : tiledHeight;
   const rgba = Buffer.alloc(outputWidth * outputHeight * 4, 0);
 
   for (const tile of decodedTiles) {
@@ -747,8 +1103,36 @@ function stitchContinent(folderPath, continent, outputDir, quality) {
   }
 
   const encoded = jpeg.encode({ data: rgba, width: outputWidth, height: outputHeight }, quality);
-  const outputPath = path.join(outputDir, `${continent.mapId}.jpg`);
+  const outputPath = path.join(outputDir, `${outputBase}.jpg`);
   fs.writeFileSync(outputPath, encoded.data);
+
+  let metadataPath = null;
+  if (writeMetadata) {
+    metadataPath = path.join(outputDir, `${continent.mapId}.json`);
+    fs.writeFileSync(metadataPath, `${JSON.stringify({
+      schemaVersion: 1,
+      mapId: continent.mapId,
+      label: continent.label,
+      mapType: continent.mapType ?? null,
+      mapTypeLabel: continent.mapTypeLabel ?? null,
+      clientDirectory: path.basename(folderPath),
+      image: `${outputBase}.jpg`,
+      width: outputWidth,
+      height: outputHeight,
+      tileWidth,
+      tileHeight,
+      minTileX,
+      minTileY,
+      maxTileX,
+      maxTileY,
+      gridSize: 64,
+      worldUnitsPerTile: 533.3333333333334,
+      worldMapBounds: continent.worldMapBounds ?? null,
+      projection: assetKind === 'worldmap'
+        ? { type: 'worldMapArea' }
+        : { type: 'minimapTiles' },
+    }, null, 2)}\n`);
+  }
 
   return {
     outputPath,
@@ -760,6 +1144,48 @@ function stitchContinent(folderPath, continent, outputDir, quality) {
     maxTileX,
     maxTileY,
     folderPath,
+    metadataPath,
+  };
+}
+
+function stitchFloorTarget(target, outputDir, quality) {
+  const floorSummaries = target.floors.map((floor) => ({
+    floor,
+    summary: stitchContinent(
+      floor.folderPath,
+      { ...target, assetKind: 'worldmap' },
+      outputDir,
+      quality,
+      false,
+      `${target.mapId}-floor-${floor.floorIndex}`,
+    ),
+  }));
+  const primary = floorSummaries[0].summary;
+  const metadataPath = path.join(outputDir, `${target.mapId}.json`);
+  fs.writeFileSync(metadataPath, `${JSON.stringify({
+    schemaVersion: 2,
+    mapId: target.mapId,
+    label: target.label,
+    mapType: target.mapType ?? null,
+    mapTypeLabel: target.mapTypeLabel ?? null,
+    clientDirectory: target.candidates[0] ?? null,
+    projection: { type: 'dungeonFloors' },
+    floors: floorSummaries.map(({ floor, summary }) => ({
+      id: floor.id,
+      floorIndex: floor.floorIndex,
+      image: path.basename(summary.outputPath),
+      width: summary.width,
+      height: summary.height,
+      bounds: floor.bounds,
+      chunks: floor.chunks,
+    })),
+  }, null, 2)}\n`);
+  return {
+    ...primary,
+    outputPath: primary.outputPath,
+    metadataPath,
+    tileCount: floorSummaries.reduce((total, floor) => total + floor.summary.tileCount, 0),
+    floorCount: floorSummaries.length,
   };
 }
 
@@ -794,45 +1220,117 @@ async function main() {
     fail(`JPEG quality must be an integer between 1 and 100. Received: ${options.quality}`);
     return;
   }
+  if (options.mapIds.some((mapId) => !Number.isInteger(mapId) || mapId < 0)) {
+    fail(`Map IDs must be non-negative integers. Received: ${options.mapIds.join(', ')}`);
+    return;
+  }
+  if (options.mapIds.length > 0 && options.allInstances) {
+    fail('--map and --all-instances are mutually exclusive.');
+    return;
+  }
+  if (options.mapDir && options.mapIds.length !== 1) {
+    fail('--map-dir requires exactly one --map value.');
+    return;
+  }
 
   ensureDir(options.output);
 
   let workspaceDir = options.workspace;
   let tempWorkspaceCreated = false;
   let minimapRoot = locateMinimapRoot(options.source);
+  let targets = CONTINENTS;
+  let missingTargets = [];
 
   if (minimapRoot) {
+    if (options.allInstances) {
+      throw new Error('--all-instances requires a WoW client source so Map.dbc can be read.');
+    }
+    if (options.mapIds.length > 0) {
+      if (!options.mapDir) throw new Error('When --source is an extracted World/Minimaps tree, --map-dir is required with --map.');
+      targets = [{ mapId: options.mapIds[0], label: `Map ${options.mapIds[0]}`, candidates: [options.mapDir] }];
+    }
     console.log(`• Found extracted minimaps at ${minimapRoot}`);
   } else {
     workspaceDir = workspaceDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'wow-admin-minimaps-'));
     tempWorkspaceCreated = !options.workspace;
-    minimapRoot = extractMinimapsFromMpqs(options.source, workspaceDir);
-    if (!minimapRoot) {
+    const extraction = extractMinimapsFromMpqs(
+      options.source,
+      workspaceDir,
+      options.mapIds,
+      options.mapDir,
+      options.allInstances,
+    );
+    if (!extraction?.minimapRoot) {
       throw new Error('Unable to find World/Minimaps after extraction. Point --source at an extracted minimap directory or verify your WoW client data files.');
     }
+    minimapRoot = extraction.minimapRoot;
+    targets = extraction.targets;
+    missingTargets = extraction.missingTargets ?? [];
     console.log(`• Extracted minimaps into ${minimapRoot}`);
   }
 
   const summaries = [];
 
-  for (const continent of CONTINENTS) {
-    const folderPath = findContinentFolder(minimapRoot, continent.candidates);
+  const targetedExtraction = options.mapIds.length > 0 || options.allInstances;
+  for (const continent of targets) {
+    if (continent.assetKind === 'worldmapFloors') {
+      console.log(`• Stitching ${continent.label} (${continent.floors.length} floors)...`);
+      const summary = stitchFloorTarget(continent, options.output, options.quality);
+      summaries.push({ continent, ...summary });
+      console.log(`  ✓ Wrote ${summary.floorCount} floor image(s) (${summary.tileCount} tiles)`);
+      continue;
+    }
+
+    const folderPath = continent.folderPath ?? findContinentFolder(minimapRoot, continent.candidates);
     if (!folderPath) {
       console.warn(`! Skipping ${continent.label}: could not find a minimap folder matching ${continent.candidates.join(', ')}`);
       continue;
     }
 
     console.log(`• Stitching ${continent.label} from ${path.basename(folderPath)}...`);
-    const summary = stitchContinent(folderPath, continent, options.output, options.quality);
+    const summary = stitchContinent(folderPath, continent, options.output, options.quality, targetedExtraction);
     summaries.push({ continent, ...summary });
     console.log(`  ✓ Wrote ${path.basename(summary.outputPath)} (${summary.width}×${summary.height}, ${summary.tileCount} tiles)`);
   }
 
   if (summaries.length === 0) {
-    throw new Error('No continent maps were produced. Check the extracted minimap folder names and tile naming format.');
+    throw new Error('No maps were produced. Check the resolved minimap folder names and tile naming format.');
   }
 
-  console.log('\nDone. Generated continent maps:');
+  if (options.allInstances) {
+    const indexPath = path.join(options.output, 'index.json');
+    fs.writeFileSync(indexPath, `${JSON.stringify({
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      requestedMapCount: summaries.length + missingTargets.length,
+      generatedMapCount: summaries.length,
+      missingMapCount: missingTargets.length,
+      maps: summaries.map((summary) => ({
+        mapId: summary.continent.mapId,
+        label: summary.continent.label,
+        mapType: summary.continent.mapType,
+        mapTypeLabel: summary.continent.mapTypeLabel,
+        image: path.basename(summary.outputPath),
+        metadata: path.basename(summary.metadataPath),
+        width: summary.width,
+        height: summary.height,
+        projection: summary.continent.assetKind === 'worldmapFloors'
+          ? 'dungeonFloors'
+          : summary.continent.assetKind === 'worldmap' ? 'worldMapArea' : 'minimapTiles',
+        floorCount: summary.floorCount ?? null,
+      })),
+      missingMaps: missingTargets.map((target) => ({
+        mapId: target.mapId,
+        label: target.label,
+        mapType: target.mapType,
+        mapTypeLabel: target.mapTypeLabel,
+        clientDirectory: target.candidates[0] ?? null,
+      })),
+    }, null, 2)}\n`);
+    console.log(`  ✓ Wrote ${indexPath}`);
+  }
+
+  console.log(`\nDone. Generated ${targetedExtraction ? 'instance' : 'continent'} maps:`);
   for (const summary of summaries) {
     console.log(`  - ${summary.continent.label}: ${summary.outputPath}`);
   }

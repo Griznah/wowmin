@@ -1,8 +1,12 @@
 /// <reference path="./types/window.d.ts" />
-import { ts, escapeHtml, showResult, debounce, getMapName, getZoneName, CLASS_COLORS, RACE_ICONS, RACE_NAMES, CLASS_NAMES } from './utils/helpers';
+import { ts, escapeHtml, showResult, debounce, getMapName, CLASS_COLORS, RACE_ICONS, RACE_NAMES, CLASS_NAMES } from './utils/helpers';
+import { parseOnlineList, playersFromDatabase } from './utils/online-players';
+import { type ActiveInstanceSession, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getInstanceCoordinateBounds, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, groupActiveInstanceSessions, parseInstanceSessionKey, projectInstancePosition, projectMinimapTilePosition, zoomInstanceViewAt } from './utils/instance-watch';
 import { CONTINENT_BOUNDS, worldToCanvas } from './utils/map-coords';
+import { getEnglishMotd, getServerUptime } from './utils/dashboard-data';
+import { calculateSessionTotalsAt, formatSessionReplayTime, isSessionRouteDiscontinuity } from './utils/session-replay';
 import { AppState, createInitialState, PlayerInfo } from './types/state';
-import type { ConnectionProfile, DbConfig, SoapConfig, UpdateCheckResult, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, LlmConfig, LlmTaskType, LlmChatContext, QueryResult, MapBotWaypoint, CharacterInventoryResult, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow } from '../../src/types/electron';
+import type { ConnectionProfile, DbConfig, SoapConfig, UpdateCheckResult, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, MapBattlegroundState, MapInstanceDeath, MapInstanceState, MapPlayerPosition, MapBotWaypoint, CharacterInventoryResult, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow, SessionIndexEntry, SessionRecord, SessionRoutePoint } from '../../src/types/electron';
 import { bindInventoryTableTooltips, formatInventoryLocation, ITEM_QUALITY_COLOR } from './inventory/wow-item-tooltip';
 
 // ── Application State ────────────────────────────────────────────────────
@@ -100,10 +104,6 @@ const $logAppendersTable = $<HTMLElement>('log-appenders-table');
 const $logLoggersTable = $<HTMLElement>('log-loggers-table');
 
 // Economy elements
-const $economyDbHost = $<HTMLInputElement>('economy-db-host');
-const $economyDbPort = $<HTMLInputElement>('economy-db-port');
-const $economyDbUser = $<HTMLInputElement>('economy-db-user');
-const $economyDbPass = $<HTMLInputElement>('economy-db-pass');
 const $economyDbName = $<HTMLInputElement>('economy-db-name');
 const $economyWorldDbName = $<HTMLInputElement>('economy-world-db-name');
 const $economyDbConnectBtn = $<HTMLButtonElement>('economy-db-connect-btn');
@@ -135,6 +135,8 @@ const $modalCancel = $<HTMLButtonElement>('modal-cancel');
 const $dashServerInfo = $<HTMLElement>('dash-server-info');
 const $uptimeValue = $<HTMLElement>('uptime-value');
 const $playersCount = $<HTMLElement>('players-count');
+const $botsCount = $<HTMLElement>('bots-count');
+const $totalCount = $<HTMLElement>('total-count');
 const $peakCount = $<HTMLElement>('peak-count');
 const $dashMotd = $<HTMLElement>('dash-motd');
 const $activityLog = $<HTMLElement>('activity-log');
@@ -156,6 +158,25 @@ const $paExtraLabel = $<HTMLLabelElement>('pa-extra-label');
 const $playerActionResult = $<HTMLElement>('player-action-result');
 
 let inventoryTooltipCleanup: (() => void) | null = null;
+
+// Stack related account actions in independent columns instead of stretching short cards to row height.
+const accountsGrid = document.querySelector<HTMLElement>('.accounts-grid');
+if (accountsGrid) {
+  for (const group of [
+    ['create-account-form', 'change-password-form'],
+    ['set-addon-form', 'gm-level-form', 'delete-account-form'],
+    ['account-lookup-form', 'btn-online-accounts', 'baninfo-form', 'banlist-form'],
+    ['ban-form', 'ip-ban-form'],
+  ]) {
+    const column = document.createElement('div');
+    column.className = 'accounts-column';
+    for (const id of group) {
+      const card = document.getElementById(id)?.closest('.card');
+      if (card) column.appendChild(card);
+    }
+    if (column.childElementCount) accountsGrid.appendChild(column);
+  }
+}
 
 // ── Modal Functions ───────────────────────────────────────────────────────
 interface ModalOptions {
@@ -530,7 +551,7 @@ async function refreshUpdateStatus(force = false): Promise<void> {
 }
 
 // ── Main tab navigation ─────────────────────────────────────────────────────
-const MAIN_TAB_ORDER = ['dashboard', 'players', 'accounts', 'tickets', 'database', 'map', 'economy', 'logs', 'console'] as const;
+const MAIN_TAB_ORDER = ['dashboard', 'players', 'accounts', 'tickets', 'database', 'map', 'instances', 'history', 'economy', 'logs', 'console'] as const;
 type MainTabId = (typeof MAIN_TAB_ORDER)[number];
 
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -553,12 +574,24 @@ function getActiveMainTabId(): MainTabId {
 }
 
 function onMainTabActivated(tabId: MainTabId): void {
+  if (tabId === 'dashboard' && state.connected) void refreshDashboard();
+  if (tabId === 'players' && (state.connected || state.mapDbConnected)) void refreshPlayers();
+  if (tabId === 'economy' && economyState.connected) void refreshEconomyData();
+  if (tabId === 'history') void refreshSessionHistory();
+  else pauseSessionReplay();
+  if (tabId === 'instances') {
+    if (state.connected) void refreshInstanceWatcher();
+    startInstanceWatcherPolling();
+  } else {
+    stopInstanceWatcherPolling();
+  }
   if (tabId === 'tickets' && state.connected) {
     void loadTickets();
   }
 
   if (tabId === 'map') {
-    Object.keys(CONTINENT_BOUNDS).forEach((cid) => preloadMapImage(Number(cid)));
+    preloadMapImage(state.mapSelectedContinent);
+    if (state.mapDbConnected) void refreshMapPositions();
     requestAnimationFrame(() => renderMapCanvas());
   }
 }
@@ -674,6 +707,13 @@ $btnDisconnect?.addEventListener('click', async () => {
   setConnected(false);
   stopDashboardAutoRefresh();
   stopPlayersAutoRefresh();
+  stopInstanceWatcherPolling();
+  activeInstanceSessions = [];
+  selectedInstanceKey = null;
+  instanceTrails = new Map();
+  instanceViewBounds = new Map();
+  if ($instanceWatchStatus) $instanceWatchStatus.textContent = 'Disconnected from world telemetry';
+  renderInstanceWatcher();
   if (ticketAutoInterval) {
     clearInterval(ticketAutoInterval);
     ticketAutoInterval = null;
@@ -780,26 +820,41 @@ function resetDashboard(): void {
   if ($dashServerInfo) $dashServerInfo.innerHTML = '<p class="placeholder">Connect to view server information</p>';
   if ($uptimeValue) $uptimeValue.textContent = '--';
   if ($playersCount) $playersCount.textContent = '--';
+  if ($botsCount) $botsCount.textContent = '--';
+  if ($totalCount) $totalCount.textContent = '--';
   if ($peakCount) $peakCount.textContent = '--';
   if ($dashMotd) $dashMotd.innerHTML = '<p class="placeholder">--</p>';
 }
 
+let dashboardRefreshInFlight = false;
 async function refreshDashboard(): Promise<void> {
-  if (!state.connected) return;
+  if (!state.connected || dashboardRefreshInFlight) return;
+  dashboardRefreshInFlight = true;
+  try {
+    const info = await exec('server info');
+    if (info.success) parseServerInfo(info.message);
+    if ($uptimeValue) $uptimeValue.textContent = info.success ? getServerUptime(info.message) || '--' : '--';
 
-  const info = await exec('server info');
-  if (info.success) {
-    parseServerInfo(info.message);
-  }
+    try {
+      const counts = await window.electronAPI.map.getOnlineCounts();
+      if ($playersCount) $playersCount.textContent = String(counts.players);
+      if ($botsCount) $botsCount.textContent = String(counts.bots);
+      if ($totalCount) $totalCount.textContent = String(counts.total);
+    } catch {
+      // The map connection may not be ready yet; the console list is available with SOAP alone.
+      const online = await exec('account onlinelist');
+      if (online.success) {
+        const players = parseOnlineList(online.message);
+        if ($playersCount) $playersCount.textContent = String(players.filter((player) => !player.isBot).length);
+        if ($botsCount) $botsCount.textContent = String(players.filter((player) => player.isBot).length);
+        if ($totalCount) $totalCount.textContent = String(players.length);
+      }
+    }
 
-  const up = await exec('server uptime');
-  if (up.success && $uptimeValue) {
-    $uptimeValue.textContent = up.message.replace(/^Server uptime:\s*/i, '').trim() || up.message;
-  }
-
-  const motd = await exec('server motd');
-  if (motd.success && $dashMotd) {
-    $dashMotd.innerHTML = `<p>${escapeHtml(motd.message)}</p>`;
+    const motd = await exec('server motd');
+    if ($dashMotd) $dashMotd.textContent = motd.success ? getEnglishMotd(motd.message) || '--' : '--';
+  } finally {
+    dashboardRefreshInFlight = false;
   }
 }
 
@@ -810,7 +865,6 @@ function parseServerInfo(msg: string): void {
   const charsMatch = msg.match(/Characters in world:\s*(\d+)/i);
   const peakMatch = msg.match(/Connection peak:\s*(\d+)/i);
 
-  if (playersMatch && $playersCount) $playersCount.textContent = playersMatch[1];
   if (peakMatch && $peakCount) $peakCount.textContent = peakMatch[1];
 
   let html = '';
@@ -818,7 +872,7 @@ function parseServerInfo(msg: string): void {
     html += `<div class="info-line"><span class="info-label">Version</span><span class="info-value">${escapeHtml(lines[0])}</span></div>`;
   }
   if (playersMatch) {
-    html += `<div class="info-line"><span class="info-label">Players Online</span><span class="info-value">${playersMatch[1]}</span></div>`;
+    html += `<div class="info-line"><span class="info-label">Connected Sessions</span><span class="info-value">${playersMatch[1]}</span></div>`;
   }
   if (charsMatch) {
     html += `<div class="info-line"><span class="info-label">Characters in World</span><span class="info-value">${charsMatch[1]}</span></div>`;
@@ -844,7 +898,9 @@ function parseServerInfo(msg: string): void {
 
 function startDashboardAutoRefresh(): void {
   stopDashboardAutoRefresh();
-  state.dashboardInterval = setInterval(refreshDashboard, 30000);
+  state.dashboardInterval = setInterval(() => {
+    if (getActiveMainTabId() === 'dashboard') void refreshDashboard();
+  }, 10000);
 }
 
 function stopDashboardAutoRefresh(): void {
@@ -901,44 +957,6 @@ $btnClearLog?.addEventListener('click', () => {
 });
 
 // ── Players Tab ────────────────────────────────────────────────────────────
-function parseOnlineList(msg: string): PlayerInfo[] {
-  const players: PlayerInfo[] = [];
-  const lines = msg.split(/[\r\n]+/).map((l) => l.trim()).filter(Boolean);
-
-  for (const line of lines) {
-    const m = line.match(/^-\[([^\]]+)\]\[([^\]]+)\]\[([^\]]+)\]\[([^\]]+)\]\[([^\]]+)\]\[([^\]]+)\]\[([^\]]+)\]-$/);
-    if (!m) continue;
-
-    const account = m[1];
-    const name = m[2];
-    const ip = m[3];
-    const mapId = parseInt(m[4], 10);
-    const zoneId = parseInt(m[5], 10);
-    const expansion = parseInt(m[6], 10);
-    const gmLevel = parseInt(m[7], 10);
-    const isBot = /^RNDBOT/i.test(account);
-
-    players.push({
-      account,
-      name,
-      ip,
-      mapId,
-      zoneId,
-      expansion,
-      gmLevel,
-      isBot,
-      mapName: getMapName(mapId),
-      zoneName: getZoneName(zoneId),
-      level: '',
-      race: '',
-      className: '',
-      raceId: 0,
-      classId: 0,
-    });
-  }
-  return players;
-}
-
 function populateMapFilter(players: PlayerInfo[]): void {
   const maps = new Set<number>();
   players.forEach((p) => maps.add(p.mapId));
@@ -970,7 +988,7 @@ function updatePlayerStats(): void {
   if ($statAccounts) $statAccounts.textContent = String(accounts.size);
 }
 
-function applyPlayersFilter(): void {
+function applyPlayersFilter(resetPage = true): void {
   const search = ($playersSearch?.value || '').toLowerCase();
   const filterType = $playersFilterType?.value || 'all';
   const filterMap = $playersFilterMap?.value || '';
@@ -991,7 +1009,7 @@ function applyPlayersFilter(): void {
 
   sortPlayers();
   updatePlayerStats();
-  state.playersPage = 1;
+  if (resetPage) state.playersPage = 1;
   renderPlayersTable();
 }
 
@@ -1119,44 +1137,39 @@ function updatePagination(total: number, perPage: number): void {
   if ($pgLast) $pgLast.disabled = state.playersPage >= maxPage;
 }
 
+let playersRefreshInFlight = false;
 async function refreshPlayers(): Promise<void> {
-  if (!state.connected) {
-    if ($playersTbody) {
-      $playersTbody.innerHTML = `<tr><td colspan="9" class="placeholder">Not connected to server</td></tr>`;
+  if (playersRefreshInFlight) return;
+  if (!state.connected && !state.mapDbConnected) {
+    if ($playersTbody) $playersTbody.innerHTML = '<tr><td colspan="9" class="placeholder">Not connected to server</td></tr>';
+    return;
+  }
+
+  playersRefreshInFlight = true;
+  try {
+    try {
+      state.allPlayers = playersFromDatabase(await window.electronAPI.players.getOnline());
+    } catch (error) {
+      if (!state.connected) throw error;
+      const result = await exec('account onlinelist');
+      if (!result.success) throw new Error(result.message);
+      state.allPlayers = parseOnlineList(result.message);
     }
-    return;
+    populateMapFilter(state.allPlayers);
+    applyPlayersFilter(false);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if ($playersTbody) $playersTbody.innerHTML = `<tr><td colspan="9" class="placeholder">${escapeHtml(message)}</td></tr>`;
+  } finally {
+    playersRefreshInFlight = false;
   }
-
-  const r = await exec('account onlinelist');
-  if (!$playersTbody) return;
-  
-  if (!r.success) {
-    $playersTbody.innerHTML = `<tr><td colspan="9" class="placeholder">${escapeHtml(r.message)}</td></tr>`;
-    return;
-  }
-
-  state.allPlayers = parseOnlineList(r.message);
-  if (state.allPlayers.length === 0) {
-    $playersTbody.innerHTML = `<tr><td colspan="9" class="placeholder">No players online</td></tr>`;
-    updatePlayerStats();
-    return;
-  }
-
-  populateMapFilter(state.allPlayers);
-  applyPlayersFilter();
-
-  // Batch-fetch pinfo for all online players to populate level, race, and class
-  await Promise.all(
-    state.allPlayers.map(async (player) => {
-      const pr = await exec(`pinfo ${player.name}`);
-      if (pr.success) enrichPlayerFromPinfo(player.name, pr.message);
-    })
-  );
 }
 
 function startPlayersAutoRefresh(): void {
   stopPlayersAutoRefresh();
-  state.playersInterval = setInterval(refreshPlayers, 10000);
+  state.playersInterval = setInterval(() => {
+    if (getActiveMainTabId() === 'players') void refreshPlayers();
+  }, 3000);
 }
 
 function stopPlayersAutoRefresh(): void {
@@ -1186,10 +1199,10 @@ $('pg-last')?.addEventListener('click', () => {
 });
 
 // Search & filter handlers
-const debouncedFilter = debounce(applyPlayersFilter, 200);
+const debouncedFilter = debounce(() => applyPlayersFilter(), 200);
 $playersSearch?.addEventListener('input', debouncedFilter);
-$playersFilterType?.addEventListener('change', applyPlayersFilter);
-$playersFilterMap?.addEventListener('change', applyPlayersFilter);
+$playersFilterType?.addEventListener('change', () => applyPlayersFilter());
+$playersFilterMap?.addEventListener('change', () => applyPlayersFilter());
 $playersPerPage?.addEventListener('change', () => {
   state.playersPage = 1;
   renderPlayersTable();
@@ -1556,12 +1569,28 @@ $('btn-unban')?.addEventListener('click', async () => {
 });
 
 $('btn-online-accounts')?.addEventListener('click', async () => {
-  if (!state.connected) return;
-
-  const result = await exec('account onlinelist');
   const resultEl = $<HTMLElement>('online-accounts-result');
-  if (resultEl) showResult(resultEl, result.success, result.message || 'No accounts online.');
-  logActivity('account onlinelist', result.message || '(done)', result.success);
+  try {
+    let players: PlayerInfo[];
+    try {
+      players = playersFromDatabase(await window.electronAPI.players.getOnline());
+    } catch (error) {
+      if (!state.connected) throw error;
+      const response = await exec('account onlinelist');
+      if (!response.success) throw new Error(response.message);
+      players = parseOnlineList(response.message);
+    }
+    const accounts = new Map<string, number>();
+    for (const player of players) accounts.set(player.account, (accounts.get(player.account) || 0) + 1);
+    const list = [...accounts].sort(([left], [right]) => left.localeCompare(right))
+      .map(([name, count]) => `${name}: ${count} character(s)`);
+    const summary = `${accounts.size} account(s), ${players.length} character(s) online.`;
+    if (resultEl) showResult(resultEl, true, [summary, ...list].join('\n'));
+    logActivity('online accounts', summary, true);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (resultEl) showResult(resultEl, false, message);
+  }
 });
 
 $('delete-account-form')?.addEventListener('submit', async (e) => {
@@ -1952,10 +1981,10 @@ $<HTMLInputElement>('auto-refresh-tickets')?.addEventListener('change', (event) 
 
   if (checked) {
     ticketAutoInterval = setInterval(() => {
-      if (state.connected) {
+      if (state.connected && getActiveMainTabId() === 'tickets') {
         void loadTickets();
       }
-    }, 30000);
+    }, 10000);
   }
 });
 
@@ -2636,8 +2665,6 @@ const $sqlExecuteBtn = $<HTMLButtonElement>('sql-execute-btn');
 const $sqlExecuteSelectedBtn = $<HTMLButtonElement>('sql-execute-selected-btn');
 const $sqlClearBtn = $<HTMLButtonElement>('sql-clear-btn');
 const $sqlFormatBtn = $<HTMLButtonElement>('sql-format-btn');
-const $sqlHistoryBtn = $<HTMLButtonElement>('sql-history-btn');
-const $sqlAutocommit = $<HTMLInputElement>('sql-autocommit');
 const $sqlResultInfo = $<HTMLElement>('sql-result-info');
 const $sqlResults = $<HTMLElement>('sql-results');
 const $sqlExportBtn = $<HTMLButtonElement>('sql-export-btn');
@@ -2682,6 +2709,7 @@ $dbType?.addEventListener('change', () => {
 
 // Database connection
 $dbConnectBtn?.addEventListener('click', async () => {
+  if (!$dbConnectBtn) return;
   const config = {
     host: $dbHost?.value.trim() || '127.0.0.1',
     port: Number($dbPort?.value.trim() || '3306'),
@@ -2736,7 +2764,7 @@ $dbDisconnectBtn?.addEventListener('click', async () => {
     
     $dbStatusText!.textContent = 'Disconnected';
     $dbStatusText!.className = 'text-status-danger db-status-disconnected';
-    $dbConnectBtn.disabled = false;
+    if ($dbConnectBtn) $dbConnectBtn.disabled = false;
     $dbDisconnectBtn!.disabled = true;
     $dbRefreshTables!.disabled = true;
     $dbTableSearch!.disabled = true;
@@ -3147,7 +3175,7 @@ document.querySelectorAll<HTMLButtonElement>('.db-subtabs [role="tab"]').forEach
   });
 });
 
-document.querySelector('.db-subtabs')?.addEventListener('keydown', (e) => {
+document.querySelector<HTMLElement>('.db-subtabs')?.addEventListener('keydown', (e) => {
   if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
   const bar = e.currentTarget;
   if (!(bar instanceof HTMLElement) || !(e.target instanceof Node) || !bar.contains(e.target)) return;
@@ -5159,8 +5187,11 @@ function renderEconomyAuctionResults(rows: EconomyAuctionRow[]): void {
   `;
 }
 
+let economyRefreshInFlight = false;
+let economyRefreshTimer: ReturnType<typeof setInterval> | null = null;
 async function refreshEconomyData(): Promise<void> {
-  if (!economyState.connected) return;
+  if (!economyState.connected || economyRefreshInFlight) return;
+  economyRefreshInFlight = true;
 
   const searchTerm = $economySearchTerm?.value.trim() || '';
   const limit = getEconomyResultLimit();
@@ -5183,6 +5214,7 @@ async function refreshEconomyData(): Promise<void> {
     const message = error instanceof Error ? error.message : String(error);
     showResult($economyDbStatus, false, message);
   } finally {
+    economyRefreshInFlight = false;
     if ($economyRefreshBtn) $economyRefreshBtn.disabled = false;
     if ($economyRunSearchBtn) $economyRunSearchBtn.disabled = false;
   }
@@ -5204,7 +5236,11 @@ async function connectEconomyDb(): Promise<void> {
     economyState.connected = true;
     showResult($economyDbStatus, true, `Connected to ${result.database}`);
     if ($economyDbDisconnectBtn) $economyDbDisconnectBtn.disabled = false;
-    await refreshEconomyData();
+    if (getActiveMainTabId() === 'economy') await refreshEconomyData();
+    if (economyRefreshTimer) clearInterval(economyRefreshTimer);
+    economyRefreshTimer = setInterval(() => {
+      if (getActiveMainTabId() === 'economy') void refreshEconomyData();
+    }, 5000);
   } catch (error) {
     economyState.connected = false;
     const message = error instanceof Error ? error.message : String(error);
@@ -5215,6 +5251,8 @@ async function connectEconomyDb(): Promise<void> {
 }
 
 async function disconnectEconomyDb(): Promise<void> {
+  if (economyRefreshTimer) clearInterval(economyRefreshTimer);
+  economyRefreshTimer = null;
   await window.electronAPI.economy.disconnect();
   economyState.connected = false;
   if ($economyDbDisconnectBtn) $economyDbDisconnectBtn.disabled = true;
@@ -5272,18 +5310,6 @@ resetEconomyTab();
 // LIVE MAP TAB
 // ═══════════════════════════════════════════════════════════════════════════
 
-interface MapPlayerPosition {
-  name: string;
-  map: number;
-  position_x: number;
-  position_y: number;
-  position_z: number;
-  level: number;
-  race: number;
-  class: number;
-  account: string;
-}
-
 // ── DOM references ─────────────────────────────────────────────────────────
 const $mapDbConnectBtn    = $<HTMLButtonElement>('map-db-connect-btn');
 const $mapDbDisconnectBtn = $<HTMLButtonElement>('map-db-disconnect-btn');
@@ -5306,6 +5332,11 @@ const $mapZoomResetBtn    = $<HTMLButtonElement>('map-zoom-reset-btn');
 const $mapInteractionHint = $<HTMLElement>('map-interaction-hint');
 
 let mapAllPlayers: MapPlayerPosition[] = [];
+let mapPreviousPositions = new Map<string, Pick<MapPlayerPosition, 'position_x' | 'position_y' | 'position_z'>>();
+let mapMovingPlayers = new Set<string>();
+let mapMovementStartedAt = 0;
+let mapMovementFrame: number | null = null;
+const MAP_MOVEMENT_ANIMATION_MS = 850;
 const mapImageCache = new Map<number, HTMLImageElement | 'failed'>();
 let mapSelectedPlayerName: string | null = null;
 let mapSelectedBotWaypoint: MapBotWaypoint | null = null;
@@ -5341,8 +5372,31 @@ function derivePlayerbotsDatabaseName(charactersDatabaseName: string): string {
   return 'acore_playerbots';
 }
 
-function isMapBot(player: Pick<MapPlayerPosition, 'account'> | null | undefined): boolean {
-  return Boolean(player && /^RNDBOT/i.test(player.account));
+function isMapBot(player: Pick<MapPlayerPosition, 'account' | 'isBot'> | null | undefined): boolean {
+  return Boolean(player && (player.isBot || /^RNDBOT/i.test(player.account)));
+}
+
+function getRenderedMapPosition(player: MapPlayerPosition): Pick<MapPlayerPosition, 'position_x' | 'position_y'> {
+  const previous = mapPreviousPositions.get(player.name);
+  if (!previous || !mapMovementStartedAt) return player;
+  const progress = Math.min(1, Math.max(0, (performance.now() - mapMovementStartedAt) / MAP_MOVEMENT_ANIMATION_MS));
+  return {
+    position_x: previous.position_x + (player.position_x - previous.position_x) * progress,
+    position_y: previous.position_y + (player.position_y - previous.position_y) * progress,
+  };
+}
+
+function animateMapMovement(): void {
+  if (mapMovementFrame !== null) cancelAnimationFrame(mapMovementFrame);
+  const draw = (): void => {
+    if (getActiveMainTabId() === 'map') renderMapCanvas();
+    if (performance.now() - mapMovementStartedAt < MAP_MOVEMENT_ANIMATION_MS) {
+      mapMovementFrame = requestAnimationFrame(draw);
+    } else {
+      mapMovementFrame = null;
+    }
+  };
+  mapMovementFrame = requestAnimationFrame(draw);
 }
 
 function getSelectedMapPlayer(): MapPlayerPosition | null {
@@ -5618,7 +5672,7 @@ function getMapFilteredPlayers(): MapPlayerPosition[] {
   const maxLevel = Number.isFinite(maxRaw) && maxRaw > 0 ? maxRaw : Infinity;
   return mapAllPlayers.filter((p) => {
     if (p.map !== continent) return false;
-    const isBot = /^RNDBOT/i.test(p.account);
+    const isBot = isMapBot(p);
     if (filterVal === 'real' && isBot) return false;
     if (filterVal === 'bots' && !isBot) return false;
     if (p.level < minLevel || p.level > maxLevel) return false;
@@ -5675,25 +5729,51 @@ async function disconnectMapDb(): Promise<void> {
 }
 
 // ── Refresh ────────────────────────────────────────────────────────────────
+let mapRefreshInFlight = false;
 async function refreshMapPositions(): Promise<void> {
-  if (!state.mapDbConnected) return;
+  if (!state.mapDbConnected || mapRefreshInFlight) return;
+  mapRefreshInFlight = true;
   try {
-    mapAllPlayers = await window.electronAPI.map.getPlayerPositions();
-  } catch {
-    // transient error – keep last known positions
+    try {
+      const previousPlayers = new Map(mapAllPlayers.map((player) => [player.name, player]));
+      const snapshot = await window.electronAPI.map.getPlayerPositions(state.mapSelectedContinent);
+      mapPreviousPositions = new Map();
+      mapMovingPlayers = new Set();
+      for (const player of snapshot.players) {
+        const previous = previousPlayers.get(player.name);
+        if (!previous || previous.map !== player.map || previous.instanceId !== player.instanceId) continue;
+        mapPreviousPositions.set(player.name, previous);
+        const distance = Math.hypot(player.position_x - previous.position_x, player.position_y - previous.position_y);
+        if (distance >= 0.5) mapMovingPlayers.add(player.name);
+      }
+      mapAllPlayers = snapshot.players;
+      mapMovementStartedAt = performance.now();
+      animateMapMovement();
+      if ($mapStatusText) {
+        const source = snapshot.source === 'worldserver' ? 'LIVE world state' : 'DB fallback (saved positions)';
+        $mapStatusText.textContent = `${source} • ${mapMovingPlayers.size} moving • ${new Date(snapshot.capturedAt).toLocaleTimeString()}`;
+      }
+    } catch {
+      if ($mapStatusText) $mapStatusText.textContent = 'Position refresh failed; showing last snapshot';
+    }
+    const shown = getMapFilteredPlayers().length;
+    if ($mapPlayerCount) $mapPlayerCount.textContent = `${shown} on this map`;
+    if (getActiveMainTabId() === 'map') {
+      renderMapCanvas();
+      renderMapPlayerList();
+      renderMapSelectedPanel();
+      await refreshSelectedBotWaypoint();
+    }
+  } finally {
+    mapRefreshInFlight = false;
   }
-  const shown = getMapFilteredPlayers().length;
-  if ($mapStatusText) $mapStatusText.textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
-  if ($mapPlayerCount) $mapPlayerCount.textContent = `${shown} on this map`;
-  renderMapCanvas();
-  renderMapPlayerList();
-  renderMapSelectedPanel();
-  await refreshSelectedBotWaypoint();
 }
 
 function startMapAutoRefresh(): void {
   stopMapAutoRefresh();
-  state.mapInterval = setInterval(refreshMapPositions, 5000);
+  state.mapInterval = setInterval(() => {
+    if (getActiveMainTabId() === 'map') void refreshMapPositions();
+  }, 1000);
 }
 
 function stopMapAutoRefresh(): void {
@@ -5709,8 +5789,10 @@ function renderMapCanvas(): void {
   const rect = wrapper.getBoundingClientRect();
   const W = Math.floor(rect.width)  || 800;
   const H = Math.floor(rect.height) || 500;
-  $mapCanvas.width  = W;
-  $mapCanvas.height = H;
+  // Assigning either dimension clears the canvas and resets its drawing state.
+  // Avoid resizing on ordinary telemetry redraws; only actual layout changes need it.
+  if ($mapCanvas.width !== W) $mapCanvas.width = W;
+  if ($mapCanvas.height !== H) $mapCanvas.height = H;
 
   const ctx = $mapCanvas.getContext('2d');
   if (!ctx) return;
@@ -5819,8 +5901,9 @@ function renderMapCanvas(): void {
   }
 
   for (const p of players) {
-    const { x, y } = projectWorldToViewport(p, bounds, content);
-    const isBot     = /^RNDBOT/i.test(p.account);
+    const renderedPosition = getRenderedMapPosition(p);
+    const { x, y } = projectWorldToViewport(renderedPosition, bounds, content);
+    const isBot = isMapBot(p);
     const isSelected = p.name === mapSelectedPlayerName;
     const dotColor  = isBot ? '#888' : (CLASS_COLORS[p.class] || '#4fc3f7');
 
@@ -5831,6 +5914,15 @@ function renderMapCanvas(): void {
       ctx.arc(x, y, 14, 0, Math.PI * 2);
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth = 2.5;
+      ctx.stroke();
+    }
+
+    if (mapMovingPlayers.has(p.name)) {
+      const pulse = 10 + Math.sin(performance.now() / 100) * 2;
+      ctx.beginPath();
+      ctx.arc(x, y, pulse, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(79, 195, 247, 0.85)';
+      ctx.lineWidth = 2;
       ctx.stroke();
     }
 
@@ -5883,7 +5975,7 @@ function renderMapPlayerList(): void {
   }
   let html = '';
   for (const p of players) {
-    const isBot   = /^RNDBOT/i.test(p.account);
+    const isBot = isMapBot(p);
     const color   = CLASS_COLORS[p.class] || '#ccc';
     const clsName = CLASS_NAMES[p.class]  || '';
     const isSel   = p.name === mapSelectedPlayerName;
@@ -5912,7 +6004,7 @@ function renderMapSelectedPanel(): void {
   const badgeEl   = $<HTMLElement>('map-sel-badge');
   const waypointEl = $<HTMLElement>('map-sel-waypoint');
 
-  const isBot      = /^RNDBOT/i.test(player.account);
+  const isBot = isMapBot(player);
   const raceName   = RACE_NAMES[player.race]   || `Race ${player.race}`;
   const clsName    = CLASS_NAMES[player.class]  || `Class ${player.class}`;
   const classColor = CLASS_COLORS[player.class] || 'var(--text)';
@@ -5920,8 +6012,12 @@ function renderMapSelectedPanel(): void {
 
   if (nameEl)    { nameEl.textContent = player.name; nameEl.style.color = classColor; }
   if (badgeEl)   { badgeEl.innerHTML  = isBot ? '<span class="bot-badge">BOT</span>' : ''; }
-  if (detailsEl) { detailsEl.textContent = `Lv${player.level} ${raceName} ${clsName}`; }
-  if (coordsEl)  { coordsEl.textContent  = `${mapLabel} (${player.position_x.toFixed(0)}, ${player.position_y.toFixed(0)})`; }
+  const stateLabel = player.alive ? (player.inCombat ? 'Combat' : 'Alive') : 'Dead';
+  if (detailsEl) { detailsEl.textContent = `Lv${player.level} ${raceName} ${clsName} • ${stateLabel}`; }
+  if (coordsEl) {
+    const instanceLabel = player.instanceId ? ` • instance ${player.instanceId}` : '';
+    coordsEl.textContent = `${mapLabel}${instanceLabel} (${player.position_x.toFixed(0)}, ${player.position_y.toFixed(0)})`;
+  }
   if (waypointEl) {
     if (!isBot) {
       waypointEl.textContent = '';
@@ -6068,7 +6164,7 @@ $mapCanvas?.addEventListener('mousemove', (e) => {
       `<div style="color:var(--text-muted);font-size:11px">(${hit.position_x.toFixed(0)}, ${hit.position_y.toFixed(0)})</div>` +
       (isBot ? '<div class="map-tooltip-bot">BOT</div>' : '');
     // Keep tooltip inside canvas bounds
-    const tw = 160, th = 72;
+    const tw = 160;
     const tx = mx + 14 + tw > W ? mx - tw - 6 : mx + 14;
     const ty = my - 10 < 0 ? my + 10 : my - 10;
     $mapTooltip.style.left = `${tx}px`;
@@ -6165,10 +6261,11 @@ $$<HTMLButtonElement>('.map-continent-btn').forEach((btn) => {
     resetMapZoom(false);
     mapSelectedPlayerName = null;
     clearSelectedBotWaypoint();
-    if ($mapPlayerCount) $mapPlayerCount.textContent = `${getMapFilteredPlayers().length} on this map`;
+    mapAllPlayers = [];
     renderMapCanvas();
     renderMapPlayerList();
     renderMapSelectedPanel();
+    void refreshMapPositions();
   });
 });
 
@@ -6220,3 +6317,1244 @@ if (_mapWrapper) _mapResizeObserver.observe(_mapWrapper);
 syncMapViewState();
 renderMapCanvas();
 
+// ═══════════════════════════════════════════════════════════════════════════
+// INSTANCE / BATTLEGROUND WATCH TAB
+// ═══════════════════════════════════════════════════════════════════════════
+
+const $instanceSessionSelect = $<HTMLSelectElement>('instance-session-select');
+const $instanceSessionCount = $<HTMLElement>('instance-session-count');
+const $instanceAutoRefresh = $<HTMLInputElement>('instance-auto-refresh');
+const $instanceRefreshBtn = $<HTMLButtonElement>('instance-refresh-btn');
+const $instanceFitBtn = $<HTMLButtonElement>('instance-fit-btn');
+const $instanceZoomOutBtn = $<HTMLButtonElement>('instance-zoom-out-btn');
+const $instanceZoomInBtn = $<HTMLButtonElement>('instance-zoom-in-btn');
+const $instanceClearFocusBtn = $<HTMLButtonElement>('instance-clear-focus-btn');
+const $instancePlayerList = $<HTMLElement>('instance-player-list');
+const $instanceBattlegroundCard = $<HTMLElement>('instance-battleground-card');
+const $instanceBattlegroundPhase = $<HTMLElement>('instance-battleground-phase');
+const $instanceBattlegroundScore = $<HTMLElement>('instance-battleground-score');
+const $instanceBattlegroundMeta = $<HTMLElement>('instance-battleground-meta');
+const $instanceBattlegroundObjectives = $<HTMLElement>('instance-battleground-objectives');
+const $instanceEncounterCard = $<HTMLElement>('instance-encounter-card');
+const $instanceBossList = $<HTMLElement>('instance-boss-list');
+const $instanceDeathHistory = $<HTMLElement>('instance-death-history');
+const $instanceWatchCanvas = $<HTMLCanvasElement>('instance-watch-canvas');
+const $instanceWatchEmpty = $<HTMLElement>('instance-watch-empty');
+const $instanceWatchTitle = $<HTMLElement>('instance-watch-title');
+const $instanceWatchSubtitle = $<HTMLElement>('instance-watch-subtitle');
+const $instanceWatchStatus = $<HTMLElement>('instance-watch-status');
+const $instanceWatchPlayerCount = $<HTMLElement>('instance-watch-player-count');
+
+interface InstanceTrailPoint {
+  position_x: number;
+  position_y: number;
+  position_z: number;
+  wmoGroupId?: number;
+  alive: boolean;
+}
+
+interface InstanceMapAssetMetadata {
+  schemaVersion: number;
+  mapId: number;
+  image?: string;
+  width?: number;
+  height?: number;
+  minTileX?: number;
+  minTileY?: number;
+  maxTileX?: number;
+  maxTileY?: number;
+  gridSize?: number;
+  worldUnitsPerTile?: number;
+  worldMapBounds?: InstanceCoordinateBounds | null;
+  projection?: { type: 'worldMapArea' | 'minimapTiles' | 'dungeonFloors' };
+  floors?: DungeonMapFloor[];
+}
+
+interface LoadedInstanceMapAsset {
+  metadata: InstanceMapAssetMetadata;
+  image?: HTMLImageElement;
+  floorImages: Map<number, HTMLImageElement>;
+}
+
+let activeInstanceSessions: ActiveInstanceSession[] = [];
+let activeBattlegrounds = new Map<string, MapBattlegroundState>();
+let activeInstanceStates = new Map<string, MapInstanceState>();
+let activeInstanceDeaths = new Map<string, MapInstanceDeath[]>();
+let selectedInstanceKey: string | null = null;
+let selectedInstancePlayerName: string | null = null;
+let instanceRefreshInFlight = false;
+let instanceRefreshInterval: ReturnType<typeof setInterval> | null = null;
+let instanceLastDiscoveryAt = 0;
+let instanceTrails = new Map<string, InstanceTrailPoint[]>();
+let instanceViewBounds = new Map<string, InstanceCoordinateBounds>();
+const instanceViewTransforms = new Map<string, InstanceViewTransform>();
+const instanceSelectedFloorIds = new Map<string, number>();
+let instanceBaseViewport: InstanceProjectionViewport | null = null;
+let instanceMarkerHitAreas: Array<{ name: string; x: number; y: number; radius: number }> = [];
+let instancePanStart: { x: number; y: number; panX: number; panY: number; moved: boolean } | null = null;
+const instanceMapAssets = new Map<number, LoadedInstanceMapAsset | null>();
+const instanceMapAssetLoads = new Set<number>();
+const INSTANCE_DISCOVERY_INTERVAL_MS = 10_000;
+
+function getSelectedInstanceSession(): ActiveInstanceSession | null {
+  return activeInstanceSessions.find((session) => session.key === selectedInstanceKey) ?? null;
+}
+
+function getSelectedBattleground(): MapBattlegroundState | null {
+  return selectedInstanceKey ? activeBattlegrounds.get(selectedInstanceKey) ?? null : null;
+}
+
+function getSelectedInstanceState(): MapInstanceState | null {
+  return selectedInstanceKey ? activeInstanceStates.get(selectedInstanceKey) ?? null : null;
+}
+
+function getSelectedInstanceDeaths(): MapInstanceDeath[] {
+  return selectedInstanceKey ? activeInstanceDeaths.get(selectedInstanceKey) ?? [] : [];
+}
+
+async function loadInstanceMapAsset(mapId: number): Promise<void> {
+  if (instanceMapAssets.has(mapId) || instanceMapAssetLoads.has(mapId)) return;
+  instanceMapAssetLoads.add(mapId);
+  try {
+    const metadataUrl = new URL(`../assets/instances/${mapId}.json`, window.location.href);
+    const response = await fetch(metadataUrl);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const metadata = await response.json() as InstanceMapAssetMetadata;
+    if (![1, 2].includes(metadata.schemaVersion) || metadata.mapId !== mapId) {
+      throw new Error('unsupported instance map metadata');
+    }
+    const loadImage = async (relativePath: string): Promise<HTMLImageElement> => {
+      const image = new Image();
+      image.src = new URL(relativePath, metadataUrl).href;
+      await new Promise<void>((resolve, reject) => {
+        image.onload = () => resolve();
+        image.onerror = () => reject(new Error(`could not load ${image.src}`));
+      });
+      return image;
+    };
+    const floorImages = new Map<number, HTMLImageElement>();
+    let image: HTMLImageElement | undefined;
+    if (metadata.projection?.type === 'dungeonFloors' && metadata.floors?.length) {
+      await Promise.all(metadata.floors.map(async (floor) => {
+        floorImages.set(floor.id, await loadImage(floor.image));
+      }));
+    } else if (metadata.image) {
+      image = await loadImage(metadata.image);
+    } else {
+      throw new Error('instance map metadata has no images');
+    }
+    instanceMapAssets.set(mapId, { metadata, image, floorImages });
+  } catch {
+    instanceMapAssets.set(mapId, null);
+  } finally {
+    instanceMapAssetLoads.delete(mapId);
+    if (getSelectedInstanceSession()?.mapId === mapId) renderInstanceWatcher();
+    if (selectedSessionRecord?.mapId === mapId) renderSessionReplay();
+  }
+}
+
+function getSelectedDungeonFloor(
+  session: ActiveInstanceSession,
+  asset: LoadedInstanceMapAsset | null,
+): DungeonMapFloor | null {
+  const floors = asset?.metadata.floors;
+  if (asset?.metadata.projection?.type !== 'dungeonFloors' || !floors?.length) return null;
+  const focused = selectedInstancePlayerName
+    ? session.players.find((player) => player.name === selectedInstancePlayerName)
+    : null;
+  if (focused) {
+    const floor = getParticipantDungeonFloor(focused, floors);
+    if (floor) instanceSelectedFloorIds.set(session.key, floor.id);
+    return floor;
+  }
+
+  const existingFloorId = instanceSelectedFloorIds.get(session.key);
+  const existingFloor = floors.find((floor) => floor.id === existingFloorId);
+  if (existingFloor && session.players.some((player) =>
+    getParticipantDungeonFloor(player, floors)?.id === existingFloor.id)) {
+    return existingFloor;
+  }
+
+  const counts = new Map<number, number>();
+  for (const player of session.players) {
+    const floor = getParticipantDungeonFloor(player, floors);
+    if (floor) counts.set(floor.id, (counts.get(floor.id) ?? 0) + 1);
+  }
+  const floor = [...floors].sort((left, right) =>
+    (counts.get(right.id) ?? 0) - (counts.get(left.id) ?? 0) || left.floorIndex - right.floorIndex)[0] ?? null;
+  if (floor) instanceSelectedFloorIds.set(session.key, floor.id);
+  return floor;
+}
+
+function getStableInstanceBounds(session: ActiveInstanceSession): InstanceCoordinateBounds {
+  const profile = getInstanceMapProfile(session.mapId);
+  if (profile) return profile.bounds;
+
+  const current = instanceViewBounds.get(session.key);
+  if (!current) {
+    const initial = getInstanceCoordinateBounds(session.players);
+    instanceViewBounds.set(session.key, initial);
+    return initial;
+  }
+
+  const spanX = current.maxX - current.minX;
+  const spanY = current.maxY - current.minY;
+  const next = { ...current };
+  for (const player of session.players) {
+    if (player.position_x < current.minX) next.minX = Math.min(next.minX, player.position_x - spanX * 0.15);
+    if (player.position_x > current.maxX) next.maxX = Math.max(next.maxX, player.position_x + spanX * 0.15);
+    if (player.position_y < current.minY) next.minY = Math.min(next.minY, player.position_y - spanY * 0.15);
+    if (player.position_y > current.maxY) next.maxY = Math.max(next.maxY, player.position_y + spanY * 0.15);
+  }
+  instanceViewBounds.set(session.key, next);
+  return next;
+}
+
+function getInstanceViewTransform(): InstanceViewTransform {
+  if (!selectedInstanceKey) return { zoom: 1, panX: 0, panY: 0 };
+  return instanceViewTransforms.get(selectedInstanceKey) ?? { zoom: 1, panX: 0, panY: 0 };
+}
+
+function setInstanceViewTransform(transform: InstanceViewTransform): void {
+  if (!selectedInstanceKey) return;
+  instanceViewTransforms.set(selectedInstanceKey, transform);
+}
+
+function fitSelectedInstanceView(): void {
+  const session = getSelectedInstanceSession();
+  if (!session) return;
+  const profile = getInstanceMapProfile(session.mapId);
+  instanceViewBounds.set(session.key, profile?.bounds ?? getInstanceCoordinateBounds(session.players));
+  setInstanceViewTransform({ zoom: 1, panX: 0, panY: 0 });
+  renderInstanceCanvas();
+}
+
+function adjustInstanceZoom(multiplier: number, anchorX?: number, anchorY?: number): void {
+  if (!instanceBaseViewport) return;
+  const transform = getInstanceViewTransform();
+  const x = anchorX ?? instanceBaseViewport.x + instanceBaseViewport.width / 2;
+  const y = anchorY ?? instanceBaseViewport.y + instanceBaseViewport.height / 2;
+  setInstanceViewTransform(zoomInstanceViewAt(
+    transform,
+    instanceBaseViewport,
+    x,
+    y,
+    transform.zoom * multiplier,
+  ));
+  renderInstanceCanvas();
+}
+
+function focusInstancePlayer(name: string): void {
+  selectedInstancePlayerName = name;
+  renderInstanceWatcher();
+  if (instanceBaseViewport) {
+    const transform = getInstanceViewTransform();
+    if (transform.zoom < 2) {
+      setInstanceViewTransform(zoomInstanceViewAt(
+        transform,
+        instanceBaseViewport,
+        instanceBaseViewport.x + instanceBaseViewport.width / 2,
+        instanceBaseViewport.y + instanceBaseViewport.height / 2,
+        2,
+      ));
+      renderInstanceCanvas();
+    }
+    const marker = instanceMarkerHitAreas.find((area) => area.name === name);
+    if (marker) {
+      const current = getInstanceViewTransform();
+      setInstanceViewTransform({
+        ...current,
+        panX: current.panX + instanceBaseViewport.x + instanceBaseViewport.width / 2 - marker.x,
+        panY: current.panY + instanceBaseViewport.y + instanceBaseViewport.height / 2 - marker.y,
+      });
+    }
+  }
+  renderInstanceWatcher();
+}
+
+function updateInstanceTrails(session: ActiveInstanceSession): void {
+  const activeNames = new Set(session.players.map((player) => player.name));
+  for (const name of instanceTrails.keys()) {
+    if (!activeNames.has(name)) instanceTrails.delete(name);
+  }
+  for (const player of session.players) {
+    const trail = instanceTrails.get(player.name) ?? [];
+    const previous = trail[trail.length - 1];
+    const distance = previous
+      ? Math.hypot(player.position_x - previous.position_x, player.position_y - previous.position_y)
+      : 0;
+    const discontinuity = Boolean(previous && isSessionRouteDiscontinuity(
+      { x: previous.position_x, y: previous.position_y, alive: previous.alive },
+      { x: player.position_x, y: player.position_y, alive: player.alive },
+    ));
+    if (discontinuity) trail.length = 0;
+    if (!previous || discontinuity || distance >= 0.25) {
+      trail.push({
+        position_x: player.position_x,
+        position_y: player.position_y,
+        position_z: player.position_z,
+        wmoGroupId: player.wmoGroupId,
+        alive: player.alive,
+      });
+      if (trail.length > 45) trail.splice(0, trail.length - 45);
+    }
+    instanceTrails.set(player.name, trail);
+  }
+}
+
+function renderInstanceSessionOptions(): void {
+  if (!$instanceSessionSelect) return;
+  if (!activeInstanceSessions.length) {
+    $instanceSessionSelect.innerHTML = '<option value="">No active sessions</option>';
+    $instanceSessionSelect.disabled = true;
+    return;
+  }
+  $instanceSessionSelect.disabled = false;
+  $instanceSessionSelect.innerHTML = activeInstanceSessions.map((session) =>
+    `<option value="${escapeHtml(session.key)}"${session.key === selectedInstanceKey ? ' selected' : ''}>${escapeHtml(session.label)} (${session.players.length})</option>`
+  ).join('');
+}
+
+function getInstanceRoleLabel(roleMask?: number): string | null {
+  if (!roleMask) return null;
+  const roles: string[] = [];
+  if (roleMask & 0x02) roles.push('Tank');
+  if (roleMask & 0x04) roles.push('Healer');
+  if (roleMask & 0x08) roles.push('Damage');
+  if (roleMask & 0x01) roles.push('Leader');
+  return roles.length > 0 ? roles.join('/') : null;
+}
+
+function getInstanceDifficultyLabel(mapType?: number, difficulty?: number): string | null {
+  if (difficulty === undefined) return null;
+  if (mapType === 2) {
+    return ['10-player normal', '25-player normal', '10-player heroic', '25-player heroic'][difficulty]
+      ?? `difficulty ${difficulty}`;
+  }
+  if (mapType === 1) {
+    return ['normal', 'heroic', 'epic'][difficulty] ?? `difficulty ${difficulty}`;
+  }
+  return null;
+}
+
+function getInstanceAgeLabel(startedAt?: number): string | null {
+  if (!startedAt) return null;
+  const elapsedSeconds = Math.max(0, Math.floor(Date.now() / 1000 - startedAt));
+  const hours = Math.floor(elapsedSeconds / 3600);
+  const minutes = Math.floor(elapsedSeconds % 3600 / 60);
+  const seconds = elapsedSeconds % 60;
+  return hours > 0
+    ? `${hours}h ${String(minutes).padStart(2, '0')}m`
+    : `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+}
+
+function renderInstanceBattleground(battleground: MapBattlegroundState | null): void {
+  $instanceBattlegroundCard?.classList.toggle('hidden', !battleground);
+  if (!battleground) return;
+
+  const status = getBattlegroundStatusLabel(battleground.status);
+  const elapsed = Math.max(0, Math.floor(battleground.elapsedMs / 1000));
+  const remaining = Math.max(0, Math.ceil(battleground.remainingMs / 1000));
+  const nextResurrection = Math.max(0, Math.ceil(battleground.nextResurrectMs / 1000));
+  const allianceStrategy = getBattlegroundStrategyLabel(
+    battleground.battlegroundTypeId,
+    battleground.allianceStrategy,
+  );
+  const hordeStrategy = getBattlegroundStrategyLabel(
+    battleground.battlegroundTypeId,
+    battleground.hordeStrategy,
+  );
+  const winner = battleground.status === 4
+    ? battleground.winner === 1 ? ' · Alliance won' : battleground.winner === 0 ? ' · Horde won' : ' · Draw'
+    : '';
+  if ($instanceBattlegroundPhase) {
+    const phaseTime = battleground.status === 2
+      ? ` · starts in ${remaining}s`
+      : battleground.status === 4 ? ` · closes in ${remaining}s` : '';
+    $instanceBattlegroundPhase.textContent = `${status} · ${Math.floor(elapsed / 60)}m ${String(elapsed % 60).padStart(2, '0')}s${phaseTime}${winner}`;
+  }
+  if ($instanceBattlegroundScore) {
+    $instanceBattlegroundScore.innerHTML = `
+      <span class="alliance">Alliance<br><strong>${battleground.allianceScore}</strong> · ${battleground.allianceAlive}/${battleground.alliancePlayers} alive</span>
+      <span class="horde">Horde<br><strong>${battleground.hordeScore}</strong> · ${battleground.hordeAlive}/${battleground.hordePlayers} alive</span>`;
+  }
+  if ($instanceBattlegroundMeta) {
+    const metadata = [
+      battleground.status === 3 ? `Next resurrection wave: ${nextResurrection}s` : null,
+      allianceStrategy ? `Alliance strategy: ${allianceStrategy}` : null,
+      hordeStrategy ? `Horde strategy: ${hordeStrategy}` : null,
+    ].filter(Boolean);
+    $instanceBattlegroundMeta.textContent = metadata.join('\n');
+  }
+  if ($instanceBattlegroundObjectives) {
+    const objectives = getBattlegroundObjectiveLabels(battleground);
+    $instanceBattlegroundObjectives.innerHTML = objectives.length > 0
+      ? objectives.map((objective) => `<span>${escapeHtml(objective)}</span>`).join('')
+      : '<span>No named objective state available</span>';
+  }
+}
+
+function renderInstanceEncounters(instance: MapInstanceState | null, deaths: MapInstanceDeath[]): void {
+  const visible = Boolean(instance?.bosses.length || deaths.length);
+  $instanceEncounterCard?.classList.toggle('hidden', !visible);
+  if (!visible) return;
+
+  if ($instanceBossList) {
+    const stateLabels = ['Not started', 'In progress', 'Failed', 'Complete', 'Special', 'Pending'];
+    const stateClasses = ['', 'progress', 'failed', 'done', '', ''];
+    $instanceBossList.innerHTML = instance?.bosses.length
+      ? instance.bosses.map((boss) => `<div class="instance-boss-row">
+          <i class="instance-boss-dot ${stateClasses[boss.state] ?? ''}"></i>
+          <span>${escapeHtml(boss.name)}</span>
+          <span class="instance-boss-state">${escapeHtml(stateLabels[boss.state] ?? `State ${boss.state}`)}</span>
+        </div>`).join('')
+      : '<p class="placeholder">No scripted boss state available</p>';
+  }
+  if ($instanceDeathHistory) {
+    const recentDeaths = [...deaths].sort((left, right) => right.eventId - left.eventId).slice(0, 10);
+    $instanceDeathHistory.innerHTML = recentDeaths.length
+      ? `<h4>Recent deaths</h4>${recentDeaths.map((death) => {
+          const killer = death.killerName ? ` to ${escapeHtml(death.killerName)}` : '';
+          return `<div class="instance-death-row"><strong>${escapeHtml(death.victimName)}</strong>${killer} · ${new Date(death.occurredAt * 1000).toLocaleTimeString()}</div>`;
+        }).join('')}`
+      : '';
+  }
+}
+
+function renderInstancePlayerList(session: ActiveInstanceSession | null): void {
+  if (!$instancePlayerList) return;
+  if (!session) {
+    $instancePlayerList.innerHTML = '<p class="placeholder">No active participants</p>';
+    return;
+  }
+  const battleground = getSelectedBattleground();
+  const floors = instanceMapAssets.get(session.mapId)?.metadata.floors ?? [];
+  $instancePlayerList.innerHTML = [...session.players]
+    .sort((left, right) => Number(left.isBot) - Number(right.isBot) || left.name.localeCompare(right.name))
+    .map((player) => {
+      const stateText = player.alive ? (player.inCombat ? 'Combat' : 'Alive') : 'Dead';
+      const details = [player.isBot ? 'BOT' : 'PLAYER', stateText];
+      if (player.healthPct !== undefined) details.push(`${Math.round(player.healthPct)}% HP`);
+      const floor = getParticipantDungeonFloor(player, floors);
+      if (floor) details.push(`Floor ${floor.floorIndex}`);
+      if (player.waitingForResurrect) details.push('Waiting to resurrect');
+      if (player.battlegroundRole !== undefined && player.battlegroundRole >= 0) {
+        details.push(`Tactical role ${player.battlegroundRole}`);
+      }
+      const role = getInstanceRoleLabel(player.roleMask);
+      if (role) details.push(role);
+      if (player.groupId) {
+        const groupLabel = player.isRaidGroup ? 'Raid' : 'Group';
+        const subgroup = player.isRaidGroup && player.subgroup !== undefined ? `/${player.subgroup + 1}` : '';
+        details.push(`${groupLabel} ${player.groupId}${subgroup}`);
+      }
+      if (player.targetName) details.push(`Target: ${player.targetName}`);
+      const markerColor = battleground
+        ? player.teamId === 1 ? '#3b82f6' : player.teamId === 0 ? '#ef4444' : '#94a3b8'
+        : CLASS_COLORS[player.class] || '#aaa';
+      const selected = player.name === selectedInstancePlayerName ? ' selected' : '';
+      return `<div class="instance-player-row${player.inCombat ? ' in-combat' : ''}${selected}" data-instance-player="${escapeHtml(player.name)}">
+        <span class="map-player-dot" style="background:${markerColor}"></span>
+        <span class="instance-player-name">${escapeHtml(player.name)}</span>
+        <span class="instance-player-state">${escapeHtml(details.join(' · '))}</span>
+      </div>`;
+    }).join('');
+}
+
+function renderInstanceCanvas(): void {
+  if (!$instanceWatchCanvas) return;
+  const wrapper = $instanceWatchCanvas.parentElement;
+  if (!wrapper) return;
+  const rect = wrapper.getBoundingClientRect();
+  const width = Math.max(320, Math.floor(rect.width));
+  const height = Math.max(280, Math.floor(rect.height));
+  $instanceWatchCanvas.width = width;
+  $instanceWatchCanvas.height = height;
+  const ctx = $instanceWatchCanvas.getContext('2d');
+  if (!ctx) return;
+  instanceMarkerHitAreas = [];
+  instanceBaseViewport = null;
+
+  ctx.fillStyle = '#08111d';
+  ctx.fillRect(0, 0, width, height);
+  const session = getSelectedInstanceSession();
+  const battleground = getSelectedBattleground();
+  $instanceWatchEmpty?.classList.toggle('hidden', Boolean(session));
+  if (!session) return;
+
+  if (!instanceMapAssets.has(session.mapId) && !instanceMapAssetLoads.has(session.mapId)) {
+    void loadInstanceMapAsset(session.mapId);
+  }
+  const loadedAsset = instanceMapAssets.get(session.mapId) ?? null;
+  const profile = getInstanceMapProfile(session.mapId);
+  const projectionType = loadedAsset?.metadata.projection?.type;
+  const floor = getSelectedDungeonFloor(session, loadedAsset);
+  const asset = projectionType === 'minimapTiles'
+    || projectionType === 'dungeonFloors'
+    || (projectionType === 'worldMapArea' && (profile || loadedAsset?.metadata.worldMapBounds))
+    ? loadedAsset
+    : null;
+  const assetImage = floor ? asset?.floorImages.get(floor.id) : asset?.image;
+  const bounds = floor?.bounds ?? asset?.metadata.worldMapBounds ?? getStableInstanceBounds(session);
+  const assetWidth = floor?.width ?? asset?.metadata.width;
+  const assetHeight = floor?.height ?? asset?.metadata.height;
+  const aspectRatio = assetWidth && assetHeight
+    ? assetWidth / assetHeight
+    : profile?.aspectRatio;
+  const baseViewport = aspectRatio
+    ? getInstanceProjectionViewport(width, height, aspectRatio)
+    : { x: 0, y: 0, width, height };
+  instanceBaseViewport = baseViewport;
+  const viewport = applyInstanceViewTransform(baseViewport, getInstanceViewTransform());
+  const project = (position: Pick<MapPlayerPosition, 'position_x' | 'position_y'>) => {
+    if (asset?.metadata.projection?.type === 'minimapTiles') {
+      const metadata = asset.metadata;
+      const projected = projectMinimapTilePosition(position, {
+        gridSize: metadata.gridSize ?? 64,
+        worldUnitsPerTile: metadata.worldUnitsPerTile ?? 533.3333333333334,
+        minTileX: metadata.minTileX ?? 0,
+        minTileY: metadata.minTileY ?? 0,
+        maxTileX: metadata.maxTileX ?? metadata.minTileX ?? 0,
+        maxTileY: metadata.maxTileY ?? metadata.minTileY ?? 0,
+      }, viewport.width, viewport.height);
+      return { x: viewport.x + projected.x, y: viewport.y + projected.y };
+    }
+    const point = projectInstancePosition(position, bounds, viewport.width, viewport.height);
+    return { x: point.x + viewport.x, y: point.y + viewport.y };
+  };
+
+  if (asset && assetImage) {
+    ctx.drawImage(assetImage, viewport.x, viewport.y, viewport.width, viewport.height);
+    ctx.fillStyle = 'rgba(3, 10, 18, 0.18)';
+    ctx.fillRect(viewport.x, viewport.y, viewport.width, viewport.height);
+  } else {
+    if (profile) {
+      ctx.fillStyle = '#0a1624';
+      ctx.fillRect(viewport.x, viewport.y, viewport.width, viewport.height);
+    }
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+    ctx.lineWidth = 1;
+    for (let index = 1; index < 10; index += 1) {
+      const x = viewport.x + viewport.width * index / 10;
+      const y = viewport.y + viewport.height * index / 10;
+      ctx.beginPath(); ctx.moveTo(x, viewport.y); ctx.lineTo(x, viewport.y + viewport.height); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(viewport.x, y); ctx.lineTo(viewport.x + viewport.width, y); ctx.stroke();
+    }
+  }
+  ctx.strokeStyle = 'rgba(96,165,250,0.28)';
+  ctx.strokeRect(viewport.x + 0.5, viewport.y + 0.5, viewport.width - 1, viewport.height - 1);
+
+  const visiblePlayers = floor && asset?.metadata.floors
+    ? session.players.filter((player) => getParticipantDungeonFloor(player, asset.metadata.floors ?? [])?.id === floor.id)
+    : session.players;
+  const pendingLabels: { name: string; x: number; y: number; priority: number }[] = [];
+  for (const player of visiblePlayers) {
+    const trail = (instanceTrails.get(player.name) ?? []).filter((point) =>
+      !floor || getParticipantDungeonFloor(point, asset?.metadata.floors ?? [])?.id === floor.id);
+    if (trail.length > 1) {
+      ctx.beginPath();
+      trail.forEach((point, index) => {
+        const projected = project(point);
+        if (index === 0) ctx.moveTo(projected.x, projected.y); else ctx.lineTo(projected.x, projected.y);
+      });
+      ctx.strokeStyle = player.isBot ? 'rgba(148,163,184,0.38)' : 'rgba(79,195,247,0.65)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+
+    const point = project(player);
+    const color = battleground
+      ? player.teamId === 1 ? '#3b82f6' : player.teamId === 0 ? '#ef4444' : '#94a3b8'
+      : player.isBot ? '#94a3b8' : (CLASS_COLORS[player.class] || '#4fc3f7');
+    if (player.inCombat) {
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, 11, 0, Math.PI * 2);
+      ctx.strokeStyle = '#ef4444';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    const markerRadius = player.isBot ? 6 : 8;
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, markerRadius, 0, Math.PI * 2);
+    ctx.fillStyle = player.alive ? color : '#475569';
+    ctx.fill();
+    if (player.name === selectedInstancePlayerName) {
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, markerRadius + 4, 0, Math.PI * 2);
+      ctx.strokeStyle = '#fbbf24';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    instanceMarkerHitAreas.push({ name: player.name, x: point.x, y: point.y, radius: markerRadius + 6 });
+
+    const headingLength = 13;
+    ctx.beginPath();
+    ctx.moveTo(point.x, point.y);
+    ctx.lineTo(point.x - Math.sin(player.orientation) * headingLength, point.y - Math.cos(player.orientation) * headingLength);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    if (visiblePlayers.length <= 60) {
+      pendingLabels.push({
+        name: player.name,
+        x: point.x + 10,
+        y: point.y - 9,
+        priority: (!player.isBot ? 2 : 0) + (player.inCombat ? 1 : 0),
+      });
+    }
+  }
+
+  const occupiedLabels: { left: number; right: number; top: number; bottom: number }[] = [];
+  ctx.font = '11px sans-serif';
+  ctx.fillStyle = '#e5edf7';
+  for (const label of pendingLabels.sort((left, right) => right.priority - left.priority)) {
+    const labelWidth = ctx.measureText(label.name).width;
+    const rect = { left: label.x - 2, right: label.x + labelWidth + 2, top: label.y - 11, bottom: label.y + 3 };
+    const overlaps = occupiedLabels.some((used) =>
+      rect.left < used.right && rect.right > used.left && rect.top < used.bottom && rect.bottom > used.top);
+    if (overlaps) continue;
+    occupiedLabels.push(rect);
+    ctx.fillText(label.name, label.x, label.y);
+  }
+}
+
+function renderInstanceWatcher(): void {
+  const session = getSelectedInstanceSession();
+  if ($instanceSessionCount) $instanceSessionCount.textContent = String(activeInstanceSessions.length);
+  renderInstanceSessionOptions();
+  renderInstanceBattleground(getSelectedBattleground());
+  renderInstanceEncounters(getSelectedInstanceState(), getSelectedInstanceDeaths());
+  renderInstancePlayerList(session);
+  if ($instanceWatchTitle) $instanceWatchTitle.textContent = session?.label ?? 'No active instance';
+  if ($instanceWatchSubtitle) {
+    const profile = session ? getInstanceMapProfile(session.mapId) : null;
+    const loadedAsset = session ? instanceMapAssets.get(session.mapId) : null;
+    const hasArtwork = Boolean(loadedAsset && (
+      loadedAsset.metadata.projection?.type === 'minimapTiles'
+      || loadedAsset.metadata.projection?.type === 'dungeonFloors'
+      || (loadedAsset.metadata.projection?.type === 'worldMapArea'
+        && (profile || loadedAsset.metadata.worldMapBounds))
+    ));
+    const representative = session?.players[0];
+    const selectedFloor = session && loadedAsset ? getSelectedDungeonFloor(session, loadedAsset) : null;
+    const difficulty = getInstanceDifficultyLabel(representative?.mapType, representative?.difficulty);
+    const age = getInstanceAgeLabel(representative?.sessionStartedAt);
+    const details = session
+      ? [
+        `Map ${session.mapId}`,
+        `runtime instance ${session.instanceId}`,
+        difficulty,
+        age ? `active ${age}` : null,
+        selectedFloor ? `floor ${selectedFloor.floorIndex}` : null,
+        hasArtwork ? 'client artwork' : profile ? 'client-calibrated bounds' : 'auto-fit bounds',
+      ].filter(Boolean).join(' · ')
+      : null;
+    $instanceWatchSubtitle.textContent = details
+      ?? 'Sessions appear automatically while players or bots are inside an instance or battleground.';
+    $instanceFitBtn?.classList.remove('hidden');
+    $instanceClearFocusBtn?.classList.toggle('hidden', !selectedInstancePlayerName);
+  }
+  if ($instanceWatchPlayerCount) {
+    const bots = session?.players.filter((player) => player.isBot).length ?? 0;
+    $instanceWatchPlayerCount.textContent = session ? `${session.players.length} participants · ${bots} bots` : '';
+  }
+  renderInstanceCanvas();
+}
+
+async function refreshInstanceWatcher(forceDiscovery = false): Promise<void> {
+  if (!state.connected || instanceRefreshInFlight) return;
+  instanceRefreshInFlight = true;
+  try {
+    const selectedFilter = parseInstanceSessionKey(selectedInstanceKey);
+    let isDiscovery = forceDiscovery
+      || !selectedFilter
+      || Date.now() - instanceLastDiscoveryAt >= INSTANCE_DISCOVERY_INTERVAL_MS;
+    let snapshot = await window.electronAPI.map.getPlayerPositions(
+      isDiscovery ? undefined : selectedFilter?.mapId,
+      isDiscovery ? undefined : selectedFilter?.instanceId,
+    );
+
+    if (!isDiscovery) {
+      const updatedSession = groupActiveInstanceSessions(snapshot.players)
+        .find((session) => session.key === selectedInstanceKey);
+      if (updatedSession) {
+        activeInstanceSessions = activeInstanceSessions.map((session) =>
+          session.key === updatedSession.key ? updatedSession : session);
+      } else {
+        isDiscovery = true;
+        snapshot = await window.electronAPI.map.getPlayerPositions();
+      }
+    }
+
+    if (isDiscovery) {
+      activeBattlegrounds = new Map(snapshot.battlegrounds.map((battleground) => [
+        `${battleground.mapId}:${battleground.instanceId}`,
+        battleground,
+      ]));
+      activeInstanceStates = new Map(snapshot.instances.map((instance) => [
+        `${instance.mapId}:${instance.instanceId}`,
+        instance,
+      ]));
+      activeInstanceDeaths = new Map();
+      for (const death of snapshot.deaths) {
+        const key = `${death.mapId}:${death.instanceId}`;
+        activeInstanceDeaths.set(key, [...(activeInstanceDeaths.get(key) ?? []), death]);
+      }
+      activeInstanceSessions = groupActiveInstanceSessions(snapshot.players);
+      instanceLastDiscoveryAt = Date.now();
+      const activeKeys = new Set(activeInstanceSessions.map((session) => session.key));
+      for (const key of instanceViewBounds.keys()) {
+        if (!activeKeys.has(key)) instanceViewBounds.delete(key);
+      }
+      for (const key of instanceViewTransforms.keys()) {
+        if (!activeKeys.has(key)) instanceViewTransforms.delete(key);
+      }
+      for (const key of instanceSelectedFloorIds.keys()) {
+        if (!activeKeys.has(key)) instanceSelectedFloorIds.delete(key);
+      }
+    } else if (selectedInstanceKey) {
+      activeBattlegrounds.delete(selectedInstanceKey);
+      activeInstanceStates.delete(selectedInstanceKey);
+      activeInstanceDeaths.delete(selectedInstanceKey);
+      for (const battleground of snapshot.battlegrounds) {
+        activeBattlegrounds.set(`${battleground.mapId}:${battleground.instanceId}`, battleground);
+      }
+      for (const instance of snapshot.instances) {
+        activeInstanceStates.set(`${instance.mapId}:${instance.instanceId}`, instance);
+      }
+      for (const death of snapshot.deaths) {
+        const key = `${death.mapId}:${death.instanceId}`;
+        activeInstanceDeaths.set(key, [...(activeInstanceDeaths.get(key) ?? []), death]);
+      }
+    }
+
+    const selectedStillActive = activeInstanceSessions.some((session) => session.key === selectedInstanceKey);
+    if (!selectedStillActive) {
+      selectedInstanceKey = activeInstanceSessions[0]?.key ?? null;
+      selectedInstancePlayerName = null;
+      instanceTrails = new Map();
+    }
+    const selected = getSelectedInstanceSession();
+    if (selectedInstancePlayerName && !selected?.players.some((player) => player.name === selectedInstancePlayerName)) {
+      selectedInstancePlayerName = null;
+    }
+    if (selected) updateInstanceTrails(selected);
+    if ($instanceWatchStatus) {
+      const source = snapshot.source === 'worldserver' ? 'LIVE world state' : 'DB fallback';
+      const scope = isDiscovery ? 'session discovery' : 'selected session';
+      $instanceWatchStatus.textContent = `${source} · ${scope} · ${activeInstanceSessions.length} active session(s) · ${new Date(snapshot.capturedAt).toLocaleTimeString()}`;
+    }
+    renderInstanceWatcher();
+  } catch (error) {
+    if ($instanceWatchStatus) {
+      const message = error instanceof Error ? error.message : String(error);
+      $instanceWatchStatus.textContent = `Refresh failed: ${message}`;
+    }
+  } finally {
+    instanceRefreshInFlight = false;
+  }
+}
+
+function startInstanceWatcherPolling(): void {
+  if (instanceRefreshInterval) clearInterval(instanceRefreshInterval);
+  if (!$instanceAutoRefresh?.checked) {
+    instanceRefreshInterval = null;
+    return;
+  }
+  instanceRefreshInterval = setInterval(() => {
+    if (getActiveMainTabId() === 'instances') void refreshInstanceWatcher();
+  }, 1000);
+}
+
+function stopInstanceWatcherPolling(): void {
+  if (instanceRefreshInterval) clearInterval(instanceRefreshInterval);
+  instanceRefreshInterval = null;
+}
+
+$instanceSessionSelect?.addEventListener('change', () => {
+  selectedInstanceKey = $instanceSessionSelect.value || null;
+  selectedInstancePlayerName = null;
+  instanceTrails = new Map();
+  const session = getSelectedInstanceSession();
+  if (session) updateInstanceTrails(session);
+  renderInstanceWatcher();
+});
+$instanceRefreshBtn?.addEventListener('click', () => void refreshInstanceWatcher(true));
+$instanceFitBtn?.addEventListener('click', fitSelectedInstanceView);
+$instanceZoomOutBtn?.addEventListener('click', () => adjustInstanceZoom(0.8));
+$instanceZoomInBtn?.addEventListener('click', () => adjustInstanceZoom(1.25));
+$instanceClearFocusBtn?.addEventListener('click', () => {
+  selectedInstancePlayerName = null;
+  renderInstanceWatcher();
+});
+$instancePlayerList?.addEventListener('click', (event) => {
+  const row = (event.target as HTMLElement).closest<HTMLElement>('[data-instance-player]');
+  const name = row?.dataset.instancePlayer;
+  if (name) focusInstancePlayer(name);
+});
+$instanceWatchCanvas?.addEventListener('wheel', (event) => {
+  event.preventDefault();
+  const rect = $instanceWatchCanvas.getBoundingClientRect();
+  const scaleX = $instanceWatchCanvas.width / rect.width;
+  const scaleY = $instanceWatchCanvas.height / rect.height;
+  adjustInstanceZoom(event.deltaY < 0 ? 1.15 : 1 / 1.15, (event.clientX - rect.left) * scaleX,
+    (event.clientY - rect.top) * scaleY);
+}, { passive: false });
+$instanceWatchCanvas?.addEventListener('pointerdown', (event) => {
+  if (event.button !== 0) return;
+  const transform = getInstanceViewTransform();
+  instancePanStart = {
+    x: event.clientX,
+    y: event.clientY,
+    panX: transform.panX,
+    panY: transform.panY,
+    moved: false,
+  };
+  $instanceWatchCanvas.setPointerCapture(event.pointerId);
+  $instanceWatchCanvas.classList.add('panning');
+});
+$instanceWatchCanvas?.addEventListener('pointermove', (event) => {
+  if (!instancePanStart) return;
+  const rect = $instanceWatchCanvas.getBoundingClientRect();
+  const deltaX = (event.clientX - instancePanStart.x) * $instanceWatchCanvas.width / rect.width;
+  const deltaY = (event.clientY - instancePanStart.y) * $instanceWatchCanvas.height / rect.height;
+  if (Math.hypot(deltaX, deltaY) > 3) instancePanStart.moved = true;
+  const transform = getInstanceViewTransform();
+  setInstanceViewTransform({
+    zoom: transform.zoom,
+    panX: instancePanStart.panX + deltaX,
+    panY: instancePanStart.panY + deltaY,
+  });
+  renderInstanceCanvas();
+});
+$instanceWatchCanvas?.addEventListener('pointerup', (event) => {
+  if (!instancePanStart) return;
+  const moved = instancePanStart.moved;
+  instancePanStart = null;
+  $instanceWatchCanvas.releasePointerCapture(event.pointerId);
+  $instanceWatchCanvas.classList.remove('panning');
+  if (moved) return;
+  const rect = $instanceWatchCanvas.getBoundingClientRect();
+  const x = (event.clientX - rect.left) * $instanceWatchCanvas.width / rect.width;
+  const y = (event.clientY - rect.top) * $instanceWatchCanvas.height / rect.height;
+  const marker = instanceMarkerHitAreas.find((area) => Math.hypot(area.x - x, area.y - y) <= area.radius);
+  if (marker) focusInstancePlayer(marker.name);
+});
+$instanceWatchCanvas?.addEventListener('pointercancel', () => {
+  instancePanStart = null;
+  $instanceWatchCanvas.classList.remove('panning');
+});
+$instanceAutoRefresh?.addEventListener('change', () => {
+  if ($instanceAutoRefresh.checked) {
+    void refreshInstanceWatcher();
+    startInstanceWatcherPolling();
+  } else {
+    stopInstanceWatcherPolling();
+  }
+});
+
+const instanceResizeObserver = new ResizeObserver(() => {
+  if (getActiveMainTabId() === 'instances') renderInstanceCanvas();
+});
+const instanceCanvasWrapper = document.querySelector('.instance-canvas-wrapper');
+if (instanceCanvasWrapper) instanceResizeObserver.observe(instanceCanvasWrapper);
+renderInstanceWatcher();
+
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SESSION HISTORY / REPLAY TAB
+// ═══════════════════════════════════════════════════════════════════════════
+
+const $sessionHistoryRefreshBtn = $<HTMLButtonElement>('session-history-refresh-btn');
+const $sessionHistoryPurgeBtn = $<HTMLButtonElement>('session-history-purge-btn');
+const $sessionHistoryList = $<HTMLElement>('session-history-list');
+const $sessionHistoryStatus = $<HTMLElement>('session-history-status');
+const $sessionReplayTitle = $<HTMLElement>('session-replay-title');
+const $sessionReplaySubtitle = $<HTMLElement>('session-replay-subtitle');
+const $sessionReplayTotals = $<HTMLElement>('session-replay-totals');
+const $sessionReplayCanvas = $<HTMLCanvasElement>('session-replay-canvas');
+const $sessionReplayEmpty = $<HTMLElement>('session-replay-empty');
+const $sessionReplayEvents = $<HTMLElement>('session-replay-events');
+const $sessionReplayPlayBtn = $<HTMLButtonElement>('session-replay-play-btn');
+const $sessionReplayPauseBtn = $<HTMLButtonElement>('session-replay-pause-btn');
+const $sessionReplayStopBtn = $<HTMLButtonElement>('session-replay-stop-btn');
+const $sessionReplaySeek = $<HTMLInputElement>('session-replay-seek');
+const $sessionReplayTime = $<HTMLElement>('session-replay-time');
+const $sessionReplaySpeed = $<HTMLSelectElement>('session-replay-speed');
+
+let sessionHistoryEntries: SessionIndexEntry[] = [];
+let selectedSessionRecord: SessionRecord | null = null;
+let selectedSessionRecordId: string | null = null;
+let sessionReplayPositionMs = 0;
+let sessionReplayPlaying = false;
+let sessionReplayFrame: number | null = null;
+let sessionReplayPreviousFrameAt = 0;
+let sessionReplayLastRenderAt = 0;
+let sessionReplayLastFollowedEventMs = -1;
+
+function sessionTypeLabel(mapType: number): string {
+  return ['World', 'Instance', 'Raid', 'Battleground', 'Arena'][mapType] ?? `Type ${mapType}`;
+}
+
+function renderSessionHistoryList(): void {
+  if (!$sessionHistoryList) return;
+  if (!sessionHistoryEntries.length) {
+    $sessionHistoryList.innerHTML = '<p class="placeholder">No completed sessions have been recorded.</p>';
+    return;
+  }
+  $sessionHistoryList.innerHTML = sessionHistoryEntries.map((entry) => {
+    const selected = entry.id === selectedSessionRecordId ? ' selected' : '';
+    const occurredAt = new Date(entry.startedAt).toLocaleString();
+    return `<button type="button" class="session-history-item${selected}" data-session-id="${escapeHtml(entry.id)}">
+      <strong>${escapeHtml(entry.mapName)} · #${entry.instanceId}</strong>
+      <span>${escapeHtml(sessionTypeLabel(entry.mapType))} · ${entry.participantCount} participants · ${formatSessionReplayTime(entry.elapsedMs)}</span>
+      <span>${escapeHtml(occurredAt)} · ${entry.eventCount} events</span>
+    </button>`;
+  }).join('');
+}
+
+async function refreshSessionHistory(): Promise<void> {
+  if ($sessionHistoryStatus) $sessionHistoryStatus.textContent = 'Loading persistent session index…';
+  try {
+    sessionHistoryEntries = await window.electronAPI.sessions.list();
+    if (selectedSessionRecordId && !sessionHistoryEntries.some((entry) => entry.id === selectedSessionRecordId)) {
+      stopSessionReplay();
+      selectedSessionRecordId = null;
+      selectedSessionRecord = null;
+    }
+    renderSessionHistoryList();
+    renderSessionReplay();
+    if ($sessionHistoryStatus) {
+      $sessionHistoryStatus.textContent = `${sessionHistoryEntries.length} completed session${sessionHistoryEntries.length === 1 ? '' : 's'} in persistent history`;
+    }
+  } catch (error) {
+    if ($sessionHistoryStatus) {
+      const message = error instanceof Error ? error.message : String(error);
+      $sessionHistoryStatus.textContent = `Unable to load session history: ${message}`;
+    }
+  }
+}
+
+async function selectSessionRecord(id: string): Promise<void> {
+  stopSessionReplay();
+  selectedSessionRecordId = id;
+  renderSessionHistoryList();
+  if ($sessionHistoryStatus) $sessionHistoryStatus.textContent = 'Loading session record…';
+  try {
+    selectedSessionRecord = await window.electronAPI.sessions.get(id);
+    sessionReplayPositionMs = 0;
+    if (selectedSessionRecord && !instanceMapAssets.has(selectedSessionRecord.mapId)) {
+      void loadInstanceMapAsset(selectedSessionRecord.mapId);
+    }
+    renderSessionReplay();
+    if ($sessionHistoryStatus) {
+      $sessionHistoryStatus.textContent = selectedSessionRecord
+        ? `Loaded ${selectedSessionRecord.events.length} events and ${selectedSessionRecord.routes.length} route samples`
+        : 'The selected session record is no longer available.';
+    }
+  } catch (error) {
+    selectedSessionRecord = null;
+    if ($sessionHistoryStatus) {
+      const message = error instanceof Error ? error.message : String(error);
+      $sessionHistoryStatus.textContent = `Unable to load session record: ${message}`;
+    }
+    renderSessionReplay();
+  }
+}
+
+function renderSessionReplayEvents(record: SessionRecord): void {
+  if (!$sessionReplayEvents) return;
+  $sessionReplayEvents.innerHTML = record.events.length
+    ? record.events.map((event) => `<div class="session-replay-event" data-replay-event-ms="${event.elapsedMs}">
+        <time>${formatSessionReplayTime(event.elapsedMs)}</time>${escapeHtml(event.description)}
+      </div>`).join('')
+    : '<p class="placeholder">No discrete events were recorded for this session.</p>';
+}
+
+function updateSessionReplayReadout(): void {
+  const record = selectedSessionRecord;
+  if (!record) return;
+  const totals = calculateSessionTotalsAt(record, sessionReplayPositionMs);
+  if ($sessionReplayTotals) {
+    $sessionReplayTotals.innerHTML = [
+      `Kills ${totals.kills}`,
+      `Deaths ${totals.deaths}`,
+      `Loot ${totals.lootItems}`,
+      `Levels ${totals.levelUps}`,
+      `Objectives ${totals.objectives}`,
+      `Flags ${totals.flagCaptures}`,
+    ].map((value) => `<span>${value}</span>`).join('');
+  }
+  if ($sessionReplayTime) {
+    $sessionReplayTime.textContent = `${formatSessionReplayTime(sessionReplayPositionMs)} / ${formatSessionReplayTime(record.elapsedMs)}`;
+  }
+  if ($sessionReplaySeek) $sessionReplaySeek.value = String(Math.round(sessionReplayPositionMs));
+  let latestActiveEvent: HTMLElement | null = null;
+  const eventRows = $sessionReplayEvents?.querySelectorAll<HTMLElement>('[data-replay-event-ms]') ?? [];
+  for (const row of eventRows) {
+    const isActive = Number(row.dataset.replayEventMs) <= sessionReplayPositionMs;
+    row.classList.toggle('active', isActive);
+    if (isActive) latestActiveEvent = row;
+  }
+  if (latestActiveEvent && $sessionReplayEvents) {
+    const eventMs = Number(latestActiveEvent.dataset.replayEventMs);
+    if (eventMs !== sessionReplayLastFollowedEventMs) {
+      latestActiveEvent.scrollIntoView({ block: 'nearest' });
+      sessionReplayLastFollowedEventMs = eventMs;
+    }
+  } else if ($sessionReplayEvents && sessionReplayPositionMs === 0) {
+    $sessionReplayEvents.scrollTop = 0;
+    sessionReplayLastFollowedEventMs = -1;
+  }
+}
+
+function getReplayFloor(point: SessionRoutePoint, floors: DungeonMapFloor[]): DungeonMapFloor | null {
+  return getParticipantDungeonFloor({
+    position_x: point.x,
+    position_y: point.y,
+    position_z: point.z,
+    wmoGroupId: point.wmoGroupId,
+  }, floors);
+}
+
+function getReplayBounds(record: SessionRecord): InstanceCoordinateBounds {
+  if (!record.routes.length) return { minX: -100, maxX: 100, minY: -100, maxY: 100 };
+  const x = record.routes.map((point) => point.x);
+  const y = record.routes.map((point) => point.y);
+  const minX = Math.min(...x);
+  const maxX = Math.max(...x);
+  const minY = Math.min(...y);
+  const maxY = Math.max(...y);
+  const spanX = Math.max(200, maxX - minX);
+  const spanY = Math.max(200, maxY - minY);
+  return {
+    minX: (minX + maxX) / 2 - spanX * 0.65,
+    maxX: (minX + maxX) / 2 + spanX * 0.65,
+    minY: (minY + maxY) / 2 - spanY * 0.65,
+    maxY: (minY + maxY) / 2 + spanY * 0.65,
+  };
+}
+
+function renderSessionReplayCanvas(): void {
+  if (!$sessionReplayCanvas) return;
+  const wrapper = $sessionReplayCanvas.parentElement;
+  if (!wrapper) return;
+  const rect = wrapper.getBoundingClientRect();
+  const width = Math.max(320, Math.floor(rect.width));
+  const height = Math.max(280, Math.floor(rect.height));
+  $sessionReplayCanvas.width = width;
+  $sessionReplayCanvas.height = height;
+  const ctx = $sessionReplayCanvas.getContext('2d');
+  if (!ctx) return;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, width, height);
+  const record = selectedSessionRecord;
+  $sessionReplayEmpty?.classList.toggle('hidden', Boolean(record));
+  if (!record) return;
+
+  if (!instanceMapAssets.has(record.mapId) && !instanceMapAssetLoads.has(record.mapId)) {
+    void loadInstanceMapAsset(record.mapId);
+  }
+  const asset = instanceMapAssets.get(record.mapId) ?? null;
+  const floors = asset?.metadata.floors ?? [];
+  const visiblePoints = record.routes.filter((point) => point.elapsedMs <= sessionReplayPositionMs);
+  const latestByName = new Map<string, SessionRoutePoint>();
+  for (const point of visiblePoints) latestByName.set(point.name, point);
+  const floorCounts = new Map<number, number>();
+  for (const point of latestByName.values()) {
+    const pointFloor = getReplayFloor(point, floors);
+    if (pointFloor) floorCounts.set(pointFloor.id, (floorCounts.get(pointFloor.id) ?? 0) + 1);
+  }
+  const floor = [...floors].sort((left, right) =>
+    (floorCounts.get(right.id) ?? 0) - (floorCounts.get(left.id) ?? 0) || left.floorIndex - right.floorIndex)[0] ?? null;
+  const metadata = asset?.metadata;
+  const image = floor ? asset?.floorImages.get(floor.id) : asset?.image;
+  const bounds = floor?.bounds ?? metadata?.worldMapBounds ?? getReplayBounds(record);
+  const imageWidth = floor?.width ?? metadata?.width;
+  const imageHeight = floor?.height ?? metadata?.height;
+  const viewport = imageWidth && imageHeight
+    ? getInstanceProjectionViewport(width, height, imageWidth / imageHeight)
+    : { x: 0, y: 0, width, height };
+  if (image) ctx.drawImage(image, viewport.x, viewport.y, viewport.width, viewport.height);
+  const project = (point: SessionRoutePoint): { x: number; y: number } => {
+    if (metadata?.projection?.type === 'minimapTiles') {
+      const projected = projectMinimapTilePosition({ position_x: point.x, position_y: point.y }, {
+        gridSize: metadata.gridSize ?? 64,
+        worldUnitsPerTile: metadata.worldUnitsPerTile ?? 533.3333333333334,
+        minTileX: metadata.minTileX ?? 0,
+        minTileY: metadata.minTileY ?? 0,
+        maxTileX: metadata.maxTileX ?? metadata.minTileX ?? 0,
+        maxTileY: metadata.maxTileY ?? metadata.minTileY ?? 0,
+      }, viewport.width, viewport.height);
+      return { x: viewport.x + projected.x, y: viewport.y + projected.y };
+    }
+    const projected = projectInstancePosition({ position_x: point.x, position_y: point.y }, bounds,
+      viewport.width, viewport.height);
+    return { x: viewport.x + projected.x, y: viewport.y + projected.y };
+  };
+
+  const participantColors = new Map(record.participants.map((participant) => [participant.name,
+    participant.teamId === 1 ? '#3b82f6' : participant.teamId === 0 ? '#ef4444'
+      : CLASS_COLORS[participant.classId] ?? '#94a3b8']));
+  for (const participant of record.participants) {
+    const route = visiblePoints.filter((point) => point.name === participant.name
+      && (!floor || getReplayFloor(point, floors)?.id === floor.id));
+    if (!route.length) continue;
+    const routeSegments: SessionRoutePoint[][] = [];
+    for (const point of route) {
+      const segment = routeSegments.at(-1);
+      const previous = segment?.at(-1);
+      if (!segment || (previous && isSessionRouteDiscontinuity(previous, point))) routeSegments.push([point]);
+      else segment.push(point);
+    }
+    ctx.strokeStyle = participantColors.get(participant.name) ?? '#94a3b8';
+    ctx.globalAlpha = 0.55;
+    ctx.lineWidth = 2;
+    for (const segment of routeSegments) {
+      if (segment.length < 2) continue;
+      ctx.beginPath();
+      segment.forEach((point, index) => {
+        const projected = project(point);
+        if (index === 0) ctx.moveTo(projected.x, projected.y);
+        else ctx.lineTo(projected.x, projected.y);
+      });
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    const current = route[route.length - 1];
+    const projected = project(current);
+    ctx.fillStyle = participantColors.get(participant.name) ?? '#94a3b8';
+    ctx.beginPath();
+    ctx.arc(projected.x, projected.y, participant.isBot ? 4 : 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+  ctx.strokeRect(viewport.x + 0.5, viewport.y + 0.5, viewport.width - 1, viewport.height - 1);
+}
+
+function renderSessionReplay(): void {
+  const record = selectedSessionRecord;
+  if ($sessionReplayTitle) {
+    $sessionReplayTitle.textContent = record ? `${record.mapName} · #${record.instanceId}` : 'No recorded session selected';
+  }
+  if ($sessionReplaySubtitle) {
+    $sessionReplaySubtitle.textContent = record
+      ? `${sessionTypeLabel(record.mapType)} · ${record.participants.length} participants · ${new Date(record.startedAt).toLocaleString()}`
+      : 'Completed instances, raids, battlegrounds, and arenas appear here.';
+  }
+  if ($sessionReplaySeek) {
+    $sessionReplaySeek.max = String(record?.elapsedMs ?? 0);
+    $sessionReplaySeek.disabled = !record;
+  }
+  if ($sessionReplayPlayBtn) $sessionReplayPlayBtn.disabled = !record || sessionReplayPlaying;
+  if ($sessionReplayPauseBtn) $sessionReplayPauseBtn.disabled = !record || !sessionReplayPlaying;
+  if ($sessionReplayStopBtn) $sessionReplayStopBtn.disabled = !record;
+  if (!record) {
+    if ($sessionReplayTotals) $sessionReplayTotals.innerHTML = '';
+    if ($sessionReplayEvents) $sessionReplayEvents.innerHTML = '<p class="placeholder">Recorded events appear here.</p>';
+  } else {
+    renderSessionReplayEvents(record);
+    updateSessionReplayReadout();
+  }
+  renderSessionReplayCanvas();
+}
+
+function sessionReplayTick(timestamp: number): void {
+  if (!sessionReplayPlaying || !selectedSessionRecord) return;
+  if (!sessionReplayPreviousFrameAt) sessionReplayPreviousFrameAt = timestamp;
+  const delta = timestamp - sessionReplayPreviousFrameAt;
+  sessionReplayPreviousFrameAt = timestamp;
+  const speed = Number($sessionReplaySpeed?.value ?? '1') || 1;
+  sessionReplayPositionMs = Math.min(selectedSessionRecord.elapsedMs, sessionReplayPositionMs + delta * speed);
+  if (timestamp - sessionReplayLastRenderAt >= 100 || sessionReplayPositionMs >= selectedSessionRecord.elapsedMs) {
+    sessionReplayLastRenderAt = timestamp;
+    updateSessionReplayReadout();
+    renderSessionReplayCanvas();
+  }
+  if (sessionReplayPositionMs >= selectedSessionRecord.elapsedMs) {
+    pauseSessionReplay();
+    return;
+  }
+  sessionReplayFrame = requestAnimationFrame(sessionReplayTick);
+}
+
+function playSessionReplay(): void {
+  if (!selectedSessionRecord || sessionReplayPlaying) return;
+  if (sessionReplayPositionMs >= selectedSessionRecord.elapsedMs) sessionReplayPositionMs = 0;
+  sessionReplayLastFollowedEventMs = -1;
+  sessionReplayPlaying = true;
+  sessionReplayPreviousFrameAt = 0;
+  renderSessionReplay();
+  sessionReplayFrame = requestAnimationFrame(sessionReplayTick);
+}
+
+function pauseSessionReplay(): void {
+  sessionReplayPlaying = false;
+  if (sessionReplayFrame !== null) cancelAnimationFrame(sessionReplayFrame);
+  sessionReplayFrame = null;
+  sessionReplayPreviousFrameAt = 0;
+  if ($sessionReplayPlayBtn) $sessionReplayPlayBtn.disabled = !selectedSessionRecord;
+  if ($sessionReplayPauseBtn) $sessionReplayPauseBtn.disabled = true;
+}
+
+function stopSessionReplay(): void {
+  pauseSessionReplay();
+  sessionReplayPositionMs = 0;
+  sessionReplayLastFollowedEventMs = -1;
+  if (selectedSessionRecord) {
+    updateSessionReplayReadout();
+    renderSessionReplayCanvas();
+  }
+}
+
+$sessionHistoryRefreshBtn?.addEventListener('click', () => void refreshSessionHistory());
+$sessionHistoryPurgeBtn?.addEventListener('click', async () => {
+  if (!sessionHistoryEntries.length) {
+    if ($sessionHistoryStatus) $sessionHistoryStatus.textContent = 'There are no completed sessions to purge.';
+    return;
+  }
+  if (!window.confirm(`Permanently delete all ${sessionHistoryEntries.length} completed session records?`)) return;
+
+  $sessionHistoryPurgeBtn.disabled = true;
+  try {
+    const purged = await window.electronAPI.sessions.purgeCompleted();
+    stopSessionReplay();
+    selectedSessionRecordId = null;
+    selectedSessionRecord = null;
+    sessionHistoryEntries = [];
+    renderSessionHistoryList();
+    renderSessionReplay();
+    if ($sessionHistoryStatus) {
+      $sessionHistoryStatus.textContent = `Purged ${purged} completed session record${purged === 1 ? '' : 's'}.`;
+    }
+  } catch (error) {
+    if ($sessionHistoryStatus) {
+      const message = error instanceof Error ? error.message : String(error);
+      $sessionHistoryStatus.textContent = `Unable to purge session history: ${message}`;
+    }
+  } finally {
+    $sessionHistoryPurgeBtn.disabled = false;
+  }
+});
+$sessionHistoryList?.addEventListener('click', (event) => {
+  const item = (event.target as HTMLElement).closest<HTMLElement>('[data-session-id]');
+  const id = item?.dataset.sessionId;
+  if (id) void selectSessionRecord(id);
+});
+$sessionReplayPlayBtn?.addEventListener('click', playSessionReplay);
+$sessionReplayPauseBtn?.addEventListener('click', pauseSessionReplay);
+$sessionReplayStopBtn?.addEventListener('click', stopSessionReplay);
+$sessionReplaySeek?.addEventListener('input', () => {
+  sessionReplayPositionMs = Number($sessionReplaySeek.value);
+  updateSessionReplayReadout();
+  renderSessionReplayCanvas();
+});
+
+const sessionReplayResizeObserver = new ResizeObserver(() => {
+  if (getActiveMainTabId() === 'history') renderSessionReplayCanvas();
+});
+const sessionReplayCanvasWrapper = document.querySelector('.session-replay-canvas-wrapper');
+if (sessionReplayCanvasWrapper) sessionReplayResizeObserver.observe(sessionReplayCanvasWrapper);
+renderSessionReplay();

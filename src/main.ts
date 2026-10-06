@@ -4,8 +4,10 @@ import packageJson from '../package.json';
 import { SoapClient } from './soap-client';
 import { ConfigStore } from './config-store';
 import { getDbService, DatabaseService } from './database/db-service';
-import { SoapConfig, SoapResult, ConnectionProfile, DbConfig, DbConnectionState, QueryResult, FieldInfo, UpdateCheckResult, EntityMediaPreviewRequest, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, LogMonitorFileTailResult, MapPlayerPosition, MapBotWaypointRequest, MapBotWaypoint, CharacterInventoryResult, CharacterInventoryItemRow, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow } from './types/electron';
+import { SoapConfig, SoapResult, ConnectionProfile, DbConfig, DbConnectionState, QueryResult, FieldInfo, UpdateCheckResult, EntityMediaPreviewRequest, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, LogMonitorFileTailResult, MapPlayerPosition, MapPlayerSnapshot, MapOnlineCounts, OnlinePlayerRow, MapBotWaypointRequest, MapBotWaypoint, CharacterInventoryResult, CharacterInventoryItemRow, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow, SessionIndexEntry, SessionRecord } from './types/electron';
 import { inspectRemoteLogs, readRemoteLogTail } from './log-monitor-service';
+import { buildLiveMapTelemetryCommand, parseLiveMapTelemetrySnapshot } from './live-map-telemetry';
+import { SessionRecorder } from './session-recorder';
 
 const isMac = process.platform === 'darwin';
 const isWin = process.platform === 'win32';
@@ -22,6 +24,16 @@ const DEFAULT_GITHUB_REPO = 'scarecr0w12/wowmin';
 let updateCheckCache: { checkedAt: number; result: UpdateCheckResult } | null = null;
 const ENTITY_MEDIA_CACHE_TTL_MS = 60 * 60 * 1000;
 const entityMediaCache = new Map<string, { expiresAt: number; result: EntityMediaPreviewResult }>();
+const sessionRecorder = new SessionRecorder({
+  dataDir: process.env.WOWMIN_DATA_DIR || app.getPath('userData'),
+  mapAssetIndexPath: path.resolve(__dirname, '..', 'assets', 'instances', 'index.json'),
+  routeIntervalMs: Number(process.env.WOWMIN_SESSION_ROUTE_INTERVAL_MS) || 5000,
+  completionGraceMs: Number(process.env.WOWMIN_SESSION_COMPLETION_GRACE_MS) || 15000,
+});
+let telemetryPollTimer: ReturnType<typeof setInterval> | null = null;
+let telemetryPollInFlight: Promise<MapPlayerSnapshot | null> | null = null;
+let latestTelemetrySnapshot: MapPlayerSnapshot | null = null;
+const telemetryPollIntervalMs = Math.max(500, Number(process.env.WOWMIN_TELEMETRY_POLL_MS) || 1000);
 
 const NAVIGATE_TAB_ITEMS: { label: string; tab: string }[] = [
   { label: 'Dashboard', tab: 'dashboard' },
@@ -30,6 +42,8 @@ const NAVIGATE_TAB_ITEMS: { label: string; tab: string }[] = [
   { label: 'Tickets', tab: 'tickets' },
   { label: 'Database', tab: 'database' },
   { label: 'Live Map', tab: 'map' },
+  { label: 'Instance Watch', tab: 'instances' },
+  { label: 'Session History', tab: 'history' },
   { label: 'Economy', tab: 'economy' },
   { label: 'Logs', tab: 'logs' },
   { label: 'Console', tab: 'console' },
@@ -457,6 +471,59 @@ function createWindow(): void {
 
 // ── IPC Handlers ──────────────────────────────────────────────
 
+async function pollWorldTelemetry(): Promise<MapPlayerSnapshot | null> {
+  if (telemetryPollInFlight) return telemetryPollInFlight;
+  telemetryPollInFlight = (async () => {
+    const client = soapClient;
+    if (!client) return null;
+    try {
+      const telemetry = await client.executeCommand(buildLiveMapTelemetryCommand());
+      if (!telemetry.success) return null;
+      const parsed = parseLiveMapTelemetrySnapshot(telemetry.message);
+      if (!parsed) return null;
+      const snapshot: MapPlayerSnapshot = { ...parsed, source: 'worldserver', capturedAt: Date.now() };
+      latestTelemetrySnapshot = snapshot;
+      await sessionRecorder.ingest(snapshot);
+      return snapshot;
+    } catch {
+      return null;
+    }
+  })().finally(() => {
+    telemetryPollInFlight = null;
+  });
+  return telemetryPollInFlight;
+}
+
+function startTelemetryPolling(): void {
+  if (telemetryPollTimer) clearInterval(telemetryPollTimer);
+  void pollWorldTelemetry();
+  telemetryPollTimer = setInterval(() => void pollWorldTelemetry(), telemetryPollIntervalMs);
+}
+
+function stopTelemetryPolling(): void {
+  if (telemetryPollTimer) clearInterval(telemetryPollTimer);
+  telemetryPollTimer = null;
+  latestTelemetrySnapshot = null;
+}
+
+function filterTelemetrySnapshot(
+  snapshot: MapPlayerSnapshot,
+  mapId?: number,
+  instanceId?: number,
+): MapPlayerSnapshot {
+  if (!Number.isInteger(mapId)) return snapshot;
+  const matchesSession = (candidateMapId: number, candidateInstanceId: number): boolean =>
+    candidateMapId === mapId && (!Number.isInteger(instanceId) || candidateInstanceId === instanceId);
+  return {
+    ...snapshot,
+    players: snapshot.players.filter((player) => matchesSession(player.map, player.instanceId)),
+    battlegrounds: snapshot.battlegrounds.filter((state) => matchesSession(state.mapId, state.instanceId)),
+    instances: snapshot.instances.filter((state) => matchesSession(state.mapId, state.instanceId)),
+    deaths: snapshot.deaths.filter((death) => matchesSession(death.mapId, death.instanceId)),
+    events: snapshot.events.filter((event) => matchesSession(event.mapId, event.instanceId)),
+  };
+}
+
 ipcMain.handle('soap:connect', async (_event, config: SoapConfig): Promise<SoapResult> => {
   try {
     soapClient = new SoapClient({
@@ -467,8 +534,11 @@ ipcMain.handle('soap:connect', async (_event, config: SoapConfig): Promise<SoapR
     });
 
     const result = await soapClient.testConnection();
+    if (result.success) startTelemetryPolling();
+    else soapClient = null;
     return result;
   } catch (err) {
+    stopTelemetryPolling();
     soapClient = null;
     const errorMessage = err instanceof Error ? err.message : String(err);
     return { success: false, message: errorMessage };
@@ -489,6 +559,7 @@ ipcMain.handle('soap:command', async (_event, command: string): Promise<SoapResu
 });
 
 ipcMain.handle('soap:disconnect', async (): Promise<SoapResult> => {
+  stopTelemetryPolling();
   soapClient = null;
   return { success: true, message: 'Disconnected.' };
 });
@@ -622,7 +693,16 @@ ipcMain.handle('db:rollback', async (): Promise<void> => {
 
 // ── Map IPC Handlers ───────────────────────────────────────────
 
-interface MapPlayerQueryRow extends Omit<MapPlayerPosition, 'account'> {
+interface MapPlayerQueryRow {
+  name: string;
+  map: number;
+  instance_id: number;
+  position_x: number;
+  position_y: number;
+  position_z: number;
+  level: number;
+  race: number;
+  class: number;
   account: string | number;
 }
 
@@ -1228,53 +1308,116 @@ ipcMain.handle('inventory:getCharacterInventory', async (_event, characterName: 
   }
 });
 
-ipcMain.handle('map:getPlayerPositions', async (): Promise<MapPlayerPosition[]> => {
-  try {
-    const result = await mapDbService.query<MapPlayerQueryRow>(
-      'SELECT name, map, position_x, position_y, position_z, level, race, `class`, account FROM characters WHERE online = 1'
-    );
-    const rows = result.rows || [];
-    if (rows.length === 0) {
-      return [];
-    }
-
-    const accountIds = [...new Set(
-      rows
-        .map((row) => Number(row.account))
-        .filter((accountId) => Number.isInteger(accountId) && accountId > 0)
-    )];
-
-    let usernamesById = new Map<number, string>();
-
-    if (accountIds.length > 0) {
-      try {
-        const placeholders = accountIds.map(() => '?').join(', ');
-        const authTable = `${escapeIdentifier(mapAuthDatabaseName)}.\`account\``;
-        const accountsResult = await mapDbService.query<{ id: number; username: string }>(
-          `SELECT id, username FROM ${authTable} WHERE id IN (${placeholders})`,
-          accountIds,
-        );
-        usernamesById = new Map(accountsResult.rows.map((row) => [Number(row.id), row.username]));
-      } catch {
-        usernamesById = new Map();
-      }
-    }
-
-    return rows.map((row) => {
-      const numericAccountId = Number(row.account);
-      const accountName = Number.isInteger(numericAccountId) && numericAccountId > 0
-        ? usernamesById.get(numericAccountId) ?? String(row.account)
-        : String(row.account);
-
-      return {
-        ...row,
-        account: accountName,
-      };
-    });
-  } catch {
-    return [];
-  }
+ipcMain.handle('players:getOnline', async (): Promise<OnlinePlayerRow[]> => {
+  const charactersDb = getCharactersDbService();
+  if (!charactersDb?.config?.database) throw new Error('Characters database is not connected');
+  const authName = deriveAuthDatabaseName(charactersDb.config.database);
+  const authAccount = `${escapeIdentifier(authName)}.\`account\``;
+  const accountAccess = `${escapeIdentifier(authName)}.\`account_access\``;
+  const result = await charactersDb.query<OnlinePlayerRow>(`
+    SELECT c.name, COALESCE(a.username, CAST(c.account AS CHAR)) AS account,
+           COALESCE(a.last_ip, '') AS ip, c.map AS mapId, c.zone AS zoneId,
+           COALESCE(a.expansion, 2) AS expansion,
+           COALESCE((SELECT MAX(aa.gmlevel) FROM ${accountAccess} aa WHERE aa.id = c.account), 0) AS gmLevel,
+           c.level, c.race AS raceId, c.\`class\` AS classId
+    FROM characters c
+    LEFT JOIN ${authAccount} a ON a.id = c.account
+    WHERE c.online > 0
+  `);
+  return result.rows;
 });
+
+ipcMain.handle('map:getOnlineCounts', async (): Promise<MapOnlineCounts> => {
+  if (!mapDbService.connected) throw new Error('Characters database is not connected');
+  const authTable = `${escapeIdentifier(mapAuthDatabaseName)}.\`account\``;
+  const result = await mapDbService.query<{ total: number; bots: number }>(`
+    SELECT COUNT(*) AS total,
+           COALESCE(SUM(CASE WHEN UPPER(a.username) LIKE 'RNDBOT%' THEN 1 ELSE 0 END), 0) AS bots
+    FROM characters c
+    LEFT JOIN ${authTable} a ON a.id = c.account
+    WHERE c.online = 1
+  `);
+  const total = numField(result.rows[0]?.total);
+  const bots = numField(result.rows[0]?.bots);
+  return { players: total - bots, bots, total };
+});
+
+ipcMain.handle('map:getPlayerPositions', async (_event, mapId?: number, instanceId?: number): Promise<MapPlayerSnapshot> => {
+  if (soapClient) {
+    const freshSnapshot = latestTelemetrySnapshot && Date.now() - latestTelemetrySnapshot.capturedAt <= telemetryPollIntervalMs
+      ? latestTelemetrySnapshot
+      : await pollWorldTelemetry();
+    if (freshSnapshot) return filterTelemetrySnapshot(freshSnapshot, mapId, instanceId);
+  }
+
+  const filters: string[] = [];
+  const params: number[] = [];
+  if (Number.isInteger(mapId)) {
+    filters.push('map = ?');
+    params.push(mapId as number);
+  }
+  if (Number.isInteger(instanceId)) {
+    filters.push('instance_id = ?');
+    params.push(instanceId as number);
+  }
+  const whereFilters = filters.length ? ` AND ${filters.join(' AND ')}` : '';
+  const result = await mapDbService.query<MapPlayerQueryRow>(
+    `SELECT name, map, instance_id, position_x, position_y, position_z, level, race, \`class\`, account
+       FROM characters WHERE online = 1${whereFilters}`,
+    params,
+  );
+  const rows = result.rows || [];
+  const accountIds = [...new Set(rows.map((row) => Number(row.account))
+    .filter((accountId) => Number.isInteger(accountId) && accountId > 0))];
+  let usernamesById = new Map<number, string>();
+
+  if (accountIds.length > 0) {
+    const placeholders = accountIds.map(() => '?').join(', ');
+    const authTable = `${escapeIdentifier(mapAuthDatabaseName)}.\`account\``;
+    const accountsResult = await mapDbService.query<{ id: number; username: string }>(
+      `SELECT id, username FROM ${authTable} WHERE id IN (${placeholders})`,
+      accountIds,
+    );
+    usernamesById = new Map(accountsResult.rows.map((row) => [Number(row.id), row.username]));
+  }
+
+  const players = rows.map((row): MapPlayerPosition => {
+    const accountId = Number(row.account);
+    const account = usernamesById.get(accountId) ?? String(row.account);
+    return {
+      name: row.name,
+      map: Number(row.map),
+      instanceId: Number(row.instance_id),
+      position_x: Number(row.position_x),
+      position_y: Number(row.position_y),
+      position_z: Number(row.position_z),
+      orientation: 0,
+      level: Number(row.level),
+      race: Number(row.race),
+      class: Number(row.class),
+      account,
+      accountId,
+      isBot: /^RNDBOT/i.test(account),
+      alive: true,
+      inCombat: false,
+    };
+  });
+  return {
+    players,
+    battlegrounds: [],
+    instances: [],
+    deaths: [],
+    events: [],
+    source: 'database',
+    capturedAt: Date.now(),
+  };
+});
+
+ipcMain.handle('sessions:list', async (): Promise<SessionIndexEntry[]> => sessionRecorder.list());
+
+ipcMain.handle('sessions:get', async (_event, id: string): Promise<SessionRecord | null> => sessionRecorder.get(id));
+
+ipcMain.handle('sessions:purgeCompleted', async (): Promise<number> => sessionRecorder.purgeCompleted());
 
 ipcMain.handle('map:getBotWaypoint', async (_event, request: MapBotWaypointRequest): Promise<MapBotWaypoint | null> => {
   try {
@@ -1323,7 +1466,7 @@ ipcMain.handle('map:getBotWaypoint', async (_event, request: MapBotWaypointReque
 app.whenReady().then(() => {
   configStore = new ConfigStore();
   createWindow();
-  void checkForUpdates();
+  if (!process.env.WOWMIN_WEB_MODE) void checkForUpdates();
 });
 
 // macOS: keep app running when all windows are closed (dock stays active)

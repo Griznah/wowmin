@@ -30,16 +30,222 @@ export interface QueryResult<T = Record<string, unknown>> {
   insertId?: number;
 }
 
+export interface OnlinePlayerRow {
+  name: string;
+  account: string;
+  ip: string;
+  mapId: number;
+  zoneId: number;
+  expansion: number;
+  gmLevel: number;
+  level: number;
+  raceId: number;
+  classId: number;
+}
+
+export interface MapOnlineCounts {
+  players: number;
+  bots: number;
+  total: number;
+}
+
 export interface MapPlayerPosition {
   name: string;
   map: number;
+  instanceId: number;
   position_x: number;
   position_y: number;
   position_z: number;
+  orientation: number;
   level: number;
   race: number;
   class: number;
   account: string;
+  accountId: number;
+  isBot: boolean;
+  alive: boolean;
+  inCombat: boolean;
+  mapType?: number;
+  difficulty?: number;
+  sessionStartedAt?: number;
+  groupId?: number;
+  isRaidGroup?: boolean;
+  subgroup?: number;
+  teamId?: number;
+  healthPct?: number;
+  powerType?: number;
+  powerPct?: number;
+  targetGuid?: number;
+  targetType?: number;
+  targetName?: string;
+  roleMask?: number;
+  waitingForResurrect?: boolean;
+  battlegroundRole?: number;
+  wmoGroupId?: number;
+}
+
+export interface MapBattlegroundWorldState {
+  id: number;
+  value: number;
+}
+
+export interface MapBattlegroundState {
+  mapId: number;
+  instanceId: number;
+  battlegroundTypeId: number;
+  status: number;
+  elapsedMs: number;
+  remainingMs: number;
+  winner: number;
+  allianceScore: number;
+  hordeScore: number;
+  alliancePlayers: number;
+  hordePlayers: number;
+  allianceAlive: number;
+  hordeAlive: number;
+  nextResurrectMs: number;
+  allianceStrategy: number;
+  hordeStrategy: number;
+  worldStates: MapBattlegroundWorldState[];
+}
+
+export interface MapInstanceBossState {
+  id: number;
+  state: number;
+  name: string;
+}
+
+export interface MapInstanceState {
+  mapId: number;
+  instanceId: number;
+  completedEncounterMask: number;
+  bosses: MapInstanceBossState[];
+}
+
+export interface MapInstanceDeath {
+  mapId: number;
+  instanceId: number;
+  eventId: number;
+  occurredAt: number;
+  victimGuid: number;
+  victimName: string;
+  killerGuid: number;
+  killerType: number;
+  killerName: string;
+}
+
+export interface MapSessionEvent {
+  mapId: number;
+  instanceId: number;
+  eventId: number;
+  occurredAt: number;
+  type: 'kill' | 'loot' | 'level' | string;
+  actorGuid: number;
+  actorName: string;
+  targetGuid: number;
+  targetType: number;
+  targetName: string;
+  valueId: number;
+  valueName: string;
+  amount: number;
+}
+
+export interface MapPlayerSnapshot {
+  players: MapPlayerPosition[];
+  battlegrounds: MapBattlegroundState[];
+  instances: MapInstanceState[];
+  deaths: MapInstanceDeath[];
+  events: MapSessionEvent[];
+  source: 'worldserver' | 'database';
+  capturedAt: number;
+}
+
+export type SessionEventType = 'kill' | 'death' | 'loot' | 'level' | 'boss' | 'objective' | 'flag-capture';
+
+export interface RecordedSessionEvent {
+  id: string;
+  source: 'worldserver' | 'snapshot';
+  sourceEventId?: number;
+  type: SessionEventType;
+  occurredAt: number;
+  elapsedMs: number;
+  actorGuid: number;
+  actorName: string;
+  targetGuid: number;
+  targetType: number;
+  targetName: string;
+  valueId: number;
+  valueName: string;
+  amount: number;
+  description: string;
+}
+
+export interface SessionRoutePoint {
+  occurredAt: number;
+  elapsedMs: number;
+  name: string;
+  isBot: boolean;
+  teamId?: number;
+  x: number;
+  y: number;
+  z: number;
+  orientation: number;
+  wmoGroupId?: number;
+  alive: boolean;
+  inCombat: boolean;
+}
+
+export interface SessionParticipant {
+  name: string;
+  isBot: boolean;
+  teamId?: number;
+  classId: number;
+  levelStart: number;
+  levelEnd: number;
+}
+
+export interface SessionTotals {
+  kills: number;
+  deaths: number;
+  lootItems: number;
+  levelUps: number;
+  objectives: number;
+  flagCaptures: number;
+}
+
+export interface SessionRecord {
+  schemaVersion: 1;
+  id: string;
+  mapId: number;
+  mapName: string;
+  mapType: number;
+  difficulty: number;
+  instanceId: number;
+  startedAt: number;
+  endedAt: number;
+  elapsedMs: number;
+  completed: boolean;
+  participants: SessionParticipant[];
+  events: RecordedSessionEvent[];
+  routes: SessionRoutePoint[];
+  totals: SessionTotals;
+}
+
+export interface SessionIndexEntry {
+  id: string;
+  mapId: number;
+  mapName: string;
+  mapType: number;
+  difficulty: number;
+  instanceId: number;
+  startedAt: number;
+  endedAt: number;
+  elapsedMs: number;
+  participantCount: number;
+  eventCount: number;
+  routePointCount: number;
+  totals: SessionTotals;
+  bytes: number;
 }
 
 export interface MapBotWaypointRequest {
@@ -339,8 +545,13 @@ export type IpcChannels = {
   // Live map operations
   'map:connect': (config: DbConfig) => DbConnectionState;
   'map:disconnect': () => void;
-  'map:getPlayerPositions': () => MapPlayerPosition[];
+  'map:getPlayerPositions': (mapId?: number, instanceId?: number) => MapPlayerSnapshot;
+  'map:getOnlineCounts': () => MapOnlineCounts;
+  'players:getOnline': () => OnlinePlayerRow[];
   'map:getBotWaypoint': (request: MapBotWaypointRequest) => MapBotWaypoint | null;
+  'sessions:list': () => SessionIndexEntry[];
+  'sessions:get': (id: string) => SessionRecord | null;
+  'sessions:purgeCompleted': () => number;
 
   'economy:connect': (config: DbConfig) => DbConnectionState;
   'economy:disconnect': () => void;

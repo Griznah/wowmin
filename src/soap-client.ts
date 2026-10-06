@@ -2,13 +2,13 @@ import * as http from 'http';
 import { parseStringPromise } from 'xml2js';
 import { SoapConfig, SoapResult } from './types/electron';
 
-interface SoapEnvelope {
-  'SOAP-ENV:Envelope'?: SoapBody;
-  'soap:Envelope'?: SoapBody;
-  Envelope?: SoapBody;
+interface SoapDocument {
+  'SOAP-ENV:Envelope'?: SoapEnvelope;
+  'soap:Envelope'?: SoapEnvelope;
+  Envelope?: SoapEnvelope;
 }
 
-interface SoapBody {
+interface SoapEnvelope {
   'SOAP-ENV:Body'?: SoapResponse;
   'soap:Body'?: SoapResponse;
   Body?: SoapResponse;
@@ -51,7 +51,7 @@ export class SoapClient {
     port = 7878,
     username = '',
     password = '',
-  }: SoapConfig = {}) {
+  }: Partial<SoapConfig> = {}) {
     this.host = host;
     this.port = port;
     this.username = username;
@@ -149,8 +149,9 @@ export class SoapClient {
               ignoreAttrs: true,
             });
 
-            const envelope: SoapEnvelope =
-              parsed['SOAP-ENV:Envelope'] || parsed['soap:Envelope'] || parsed.Envelope;
+            const document = parsed as SoapDocument;
+            const envelope =
+              document['SOAP-ENV:Envelope'] || document['soap:Envelope'] || document.Envelope;
 
             if (!envelope) {
               return resolve({ success: false, message: `Unexpected response:\n${data}` });

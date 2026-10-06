@@ -10,18 +10,19 @@ export function escapeHtml(str: string): string {
   return d.innerHTML;
 }
 
-export function debounce<T extends (...args: unknown[]) => void>(
-  fn: T,
+export function debounce<Args extends unknown[]>(
+  fn: (...args: Args) => void,
   delay: number
-): (...args: Parameters<T>) => void {
+): (...args: Args) => void {
   let timeout: ReturnType<typeof setTimeout> | null = null;
-  return (...args: Parameters<T>) => {
+  return (...args: Args) => {
     if (timeout) clearTimeout(timeout);
     timeout = setTimeout(() => fn(...args), delay);
   };
 }
 
-export function showResult(el: HTMLElement, ok: boolean, text: string): void {
+export function showResult(el: HTMLElement | null, ok: boolean, text: string): void {
+  if (!el) return;
   el.textContent = text;
   el.className = `action-result visible ${ok ? 'ok' : 'err'}`;
 }
@@ -116,6 +117,7 @@ export const MAP_NAMES: Record<number, string> = {
   618: 'Ring of Valor',
   619: "Ahn'kahet: The Old Kingdom",
   624: 'Vault of Archavon',
+  628: 'Isle of Conquest',
   631: 'Icecrown Citadel',
   632: 'Forge of Souls',
   649: 'Trial of the Crusader',

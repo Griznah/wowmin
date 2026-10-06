@@ -1,0 +1,130 @@
+const assert = require('node:assert/strict');
+const { test } = require('node:test');
+const path = require('node:path');
+const vm = require('node:vm');
+const esbuild = require('esbuild');
+
+const output = esbuild.buildSync({
+  entryPoints: [path.join(__dirname, '../src/live-map-telemetry.ts')],
+  bundle: true,
+  write: false,
+  platform: 'node',
+  format: 'cjs',
+}).outputFiles[0].text;
+const context = { module: { exports: {} } };
+context.exports = context.module.exports;
+vm.runInNewContext(output, context);
+const {
+  buildLiveMapTelemetryCommand,
+  parseLiveMapTelemetry,
+  parseLiveMapTelemetrySnapshot,
+} = context.module.exports;
+
+test('builds standalone telemetry commands with optional session filters', () => {
+  assert.equal(buildLiveMapTelemetryCommand(), 'wowmin telemetry');
+  assert.equal(buildLiveMapTelemetryCommand(489), 'wowmin telemetry 489');
+  assert.equal(buildLiveMapTelemetryCommand(489, 42), 'wowmin telemetry 489 42');
+  assert.equal(buildLiveMapTelemetryCommand(undefined, 42), 'wowmin telemetry');
+});
+
+test('parses a complete live worldserver snapshot', () => {
+  const message = [
+    'WMAP_VERSION|1',
+    'WMAP|Jaspianus|571|42|5800.125|620.500|647.250|1.750|80|1|1|9001|1|1|1',
+    'WMAP_END|1',
+  ].join('\n');
+  const [player] = parseLiveMapTelemetry(message);
+  assert.equal(player.name, 'Jaspianus');
+  assert.equal(player.instanceId, 42);
+  assert.equal(player.position_x, 5800.125);
+  assert.equal(player.isBot, true);
+  assert.equal(player.inCombat, true);
+});
+
+test('parses protocol v2 session, group, status, target, and role fields', () => {
+  const row = [
+    'WMAP', 'Jaspianus%7CTest', 489, 42, 100, 200, 30, 1.5, 80, 1, 1, 9001, 1, 1, 1,
+    3, 0, 1760000000, 77, 1, 2, 0, 72.5, 0, 44.5, 1234, 3, 'Training%7CPuppet', 10,
+  ].join('|');
+  const [player] = parseLiveMapTelemetry(`WMAP_VERSION|2\n${row}\nWMAP_END|1`);
+  assert.equal(player.name, 'Jaspianus|Test');
+  assert.equal(player.mapType, 3);
+  assert.equal(player.sessionStartedAt, 1760000000);
+  assert.equal(player.groupId, 77);
+  assert.equal(player.isRaidGroup, true);
+  assert.equal(player.healthPct, 72.5);
+  assert.equal(player.targetName, 'Training|Puppet');
+  assert.equal(player.roleMask, 10);
+});
+
+test('parses protocol v3 battleground summaries, objectives, resurrection, and bot roles', () => {
+  const playerRow = [
+    'WMAP', 'Jaspianus', 489, 42, 100, 200, 30, 1.5, 80, 1, 1, 9001, 1, 0, 0,
+    3, 0, 1760000000, 77, 1, 2, 0, 0, 0, 0, 0, 0, '', 10, 1, 7,
+  ].join('|');
+  const battlegroundRow = [
+    'WBG', 489, 42, 2, 3, 90000, 0, 2, 1, 2, 10, 9, 8, 7, 12000, 1, 2,
+  ].join('|');
+  const message = [
+    'WMAP_VERSION|3',
+    playerRow,
+    battlegroundRow,
+    'WOBJ|489|42|1581|1',
+    'WMAP_END|1|1|1',
+  ].join('\n');
+  const snapshot = parseLiveMapTelemetrySnapshot(message);
+  assert.equal(snapshot.players[0].waitingForResurrect, true);
+  assert.equal(snapshot.players[0].battlegroundRole, 7);
+  assert.equal(snapshot.battlegrounds[0].status, 3);
+  assert.equal(snapshot.battlegrounds[0].allianceStrategy, 1);
+  assert.equal(snapshot.battlegrounds[0].worldStates[0].id, 1581);
+});
+
+test('parses protocol v4 encounter, death, and floor-context telemetry', () => {
+  const playerRow = [
+    'WMAP', 'Jaspianus', 631, 42, 100, 200, 30, 1.5, 80, 1, 1, 9001, 1, 0, 1,
+    2, 0, 1760000000, 77, 1, 2, 0, 75, 0, 100, 0, 0, '', 10, 0, -1, 20115,
+  ].join('|');
+  const message = [
+    'WMAP_VERSION|4',
+    playerRow,
+    'WINS|631|42|3',
+    'WBOSS|631|42|0|3|Lord%20Marrowgar',
+    'WDEATH|631|42|9|1760000100|123|Jaspianus|456|3|Lord%20Marrowgar',
+    'WMAP_END|1|0|0|1|1|1',
+  ].join('\n');
+  const snapshot = parseLiveMapTelemetrySnapshot(message);
+  assert.equal(snapshot.players[0].wmoGroupId, 20115);
+  assert.equal(snapshot.instances[0].bosses[0].name, 'Lord Marrowgar');
+  assert.equal(snapshot.instances[0].bosses[0].state, 3);
+  assert.equal(snapshot.deaths[0].victimName, 'Jaspianus');
+  assert.equal(snapshot.deaths[0].killerName, 'Lord Marrowgar');
+  assert.equal(snapshot.events.length, 0);
+});
+
+test('parses protocol v5 authoritative session events', () => {
+  const playerRow = [
+    'WMAP', 'Jaspianus', 631, 42, 100, 200, 30, 1.5, 80, 1, 1, 9001, 1, 1, 0,
+    2, 0, 1760000000, 77, 1, 2, 0, 100, 0, 100, 0, 0, '', 10, 0, -1, 20115,
+  ].join('|');
+  const message = [
+    'WMAP_VERSION|5',
+    playerRow,
+    'WEVENT|631|42|17|1760000100|loot|123|Jaspianus|0|0||49908|Primordial%20Saronite|2',
+    'WEVENT|631|42|18|1760000101|kill|123|Jaspianus|456|3|Cult%20Adherent|37949|Cult%20Adherent|1',
+    'WMAP_END|1|0|0|0|0|0|2',
+  ].join('\n');
+  const snapshot = parseLiveMapTelemetrySnapshot(message);
+  assert.equal(snapshot.events[0].valueName, 'Primordial Saronite');
+  assert.equal(snapshot.events[0].amount, 2);
+  assert.equal(snapshot.events[1].targetName, 'Cult Adherent');
+});
+
+test('rejects truncated snapshots', () => {
+  const message = 'WMAP|Jaspianus|571|0|1|2|3|4|80|1|1|9001|1|1|0\nWMAP_END|2';
+  assert.equal(parseLiveMapTelemetry(message), null);
+});
+
+test('rejects unsupported telemetry protocol versions', () => {
+  assert.equal(parseLiveMapTelemetry('WMAP_VERSION|3\nWMAP_END|0'), null);
+});

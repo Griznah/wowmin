@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
-import { SoapConfig, SoapResult, DbConfig, DbConnectionState, QueryResult, FieldInfo, ConnectionProfile, UpdateCheckResult, EntityMediaPreviewRequest, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, LogMonitorFileTailResult, MapPlayerPosition, MapBotWaypointRequest, MapBotWaypoint, CharacterInventoryResult, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow } from './types/electron';
+import { SoapConfig, SoapResult, DbConfig, DbConnectionState, QueryResult, FieldInfo, ConnectionProfile, UpdateCheckResult, EntityMediaPreviewRequest, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, LogMonitorFileTailResult, MapPlayerSnapshot, MapBotWaypointRequest, MapBotWaypoint, CharacterInventoryResult, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow, SessionIndexEntry, SessionRecord } from './types/electron';
 
 // Type-safe IPC wrapper for renderer process
 const electronAPI = {
@@ -70,16 +70,32 @@ const electronAPI = {
       ipcRenderer.invoke('db:rollback'),
   },
 
+  players: {
+    getOnline: (): Promise<import('./types/electron').OnlinePlayerRow[]> =>
+      ipcRenderer.invoke('players:getOnline'),
+  },
+
   // Live Map operations (dedicated characters-DB connection)
   map: {
     connect: (config: DbConfig): Promise<DbConnectionState> =>
       ipcRenderer.invoke('map:connect', config),
     disconnect: (): Promise<void> =>
       ipcRenderer.invoke('map:disconnect'),
-    getPlayerPositions: (): Promise<MapPlayerPosition[]> =>
-      ipcRenderer.invoke('map:getPlayerPositions'),
+    getPlayerPositions: (mapId?: number, instanceId?: number): Promise<MapPlayerSnapshot> =>
+      ipcRenderer.invoke('map:getPlayerPositions', mapId, instanceId),
+    getOnlineCounts: (): Promise<import('./types/electron').MapOnlineCounts> =>
+      ipcRenderer.invoke('map:getOnlineCounts'),
     getBotWaypoint: (request: MapBotWaypointRequest): Promise<MapBotWaypoint | null> =>
       ipcRenderer.invoke('map:getBotWaypoint', request),
+  },
+
+  sessions: {
+    list: (): Promise<SessionIndexEntry[]> =>
+      ipcRenderer.invoke('sessions:list'),
+    get: (id: string): Promise<SessionRecord | null> =>
+      ipcRenderer.invoke('sessions:get', id),
+    purgeCompleted: (): Promise<number> =>
+      ipcRenderer.invoke('sessions:purgeCompleted'),
   },
 
   economy: {

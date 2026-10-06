@@ -138,6 +138,58 @@ npm run build:css
 npm start
 ```
 
+## Native Web Service
+
+The same UI can run in a browser without Docker or a graphical desktop. Build it,
+set HTTP Basic Authentication credentials, and start the Node.js service:
+
+```bash
+npm ci
+npm run build:ts
+npm run build:css
+
+export WOWMIN_HOST=0.0.0.0
+export WOWMIN_PORT=3000
+export WOWMIN_USERNAME=admin
+export WOWMIN_PASSWORD='replace-with-a-strong-password'
+export WOWMIN_DATA_DIR="$PWD/.wowmin-data"
+npm run start:web
+```
+
+Open `http://server-address:3000/` and sign in with the configured HTTP
+credentials. The browser UI keeps the desktop app's SOAP, database, map,
+economy, inventory, profile, and remote-log APIs. Because those APIs include raw
+SQL and server administration commands, do not expose the service without
+authentication; use a TLS reverse proxy when access crosses an untrusted
+network.
+
+A hardened systemd unit template is provided at `deploy/wowmin.service`. It
+expects `/etc/wowmin.env` to define the variables above and stores profiles in
+`/var/lib/wowmin` when `WOWMIN_DATA_DIR=/var/lib/wowmin` is set. Set
+`WOWMIN_WEB_MODE=1` to disable upstream GitHub release checks in the service.
+
+For server-managed connections, set all three of `WOWMIN_SOAP_USERNAME`,
+`WOWMIN_SOAP_PASSWORD`, and `WOWMIN_DB_PASSWORD` in the environment. The browser
+then auto-connects SOAP, world DB, characters map DB and economy DB after HTTP
+login, hides the corresponding credential forms, disables saved profiles in
+web mode, and reads logs locally rather than requiring SSH credentials. The
+remaining settings are:
+
+```ini
+WOWMIN_SOAP_HOST=127.0.0.1
+WOWMIN_SOAP_PORT=7878
+WOWMIN_DB_HOST=127.0.0.1
+WOWMIN_DB_PORT=3306
+WOWMIN_DB_USERNAME=acore
+WOWMIN_WORLD_DB=acore_world
+WOWMIN_CHARACTERS_DB=acore_characters
+WOWMIN_WORLD_CONFIG=/stuff/Source/azerothcore-wotlk/env/dist/etc/worldserver.conf
+WOWMIN_LOG_DIR=/stuff/Source/azerothcore-wotlk/env/dist/bin
+```
+
+Keep `/etc/wowmin.env` mode `0600` and restart the service after edits. Web
+mode disables upstream release checks; the Electron desktop build retains them.
+
 ## Usage
 
 ### SOAP Connection

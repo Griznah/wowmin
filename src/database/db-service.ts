@@ -1,4 +1,5 @@
 import * as mysql from 'mysql2/promise';
+import type { ExecuteValues } from 'mysql2';
 import { DbConfig, QueryResult, FieldInfo } from '../types/electron';
 
 /**
@@ -27,7 +28,16 @@ export class DatabaseService {
    * Connect to a MySQL database
    */
   async connect(config: DbConfig): Promise<{ success: boolean; message: string }> {
+    if (this.pool && this._connected && this._config
+      && this._config.host === config.host && this._config.port === config.port
+      && this._config.username === config.username && this._config.password === config.password
+      && this._config.database === config.database) {
+      return { success: true, message: `Already connected to ${config.database}` };
+    }
     try {
+      if (this.pool) {
+        await this.disconnect();
+      }
       this._config = config;
       
       this.pool = mysql.createPool({
@@ -50,7 +60,9 @@ export class DatabaseService {
       return { success: true, message: `Connected to ${config.database} on ${config.host}:${config.port}` };
     } catch (error) {
       this._connected = false;
+      if (this.pool) await this.pool.end();
       this.pool = null;
+      this._config = null;
       const errorMessage = error instanceof Error ? error.message : String(error);
       return { success: false, message: `Connection failed: ${errorMessage}` };
     }
@@ -98,15 +110,17 @@ export class DatabaseService {
     }
 
     try {
-      const [rows, fields] = await this.pool.execute<mysql.RowDataPacket[]>(sql, params);
-      
+      const [rows, fields] = await this.pool.execute<mysql.RowDataPacket[]>(sql, params as ExecuteValues | undefined);
+
       return {
         rows: rows as T[],
-        fields: fields?.map((f) => ({
-          name: f.name,
-          type: this.getFieldType(f.type),
-          length: f.length,
-          nullable: (f.flags & 1) === 0, // NOT_NULL_FLAG
+        fields: fields?.map((field) => ({
+          name: field.name,
+          type: this.getFieldType(field.type ?? field.columnType ?? mysql.Types.NULL),
+          length: field.length ?? field.columnLength,
+          nullable: typeof field.flags === 'number'
+            ? (field.flags & 1) === 0 // NOT_NULL_FLAG
+            : !field.flags.includes('NOT_NULL'),
         })) ?? [],
       };
     } catch (error) {
@@ -124,7 +138,7 @@ export class DatabaseService {
     }
 
     try {
-      const [result] = await this.pool.execute<mysql.ResultSetHeader>(sql, params);
+      const [result] = await this.pool.execute<mysql.ResultSetHeader>(sql, params as ExecuteValues | undefined);
       
       return {
         rows: [],

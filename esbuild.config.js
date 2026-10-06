@@ -31,6 +31,34 @@ const preloadConfig = {
   format: 'cjs',
 };
 
+// Native web-service build. It reuses the Electron IPC handlers through a
+// lightweight compatibility shim, keeping desktop and web behavior aligned.
+const webServerConfig = {
+  entryPoints: [path.join(__dirname, 'src/web-server.ts')],
+  bundle: true,
+  platform: 'node',
+  target: 'node18',
+  outfile: 'dist/web-server.js',
+  external: ['mysql2', 'ssh2', 'xml2js'],
+  alias: {
+    electron: path.join(__dirname, 'src/web-electron-shim.ts'),
+  },
+  sourcemap: true,
+  minify: !isDev,
+  format: 'cjs',
+};
+
+const webApiConfig = {
+  entryPoints: [path.join(__dirname, 'renderer/scripts/web-api.ts')],
+  bundle: true,
+  platform: 'browser',
+  target: 'chrome120',
+  outfile: 'dist/web-api.js',
+  sourcemap: true,
+  minify: !isDev,
+  format: 'iife',
+};
+
 // Renderer build config
 const rendererConfig = {
   entryPoints: [path.join(__dirname, 'renderer/scripts/app.ts')],
@@ -48,6 +76,8 @@ async function build() {
     await Promise.all([
       esbuild.build(mainConfig),
       esbuild.build(preloadConfig),
+      esbuild.build(webServerConfig),
+      esbuild.build(webApiConfig),
       esbuild.build(rendererConfig),
     ]);
     console.log('Build completed successfully');
@@ -61,6 +91,8 @@ async function watch() {
   const contexts = await Promise.all([
     esbuild.context(mainConfig),
     esbuild.context(preloadConfig),
+    esbuild.context(webServerConfig),
+    esbuild.context(webApiConfig),
     esbuild.context(rendererConfig),
   ]);
 

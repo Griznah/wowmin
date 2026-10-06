@@ -1,0 +1,37 @@
+[Unit]
+Description=WoW Admin web service
+After=network-online.target mysql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/Source/wowmin
+EnvironmentFile=/etc/wowmin.env
+Environment=NODE_ENV=production
+Environment=WOWMIN_WEB_MODE=1
+ExecStart=/usr/bin/node /Source/wowmin/dist/web-server.js
+Restart=on-failure
+RestartSec=3
+DynamicUser=yes
+StateDirectory=wowmin
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

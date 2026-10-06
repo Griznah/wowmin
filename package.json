@@ -6,10 +6,11 @@
   "scripts": {
     "build:ts": "node esbuild.config.js",
     "build:ts:watch": "node esbuild.config.js --watch",
-    "build:css": "tailwindcss -i ./renderer/styles/tailwind.css -o ./renderer/styles/output.css",
-    "build:css:watch": "tailwindcss -i ./renderer/styles/tailwind.css -o ./renderer/styles/output.css --watch",
+    "build:css": "node scripts/build-css.js",
+    "build:css:watch": "node scripts/build-css.js --watch",
     "extract:maps": "node scripts/extract-map-assets.mjs",
     "start": "npm run build:ts && npm run build:css && electron . --no-sandbox",
+    "start:web": "node dist/web-server.js",
     "dev": "npm run build:ts && npm run build:css && electron . --dev --no-sandbox",
     "build": "npm run build:ts && npm run build:css && node scripts/package.js",
     "build:win": "npm run build:ts && npm run build:css && node scripts/package.js --win",
@@ -30,14 +31,15 @@
   "homepage": "https://github.com/scarecr0w12/wowmin",
   "license": "MIT",
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
     "@types/node": "^20.10.0",
     "@types/xml2js": "^0.4.14",
     "autoprefixer": "^10.4.16",
-    "electron": "^33.0.0",
-    "electron-builder": "^25.1.8",
-    "esbuild": "^0.19.0",
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2",
     "postcss": "^8.4.32",
-    "tailwindcss": "^3.4.0",
+    "tailwindcss": "^4.3.3",
     "typescript": "^5.3.0"
   },
   "dependencies": {

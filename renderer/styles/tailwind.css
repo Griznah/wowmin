@@ -1,6 +1,7 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+@config "../../tailwind.config.js";
+@source "../index.html";
+@source "../scripts";
 
 /* Custom base — aligned with renderer/styles.css :root */
 @layer base {
@@ -121,7 +122,10 @@
   }
 
   .select-wow {
-    @apply input-wow appearance-none cursor-pointer;
+    @apply w-full px-3 py-2 rounded text-sm appearance-none cursor-pointer;
+    background-color: var(--color-input);
+    border: 1px solid var(--color-border);
+    color: var(--color-text);
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%238b97ad'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M19 9l-7 7-7-7'%3E%3C/path%3E%3C/svg%3E");
     background-repeat: no-repeat;
     background-position: right 0.5rem center;
@@ -174,7 +178,7 @@
   }
 
   .tab-wow-active {
-    @apply tab-wow;
+    @apply px-4 py-2 font-semibold text-sm transition-colors duration-150;
     color: var(--color-accent);
     border-bottom-color: var(--color-accent);
   }
@@ -190,7 +194,7 @@
   }
 
   .nav-item-active {
-    @apply nav-item;
+    @apply flex items-center gap-3 px-4 py-2 rounded transition-colors duration-150;
     background-color: var(--color-elevated);
     color: var(--color-accent);
   }
@@ -200,23 +204,23 @@
   }
 
   .badge-common {
-    @apply badge bg-wow-common/20 text-wow-common;
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-wow-common/20 text-wow-common;
   }
 
   .badge-uncommon {
-    @apply badge bg-wow-uncommon/20 text-wow-uncommon;
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-wow-uncommon/20 text-wow-uncommon;
   }
 
   .badge-rare {
-    @apply badge bg-wow-rare/20 text-wow-rare;
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-wow-rare/20 text-wow-rare;
   }
 
   .badge-epic {
-    @apply badge bg-wow-epic/20 text-wow-epic;
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-wow-epic/20 text-wow-epic;
   }
 
   .badge-legendary {
-    @apply badge bg-wow-legendary/20 text-wow-legendary;
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-wow-legendary/20 text-wow-legendary;
   }
 
   .editor-container {

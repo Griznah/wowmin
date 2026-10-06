@@ -42,13 +42,19 @@
       <button type="button" role="tab" class="tab" id="tab-btn-map" data-tab="map" aria-selected="false" aria-controls="tab-map" tabindex="-1" title="Live Map (Alt+6)">
         <span class="tab-icon">🗺</span> <span class="tab-label">Live Map</span>
       </button>
-      <button type="button" role="tab" class="tab" id="tab-btn-economy" data-tab="economy" aria-selected="false" aria-controls="tab-economy" tabindex="-1" title="Economy (Alt+7)">
+      <button type="button" role="tab" class="tab" id="tab-btn-instances" data-tab="instances" aria-selected="false" aria-controls="tab-instances" tabindex="-1" title="Instance Watch (Alt+7)">
+        <span class="tab-icon">◉</span> <span class="tab-label">Instance Watch</span>
+      </button>
+      <button type="button" role="tab" class="tab" id="tab-btn-history" data-tab="history" aria-selected="false" aria-controls="tab-history" tabindex="-1" title="Session History (Alt+8)">
+        <span class="tab-icon">◷</span> <span class="tab-label">Session History</span>
+      </button>
+      <button type="button" role="tab" class="tab" id="tab-btn-economy" data-tab="economy" aria-selected="false" aria-controls="tab-economy" tabindex="-1" title="Economy (Alt+9)">
         <span class="tab-icon">💰</span> <span class="tab-label">Economy</span>
       </button>
-      <button type="button" role="tab" class="tab" id="tab-btn-logs" data-tab="logs" aria-selected="false" aria-controls="tab-logs" tabindex="-1" title="Logs (Alt+8)">
+      <button type="button" role="tab" class="tab" id="tab-btn-logs" data-tab="logs" aria-selected="false" aria-controls="tab-logs" tabindex="-1" title="Logs">
         <span class="tab-icon">📜</span> <span class="tab-label">Logs</span>
       </button>
-      <button type="button" role="tab" class="tab" id="tab-btn-console" data-tab="console" aria-selected="false" aria-controls="tab-console" tabindex="-1" title="Console (Alt+9)">
+      <button type="button" role="tab" class="tab" id="tab-btn-console" data-tab="console" aria-selected="false" aria-controls="tab-console" tabindex="-1" title="Console">
         <span class="tab-icon">▸</span> <span class="tab-label">Console</span>
       </button>
     </nav>
@@ -121,8 +127,10 @@
       <!-- Online Players -->
       <div class="card">
         <div class="card-header"><h3>Players Online</h3></div>
-        <div class="card-body center">
-          <span class="big-stat accent" id="players-count">--</span>
+        <div class="card-body online-counts">
+          <div><span class="stat-label">Players</span><span class="big-stat accent" id="players-count">--</span></div>
+          <div><span class="stat-label">Bots</span><span class="big-stat" id="bots-count">--</span></div>
+          <div><span class="stat-label">Total</span><span class="big-stat" id="total-count">--</span></div>
         </div>
       </div>
 
@@ -206,7 +214,7 @@
       <div class="toolbar-right">
         <button class="btn btn-tiny btn-refresh" data-action="refresh-players" title="Refresh">⟳ Refresh</button>
         <label class="auto-refresh-toggle">
-          <input type="checkbox" id="auto-refresh-players" /> Auto (30s)
+          <input type="checkbox" id="auto-refresh-players" /> Auto (3s)
         </label>
       </div>
     </div>
@@ -227,8 +235,8 @@
       <div class="filter-group">
         <label class="filter-label">Show
           <select id="players-filter-type">
-            <option value="all">All</option>
-            <option value="real" selected>Real Players</option>
+            <option value="all" selected>All</option>
+            <option value="real">Real Players</option>
             <option value="bots">Bots Only</option>
             <option value="gm">GMs Only</option>
           </select>
@@ -586,7 +594,7 @@
       <div class="toolbar-right">
         <button class="btn btn-tiny btn-refresh" data-action="refresh-tickets" title="Refresh">⟳ Refresh</button>
         <label class="auto-refresh-toggle">
-          <input type="checkbox" id="auto-refresh-tickets" /> Auto (30s)
+          <input type="checkbox" id="auto-refresh-tickets" /> Auto (10s)
         </label>
       </div>
     </div>
@@ -1087,15 +1095,15 @@ SELECT * FROM creature_template WHERE entry = 1;" spellcheck="false"></textarea>
           <div class="card-header"><h3>Options</h3></div>
           <div class="card-body" style="display:flex;flex-direction:column;gap:8px">
             <label class="auto-refresh-toggle">
-              <input type="checkbox" id="map-auto-refresh" /> Auto (5 s)
+              <input type="checkbox" id="map-auto-refresh" /> Auto (1 s)
             </label>
             <label class="auto-refresh-toggle">
               <input type="checkbox" id="map-show-bot-waypoint" checked /> Show selected bot waypoint
             </label>
             <label class="filter-label">Show
               <select id="map-filter-type">
-                <option value="all">All</option>
-                <option value="real" selected>Players Only</option>
+                <option value="all" selected>All</option>
+                <option value="real">Players Only</option>
                 <option value="bots">Bots Only</option>
               </select>
             </label>
@@ -1167,6 +1175,155 @@ SELECT * FROM creature_template WHERE entry = 1;" spellcheck="false"></textarea>
         </div>
       </div>
 
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- TAB: Instance / Battleground Watch                     -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div id="tab-instances" role="tabpanel" class="tab-content" aria-labelledby="tab-btn-instances" aria-hidden="true">
+    <div class="instance-watch-layout">
+      <aside class="instance-watch-sidebar">
+        <div class="card">
+          <div class="card-header">
+            <h3>Active Sessions</h3>
+            <span id="instance-session-count" class="map-status-count">0</span>
+          </div>
+          <div class="card-body instance-watch-controls">
+            <label>Instance / Battleground
+              <select id="instance-session-select">
+                <option value="">No active sessions</option>
+              </select>
+            </label>
+            <label class="auto-refresh-toggle">
+              <input type="checkbox" id="instance-auto-refresh" checked /> Auto (1 s)
+            </label>
+            <div class="btn-row">
+              <button id="instance-refresh-btn" class="btn btn-small">Refresh now</button>
+              <button id="instance-fit-btn" class="btn btn-small" title="Reset pan and zoom">Fit view</button>
+              <button id="instance-zoom-out-btn" class="btn btn-small" title="Zoom out">−</button>
+              <button id="instance-zoom-in-btn" class="btn btn-small" title="Zoom in">+</button>
+              <button id="instance-clear-focus-btn" class="btn btn-small hidden" title="Clear participant focus">Clear focus</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="instance-battleground-card" class="card instance-battleground-card hidden">
+          <div class="card-header"><h3>Battleground</h3></div>
+          <div class="card-body">
+            <div id="instance-battleground-phase" class="instance-bg-phase"></div>
+            <div id="instance-battleground-score" class="instance-bg-score"></div>
+            <div id="instance-battleground-meta" class="instance-bg-meta"></div>
+            <div id="instance-battleground-objectives" class="instance-bg-objectives"></div>
+          </div>
+        </div>
+
+        <div id="instance-encounter-card" class="card instance-encounter-card hidden">
+          <div class="card-header"><h3>Encounters</h3></div>
+          <div class="card-body">
+            <div id="instance-boss-list" class="instance-boss-list"></div>
+            <div id="instance-death-history" class="instance-death-history"></div>
+          </div>
+        </div>
+
+        <div class="card instance-player-list-card">
+          <div class="card-header"><h3>Participants</h3></div>
+          <div id="instance-player-list" class="instance-player-list">
+            <p class="placeholder">Select an active session</p>
+          </div>
+        </div>
+      </aside>
+
+      <section class="instance-watch-main">
+        <div class="instance-watch-heading">
+          <div>
+            <h2 id="instance-watch-title">No active instance</h2>
+            <p id="instance-watch-subtitle">Sessions appear automatically while players or bots are inside an instance or battleground.</p>
+          </div>
+          <div class="instance-watch-legend">
+            <span><i class="instance-legend-dot player"></i> Player</span>
+            <span><i class="instance-legend-dot bot"></i> Bot</span>
+            <span><i class="instance-legend-dot combat"></i> Combat</span>
+          </div>
+        </div>
+        <div class="instance-canvas-wrapper">
+          <canvas id="instance-watch-canvas"></canvas>
+          <div id="instance-watch-empty" class="instance-watch-empty">
+            <strong>No active instance or battleground sessions</strong>
+            <span>This is expected when nobody is currently inside one.</span>
+          </div>
+        </div>
+        <div class="map-statusbar">
+          <span id="instance-watch-status">Waiting for live world telemetry</span>
+          <span id="instance-watch-player-count" class="map-status-count"></span>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- TAB: Session History                                   -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div id="tab-history" role="tabpanel" class="tab-content" aria-labelledby="tab-btn-history" aria-hidden="true">
+    <div class="session-history-layout">
+      <aside class="session-history-sidebar">
+        <div class="card session-history-card">
+          <div class="card-header">
+            <h3>Completed Sessions</h3>
+            <div class="session-history-actions">
+              <button id="session-history-refresh-btn" class="btn btn-tiny" title="Refresh history">⟳</button>
+              <button id="session-history-purge-btn" class="btn btn-tiny btn-danger" title="Purge all completed sessions">Purge all</button>
+            </div>
+          </div>
+          <div id="session-history-list" class="session-history-list">
+            <p class="placeholder">Open this tab to load recorded sessions.</p>
+          </div>
+        </div>
+      </aside>
+      <section class="session-replay-main">
+        <div class="instance-watch-heading">
+          <div>
+            <h2 id="session-replay-title">No recorded session selected</h2>
+            <p id="session-replay-subtitle">Completed instances, raids, battlegrounds, and arenas appear here.</p>
+          </div>
+          <div id="session-replay-totals" class="session-replay-totals"></div>
+        </div>
+        <div class="session-replay-grid">
+          <div class="session-replay-map-panel">
+            <div class="instance-canvas-wrapper session-replay-canvas-wrapper">
+              <canvas id="session-replay-canvas"></canvas>
+              <div id="session-replay-empty" class="instance-watch-empty">
+                <strong>No session selected</strong>
+                <span>Select a completed run from the history list.</span>
+              </div>
+            </div>
+            <div class="session-replay-controls">
+              <button id="session-replay-play-btn" class="btn btn-small">Play</button>
+              <button id="session-replay-pause-btn" class="btn btn-small">Pause</button>
+              <button id="session-replay-stop-btn" class="btn btn-small">Stop</button>
+              <input id="session-replay-seek" type="range" min="0" max="0" value="0" step="100" aria-label="Replay position" />
+              <span id="session-replay-time" class="session-replay-time">0:00 / 0:00</span>
+              <label>Speed
+                <select id="session-replay-speed">
+                  <option value="0.5">0.5×</option>
+                  <option value="1" selected>1×</option>
+                  <option value="2">2×</option>
+                  <option value="4">4×</option>
+                  <option value="8">8×</option>
+                  <option value="16">16×</option>
+                </select>
+              </label>
+            </div>
+          </div>
+          <aside class="card session-event-card">
+            <div class="card-header"><h3>Event Log</h3></div>
+            <div id="session-replay-events" class="session-replay-events">
+              <p class="placeholder">Recorded events appear here.</p>
+            </div>
+          </aside>
+        </div>
+        <div id="session-history-status" class="map-statusbar">Persistent JSON history is stored by the WoWMin service.</div>
+      </section>
     </div>
   </div>
 
@@ -1397,6 +1554,7 @@ SELECT * FROM creature_template WHERE entry = 1;" spellcheck="false"></textarea>
     </div>
   </div>
 
+  <script src="../dist/web-api.js"></script>
   <script src="../dist/renderer.js"></script>
 </body>
 </html>
