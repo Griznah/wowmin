@@ -1,7 +1,7 @@
 {
   "name": "wow-admin",
-  "version": "2.4.3",
-  "description": "Desktop admin tool for AzerothCore servers with SOAP and Database editing",
+  "version": "3.0.0",
+  "description": "AzerothCore admin tool (web service or Electron desktop) with SOAP, database editing, live worldserver telemetry, instance watch, and session replay",
   "main": "dist/main.js",
   "scripts": {
     "build:ts": "node esbuild.config.js",
@@ -17,7 +17,8 @@
     "build:mac": "npm run build:ts && npm run build:css && node scripts/package.js --mac",
     "build:linux": "npm run build:ts && npm run build:css && node scripts/package.js --linux",
     "build:all": "npm run build:ts && npm run build:css && node scripts/package.js --win --linux",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test scripts/test-*.cjs"
   },
   "keywords": [
     "azerothcore",
@@ -28,7 +29,10 @@
     "database-editor"
   ],
   "author": "scarecr0w12 <scarecr0w12@users.noreply.github.com>",
-  "homepage": "https://github.com/scarecr0w12/wowmin",
+  "maintainers": [
+    "Jellypowered <Jellypowered@gmail.com>"
+  ],
+  "homepage": "https://github.com/Jellypowered/wowmin",
   "license": "MIT",
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",

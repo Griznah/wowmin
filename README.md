@@ -1,8 +1,17 @@
 # WoW Admin – AzerothCore Admin Tool
 
-A desktop application (Electron + Node.js + TypeScript) for administering an
-[AzerothCore](https://www.azerothcore.org/) World of Warcraft server via SOAP
-and direct database access.
+A server administration tool (Electron + Node.js + TypeScript) for an
+[AzerothCore](https://www.azerothcore.org/) World of Warcraft server, using
+SOAP and direct database access. The same UI can run as a **native Node.js web
+service** in the browser (the primary, fully tested route) or as an Electron
+desktop app.
+
+> This repository is a fork of
+> [scarecr0w12/wowmin](https://github.com/scarecr0w12/wowmin) ("WoW Admin",
+> v2.4.3 and earlier), by **Jellypowered**. Version 3.0.0 starts a
+> new release line for this fork, focused on live worldserver telemetry,
+> instance/battleground observation, and session recording. See
+> [CHANGELOG.md](CHANGELOG.md).
 
 ## Features
 
@@ -13,7 +22,7 @@ and direct database access.
 - Command history (↑ / ↓ arrow keys)
 - Color-coded success/error responses
 
-### Database Editor (New!)
+### Database Editor 
 - **SQL Query Editor** - Execute raw SQL queries with syntax highlighting
 - **Table Browser** - View and edit any table in the database
 - **Keira-style Entity Workspace** - A dedicated editor column, generated SQL panel, and side rail for live preview + related data
@@ -33,20 +42,75 @@ and direct database access.
 - **Query History** - Track and re-run previous queries
 - **Export to CSV** - Export query results to clipboard
 
-### Live Map (New!)
+### Live Map (Enhanced in 3.0.0)
 - Real-time canvas map showing all online player positions
+- **Live worldserver telemetry**: with the companion
+  [`mod-wowmin-telemetry`](#live-telemetry--mod-wowmin-telemetry) module
+  installed, player positions, health/power, target, and combat state come
+  straight from the worldserver every second instead of stale database saves;
+  the characters database is used only as a fallback
 - Continent switcher: Eastern Kingdoms, Kalimdor, Outland, Northrend
 - Map backgrounds preserve their aspect ratio automatically to avoid stretching/deformation on resize
-- Player dots colour-coded by WoW class; bot accounts dimmed
-- **Click a dot or sidebar row to select a player** — shows name, level, race, class, and live coordinates
+- Player dots colour-coded by WoW class; bot accounts dimmed; movement is interpolated so dots glide between telemetry polls
+- **Click a dot or sidebar row to select a player** — shows name, level, race, class, and live coordinates without disturbing the camera, pan, or zoom
 - Quick SOAP actions from the selection panel: Info, Freeze, Unfreeze, Summon, Kick, Ban
 - Hover tooltip with player details
 - Zoom controls with mouse wheel zoom, double-click zoom, drag-to-pan while zoomed, and quick reset back to `100%`
-- Auto-refresh (5 s) with manual refresh; filter by real players, bots, or all, with bot detection resolved from account usernames when available
+- Auto-refresh (1 s) with manual refresh; filter by real players, bots, or all, with bot detection resolved from account usernames when available
 - Optional map image backgrounds: place `0.jpg`, `1.jpg`, `530.jpg`, `571.jpg` in `assets/maps/` (see `assets/maps/README.txt`)
-- Requires a separate database connection to `acore_characters`
+- Requires a separate database connection to `acore_characters` unless live telemetry is active
 
-### Economy Monitor (New!)
+### Instance / Battleground Watch (New in 3.0.0)
+- Dedicated **Instance Watch** tab that discovers every active runtime instance,
+  raid, battleground, and arena on the server, grouped by runtime instance ID
+- Client artwork backgrounds for instances, raids, battlegrounds, and arenas
+  extracted from the WoW client (including per-floor dungeon artwork for
+  multi-floor instances), with stable projection bounds and letterboxing
+- Live participant markers with faction colors, health bars, movement trails,
+  headings, and combat indicators
+- Group/raid membership, subgroup, faction/team, core LFG role, and runtime
+  session age per participant
+- Battleground match state: phase, team scores, alive counts, decoded
+  objectives (scores, captures, timers, flag state), and resurrection state;
+  the active server-selected bot strategy is shown read-only when available
+- Encounter state: boss state tracking and per-session death history
+- Pan, anchored zoom, participant focus, and Fit view with per-session
+  viewport persistence, so the view stays stable across polling
+- Floor-aware dungeons: participants are classified onto the correct dungeon
+  floor from WMO/height context and only that floor's markers and trails are
+  shown
+
+### Session History & Replay (New in 3.0.0)
+- Completed instance, raid, battleground, and arena runs are recorded
+  automatically to JSON files: participants, timestamped discrete events
+  (kills, deaths, loot, level-ups, objective and flag transitions), running
+  totals, and sampled movement routes
+- Server-owned event IDs make kills, loot, and level-ups exact despite the
+  1 s telemetry poll; routes sample every 5 s by default
+- **Session history** tab with a browsable index, embedded replay panel, and
+  playback controls (play, pause, stop, seek, and 0.5×–16× speed)
+- Replay renders the map artwork with per-participant colored routes (broken
+  across death/release/teleport jumps), a chronological event log, and running
+  totals at the seek position
+- Interrupted checkpoints from crashes or shutdowns are purged automatically
+  at startup; completed history is only ever removed by the explicit
+  **Purge all** button
+
+### Live telemetry – `mod-wowmin-telemetry`
+- Live position/state telemetry is produced by the standalone companion module
+  **`mod-wowmin-telemetry`** (a separate AzerothCore module that is not
+  included in this repository). Install it into
+  `azerothcore-wotlk/modules/mod-wowmin-telemetry`, build, and start the
+  worldserver as usual (see below)
+- It publishes a versioned `WMAP` protocol (v1–v5) via an administrator-only
+  `wowmin telemetry [mapId] [instanceId]` SOAP command; older module versions
+  are still parsed by this client for backward compatibility
+- The module is independent of `mod-playerbots` (playerbot details are an
+  optional, compile-time extension) and shares a single 1 s poll across the
+  Live Map, Instance Watch, and session recorder, configurable via
+  `WOWMIN_TELEMETRY_POLL_MS` (default 1000, minimum 500)
+
+### Economy Monitor
 - Dedicated **Economy** tab for monitoring the live in-game auction house and character wealth
 - Search active auction-house listings by item name, item entry, or owner name
 - View per-item market averages including listing count, total quantity, average unit buyout, and min/max unit pricing
@@ -54,7 +118,7 @@ and direct database access.
 - Overview cards surface active auction counts, unique items listed, average buyout pricing, total realm gold, and the richest tracked character
 - Uses the connected `acore_characters` database for auction and gold data, plus the matching world database name for item names and quality metadata
 
-### Remote Log Monitor (New!)
+### Remote Log Monitor
 - Connect to a remote AzerothCore host over SSH/SFTP
 - Scan `worldserver.conf` to discover configured `Logger.*` and `Appender.*` definitions
 - Resolve `LogsDir`, packet log paths, file-based appender targets, and dynamic `%s` log patterns
@@ -65,10 +129,14 @@ and direct database access.
 - Works with password-based SSH/SFTP access today
 
 ### App Updates
-- Automatically checks GitHub releases on startup for newer app versions
-- Header status indicator shows current version, update availability, or check errors
-- Manual **Check** button to refresh release status on demand
-- **Open Release** button opens the latest GitHub release page in the default browser when an update is available
+- Electron desktop builds automatically check GitHub releases on startup for
+  newer app versions; the header status indicator shows current version, update
+  availability, or check errors
+- Manual **Check** button to refresh release status on demand; the **Open
+  Release** button opens the latest GitHub release page in the default browser
+  when an update is available
+- The native web service skips upstream release checks by default
+  (`WOWMIN_WEB_MODE=1`)
 
 ### Dashboard
 - Server info at a glance (uptime, online players, peak)
@@ -95,6 +163,33 @@ and direct database access.
 | **Node.js** ≥ 18 | https://nodejs.org |
 | **AzerothCore worldserver** | SOAP must be enabled (see below) |
 | **MySQL/MariaDB** | For database editing features |
+| **`mod-wowmin-telemetry`** | Optional but strongly recommended for live map/instance telemetry (see below) |
+| **WoW 3.3.5a client files** | Only if you want map background artwork extracted locally |
+
+### Live telemetry – `mod-wowmin-telemetry`
+
+Live player positions, combat state, instance/battleground state, and session
+recording all come from the standalone **`mod-wowmin-telemetry`** AzerothCore
+module, which is a separate project and is not bundled in this repository.
+Install it into
+your AzerothCore source tree:
+
+```bash
+# clone the module into your AzerothCore source tree, e.g.
+cd azerothcore-wotlk/modules
+git clone https://github.com/Jellypowered/mod-wowmin-telemetry.git
+# then rebuild and restart the worldserver
+```
+
+Once it is running, the module registers the administrator-only SOAP command:
+
+```
+wowmin telemetry [mapId] [instanceId]
+```
+
+No worldserver configuration changes are required. Without the module, the
+Live Map falls back to saved database positions (stale between character
+saves) and the Instance Watch / Session History tabs have no live data.
 
 ### Enable SOAP on your worldserver
 
@@ -134,9 +229,18 @@ npm install
 npm run build:ts
 npm run build:css
 
-# Or build everything and start
+# Run the test suite (no server or client required)
+npm test
+
+# Or build everything and start the desktop app
 npm start
 ```
+
+> **Testing note:** the browser-based web service is the route that has been
+> fully exercised in practice. The Electron desktop build should work
+> identically (it shares the same main-process and renderer code), but it has
+> not been validated end-to-end on every platform; report issues if you rely
+> on it.
 
 ## Native Web Service
 
@@ -163,7 +267,9 @@ SQL and server administration commands, do not expose the service without
 authentication; use a TLS reverse proxy when access crosses an untrusted
 network.
 
-A hardened systemd unit template is provided at `deploy/wowmin.service`. It
+A hardened systemd unit template is provided at `deploy/wowmin.service.example` (copy it to
+`/etc/systemd/system/wowmin.service`, adjust the install path, and
+`systemctl daemon-reload`). It
 expects `/etc/wowmin.env` to define the variables above and stores profiles in
 `/var/lib/wowmin` when `WOWMIN_DATA_DIR=/var/lib/wowmin` is set. Set
 `WOWMIN_WEB_MODE=1` to disable upstream GitHub release checks in the service.
@@ -183,9 +289,25 @@ WOWMIN_DB_PORT=3306
 WOWMIN_DB_USERNAME=acore
 WOWMIN_WORLD_DB=acore_world
 WOWMIN_CHARACTERS_DB=acore_characters
-WOWMIN_WORLD_CONFIG=/stuff/Source/azerothcore-wotlk/env/dist/etc/worldserver.conf
-WOWMIN_LOG_DIR=/stuff/Source/azerothcore-wotlk/env/dist/bin
+WOWMIN_WORLD_CONFIG=/path/to/azerothcore/env/dist/etc/worldserver.conf
+WOWMIN_LOG_DIR=/path/to/azerothcore/env/dist/bin
 ```
+
+Live telemetry and session recording settings (all optional):
+
+```ini
+# Shared poll interval for Live Map, Instance Watch, and session recording (ms, min 500)
+WOWMIN_TELEMETRY_POLL_MS=1000
+# How often movement routes are sampled into session records (ms)
+WOWMIN_SESSION_ROUTE_INTERVAL_MS=5000
+# How long a vanished session must stay absent before it is finalized (ms)
+WOWMIN_SESSION_COMPLETION_GRACE_MS=15000
+```
+
+Completed session records are kept indefinitely under
+`$WOWMIN_DATA_DIR/sessions/`; only the explicit **Purge all** button in the
+Session history tab deletes them. Abandoned checkpoints from crashes are
+removed automatically at startup.
 
 Keep `/etc/wowmin.env` mode `0600` and restart the service after edits. Web
 mode disables upstream release checks; the Electron desktop build retains them.
@@ -225,13 +347,29 @@ mode disables upstream release checks; the Electron desktop build retains them.
 
 ### Live Map
 1. Navigate to the **Live Map** tab.
-2. Enter the `acore_characters` MySQL connection details in the map connection bar and click **Connect**.
+2. If `mod-wowmin-telemetry` is running on the connected worldserver, positions come live automatically. Otherwise enter the `acore_characters` MySQL connection details in the map connection bar and click **Connect** (saved, between-saves positions).
 3. Players on the selected continent appear as coloured dots (class colours) on the canvas.
 4. Use the continent buttons to switch between Eastern Kingdoms, Kalimdor, Outland, and Northrend.
-5. **Click a dot** or a row in the sidebar to select a player — a panel appears with their details and quick action buttons (Info, Freeze, Unfreeze, Summon, Kick, Ban). Actions are sent via the active SOAP connection.
+5. **Click a dot** or a row in the sidebar to select a player — a panel appears with their details and quick action buttons (Info, Freeze, Unfreeze, Summon, Kick, Ban). Actions are sent via the active SOAP connection. Selecting a player does not move the camera, pan, or zoom.
 6. Use the mouse wheel or **double-click** to zoom into the map; drag to pan while zoomed, or click the zoom percentage control to reset to `100%`.
 7. Optionally place map image files (`0.jpg`, `1.jpg`, `530.jpg`, `571.jpg`) in `assets/maps/` for visual map backgrounds (see `assets/maps/README.txt`). The app preserves the image aspect ratio automatically.
 8. To generate those from a WoW 3.3.5a client, run `npm run extract:maps -- --source /path/to/WoW` (or the npm shorthand `npm run extract:maps --source /path/to/WoW`) or point it at an extracted `World/Minimaps` folder.
+
+### Instance / Battleground Watch
+1. Navigate to the **Instance Watch** tab (keyboard shortcut **Alt+7**). Active runtime instances, raids, battlegrounds, and arenas are discovered automatically and appear as cards in the sidebar; nothing to configure beyond a SOAP connection.
+2. Switch the **Session** dropdown to inspect another session; **Auto (1 s)** keeps the selected session fresh, with a full re-discovery every 10 s.
+3. The map pane uses extracted client artwork when available (with per-floor dungeon artwork for multi-floor dungeons), otherwise calibrated or auto-fit bounds.
+4. **Click a participant marker or sidebar row** to focus the view on them; **Fit** restores a view that fits everyone, **−**/**+** zoom around the cursor, and **Clear focus** releases the focused participant.
+5. Battlegrounds additionally show the match phase, team scores, alive counts, decoded objectives, resurrection state, and the server-selected bot strategy (read-only).
+6. The encounter card lists boss states and the session death history; the participant list shows faction, group/subgroup, LFG role, health and power, and target.
+
+### Session history & replay
+1. Navigate to the **Session history** tab (keyboard shortcut **Alt+8**). Completed runs from `$WOWMIN_DATA_DIR/sessions/` are listed with map, participants, duration, and event count.
+2. **Click a record** to load it into the embedded replay panel.
+3. Use **Play**, **Pause**, **Stop**, the seek slider, and the speed selector (0.5×–16×) to scrub through the run. Routes are drawn incrementally per participant, the event log follows the playhead, and the running totals reflect the seek position.
+4. **Purge all** permanently deletes every completed session record after a confirmation prompt; it does not affect in-progress recordings. Abandoned checkpoints are already removed automatically at startup.
+
+> **Replay fidelity:** server-reported events (kills, loot, level-ups) are exact. Objective and flag transitions derived from telemetry snapshots reflect poll timing, and routes are sampled (default every 5 s), so movement between samples is interpolated rather than recorded.
 
 ### Remote Log Monitor
 1. Navigate to the **Logs** tab.
@@ -309,6 +447,25 @@ Useful flags:
 
 On Linux, note that some patch MPQs may be malformed or some minimap tiles may be corrupt in patched clients. The extractor now skips unreadable archives/tiles when possible and continues building the continent JPGs. If built-in extraction still cannot resolve your client, `7zz` remains a useful fallback, or you can extract `World/Minimaps` manually and point `--source` there.
 
+### Extracting instance, raid, battleground, and arena artwork
+
+The same extractor produces the artwork used by the Instance Watch tab:
+
+```bash
+# One map
+npm run extract:maps --source "/path/to/WoW" --map 489
+
+# Every instance, raid, battleground, and arena (recommended once)
+npm run extract:maps --source "/path/to/WoW" --all-instances
+```
+
+Outputs go to `assets/instances/` (`<mapId>.jpg`, per-floor
+`<mapId>-floor-<n>.jpg`, plus JSON metadata and an `index.json`). These
+artifacts are **not committed** to this repository (they are large and derived
+from the client), so run the extractor once on your own machine. Maps without
+directly extractable artwork fall back to calibrated or auto-fit bounds and a
+plain background.
+
 ## Project Structure
 
 ```
@@ -318,9 +475,14 @@ wow-admin/
 ├── tailwind.config.js      # Tailwind CSS configuration
 ├── esbuild.config.js       # Build configuration
 ├── src/
-│   ├── main.ts             # Electron main process
+│   ├── main.ts             # Electron main process (shared with web mode)
 │   ├── preload.ts          # Context bridge (IPC)
+│   ├── web-server.ts       # Native web service entry point (npm run start:web)
+│   ├── web-electron-shim.ts# Exposes the IPC surface to browser tabs
 │   ├── soap-client.ts      # SOAP/HTTP client for AzerothCore
+│   ├── live-map-telemetry.ts # WMAP protocol (v1–v5) parser + command builder
+│   ├── session-recorder.ts # Session recording, persistence, index, purge
+│   ├── local-logs.ts       # Local (non-SSH) log discovery for web mode
 │   ├── config-store.ts     # Profile persistence
 │   ├── database/
 │   │   └── db-service.ts   # MySQL database service
@@ -333,18 +495,43 @@ wow-admin/
 │   │   ├── tailwind.css    # Tailwind input
 │   │   └── output.css      # Generated CSS
 │   └── scripts/
-│       ├── app.ts          # Main frontend logic (SOAP, DB, map, economy, logs)
+│       ├── app.ts          # Main frontend logic (SOAP, DB, map, instances, replay)
+│       ├── web-api.ts      # Browser fetch implementation of the IPC surface
 │       ├── types/
 │       │   └── state.ts    # Application state types
 │       └── utils/
 │           ├── helpers.ts  # Utility functions
-│           └── map-coords.ts # WoW coordinate conversion utilities
+│           ├── map-coords.ts # WoW coordinate conversion utilities
+│           ├── instance-watch.ts # Instance grouping, floors, bounds, projection
+│           ├── session-replay.ts # Replay route/event/total math
+│           └── online-players.ts # Online-player parsing helpers
 ├── assets/
-│   └── maps/               # Optional map background images (0.jpg, 1.jpg, 530.jpg, 571.jpg)
+│   ├── maps/               # Optional continent map backgrounds (0.jpg, 1.jpg, 530.jpg, 571.jpg)
+│   └── instances/          # Optional instance/raid/BG/arena artwork (extracted locally)
 ├── scripts/
-│   └── extract-map-assets.mjs # WoW minimap tile extractor/stitcher for live map backgrounds
+│   ├── extract-map-assets.mjs # WoW minimap/worldmap/dungeon-floor extractor
+│   └── test-*.cjs          # Self-contained test suites (npm test)
+├── deploy/
+│   └── wowmin.service.example # Hardened systemd unit template
 └── dist/                   # Compiled output
 ```
+
+## Testing
+
+The repository ships a self-contained test suite that needs no worldserver,
+client, or database:
+
+```bash
+npm test          # runs all scripts/test-*.cjs with node:test
+npm run typecheck # tsc --noEmit over the whole project
+```
+
+Coverage includes the telemetry protocol parser (versions 1–5, rejection of
+truncated/unknown snapshots), command building, session grouping and
+battleground decoding, map projection math (continents, calibrated
+battlegrounds, minimap tiles, dungeon floors, pan/zoom/fit), the session
+recorder (persistence, deduplication, checkpoint purge, explicit history
+purge), and replay route/event math.
 
 ## Development
 
@@ -358,7 +545,7 @@ npm run build:ts:watch
 # Build Tailwind CSS (watch mode)
 npm run build:css:watch
 
-# Development mode
+# Development mode (Electron)
 npm run dev
 ```
 

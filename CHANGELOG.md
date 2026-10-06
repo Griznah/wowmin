@@ -5,7 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+**Fork notice:** v2.4.3 and earlier belong to the original project
+([scarecr0w12/wowmin](https://github.com/scarecr0w12/wowmin)). This repository
+is a fork maintained by Jellypowered; **v3.0.0 starts the new release line for
+the fork** and adds live worldserver telemetry, instance/battleground watch,
+and session recording built on the separate `mod-wowmin-telemetry` module.
+
 ## [Unreleased]
+
+## [3.0.0] - 2026-10-05
+
+### Added
+
+- **Live worldserver telemetry**: Live Map positions, health/power, target, and combat state now stream from the companion `mod-wowmin-telemetry` AzerothCore module every second (versioned WMAP protocol v1–v5, with backward-compatible parsing of earlier versions), replacing stale database-saved positions; the characters database remains a fallback
+- **Instance / Battleground Watch tab**: automatic discovery of every active runtime instance, raid, battleground, and arena, with participant markers (faction colors, health, trails, headings, combat indicators), group/raid, subgroup, faction/team, and core LFG role details, runtime session age, boss state tracking, and per-session death history
+- **Battleground state**: match phase, team scores and alive counts, decoded objectives (scores, captures, timers, flag state), resurrection state, and the server-selected bot strategy shown read-only
+- **Floor-aware dungeons**: per-floor dungeon artwork extracted from `DungeonMap.dbc`/`DungeonMapChunk.dbc`, with per-participant floor classification and per-floor marker/trail filtering
+- **Client artwork pipeline**: the map extractor now produces instance, raid, battleground, and arena backgrounds (including `worldMapArea`, `dungeonFloors`, and `minimapTiles` projections) from a WoW 3.3.5a client, with calibrated or auto-fit bounds as fallback
+- **Stable map interaction**: pointer dragging, anchored wheel/button zoom, Fit view, participant focus, and per-session viewport persistence without refresh-interval jitter; zooming back to 100% recenters
+- **Session recording**: completed runs are recorded automatically to JSON under `WOWMIN_DATA_DIR/sessions/` (participants, server-deduplicated kill/loot/level events plus snapshot-derived objective and flag transitions, running totals, sampled routes), with an index, atomic writes, and startup purge of abandoned checkpoints
+- **Session history & replay tab**: browsable record index and embedded replay panel with per-participant colored routes (broken across death/release/teleport jumps), chronological event log, running totals at the seek position, and play/pause/stop/seek/0.5×–16× controls
+- **Native web service hardening**: HTTP Basic Authentication, server-managed SOAP/database credentials, local log discovery without SSH, TLS-reverse-proxy guidance, and a hardened systemd unit template at `deploy/wowmin.service.example`
+- **Self-contained test suite**: `npm test` runs telemetry parsing, command building, session grouping, projection math, session-recorder persistence, and replay math without any server, client, or database
+
+### Changed
+
+- The native web service is now the primary, fully tested route; the Electron desktop build shares the same code but has not been validated end-to-end on every platform
+- Completed session records are retained indefinitely; removal is only via the explicit **Purge all** button (previous plans for automatic retention limits were dropped)
+- Route trails and replay routes no longer draw lines across death, release, or teleport discontinuities
+- Battleground bot strategies are captured by `mod-wowmin-telemetry` itself and are read-only; strategy control remains with the server/playerbot logic
+- Live Map auto-refresh is 1 s and feeds the Live Map, Instance Watch, and session recorder from a single shared poll (`WOWMIN_TELEMETRY_POLL_MS`, default 1000, minimum 500)
+
+### Fixed
+
+- Live Map selection no longer shifts the canvas when the selected-player bar updates: the bar now overlays the map and canvas dimensions are only reassigned on real layout changes
+- Map images are letterboxed to their natural aspect ratio instead of being stretched; continent and instance views keep stable bounds across refreshes
 
 ## [2.4.3] - 2026-04-30
 
