@@ -45,7 +45,7 @@ desktop app.
 ### Live Map (Enhanced in 3.0.0)
 - Real-time canvas map showing all online player positions
 - **Live worldserver telemetry**: with the companion
-  [`mod-wowmin-telemetry`](#live-telemetry--mod-wowmin-telemetry) module
+  [`mod-wowmin-telemetry`](https://github.com/Jellypowered/mod-wowmin-telemetry) module
   installed, player positions, health/power, target, and combat state come
   straight from the worldserver every second instead of stale database saves;
   the characters database is used only as a fallback
