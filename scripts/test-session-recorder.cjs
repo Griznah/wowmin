@@ -20,7 +20,7 @@ new Function('module', 'exports', 'require', '__dirname', '__filename', output)(
   __dirname,
   __filename,
 );
-const { SessionRecorder } = moduleValue.exports;
+const { SessionRecorder, formatBattlegroundOutcome } = moduleValue.exports;
 
 function snapshot(capturedAt, players, overrides = {}) {
   return {
@@ -74,6 +74,43 @@ test('records, deduplicates, persists, and indexes a completed session', async (
   assert.equal(record.events.length, 2);
   assert.ok(record.routes.length >= 1);
   assert.equal(record.participants[0].name, 'Jaspianus');
+});
+
+test('persists and indexes a completed battleground outcome', async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wowmin-bg-outcome-'));
+  const recorder = new SessionRecorder({ dataDir, routeIntervalMs: 1, completionGraceMs: 1 });
+  const startedAt = Math.floor(Date.now() / 1000);
+  const bgPlayer = { ...player(55, startedAt), map: 489, mapType: 3, teamId: 1 };
+  const battleground = {
+    mapId: 489, instanceId: 55, battlegroundTypeId: 2, status: 3, elapsedMs: 300000,
+    remainingMs: 0, winner: 2, allianceScore: 2, hordeScore: 2, alliancePlayers: 5,
+    hordePlayers: 5, allianceAlive: 5, hordeAlive: 5, nextResurrectMs: 10000,
+    allianceStrategy: -1, hordeStrategy: -1, worldStates: [],
+  };
+  const active = snapshot(startedAt * 1000 + 1000, [bgPlayer], { battlegrounds: [battleground] });
+  await recorder.ingest(active);
+  await recorder.ingest({ ...active, capturedAt: active.capturedAt + 1000,
+    battlegrounds: [{ ...battleground, status: 4, winner: 1, allianceScore: 3 }] });
+  await recorder.ingest(snapshot(active.capturedAt + 1010, []));
+  await recorder.ingest(snapshot(active.capturedAt + 1020, []));
+
+  const [entry] = await recorder.list();
+  assert.equal(formatBattlegroundOutcome(entry.battleground), 'Alliance wins 3-2');
+  const record = await recorder.get(entry.id);
+  assert.equal(formatBattlegroundOutcome(record.battleground), 'Alliance wins 3-2');
+  assert.equal(record.events.filter((event) => event.type === 'match-result').length, 1);
+  assert.equal(record.events.find((event) => event.type === 'match-result').description, 'Alliance wins 3-2');
+});
+
+test('formats battleground-specific outcomes', () => {
+  const base = { mapId: 529, battlegroundTypeId: 3, status: 4, winner: 0,
+    allianceScore: 1200, hordeScore: 1600 };
+  assert.equal(formatBattlegroundOutcome(base), 'Horde wins');
+  assert.equal(formatBattlegroundOutcome({ ...base, mapId: 566 }), 'Horde wins 1600-1200');
+  assert.equal(formatBattlegroundOutcome({ ...base, mapId: 489, winner: 2,
+    allianceScore: 2, hordeScore: 2 }), 'Draw 2-2');
+  assert.equal(formatBattlegroundOutcome({ ...base, mapId: 628, winner: 1 }), 'Alliance wins');
+  assert.equal(formatBattlegroundOutcome({ ...base, status: 3 }), null);
 });
 
 test('purges abandoned incomplete checkpoints and temporary files on startup', async () => {

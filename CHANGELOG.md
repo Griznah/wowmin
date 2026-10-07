@@ -13,6 +13,13 @@ and session recording built on the separate `mod-wowmin-telemetry` module.
 
 ## [Unreleased]
 
+### Added
+
+- Session History now persists and prominently displays battleground outcomes. Warsong Gulch records the final flag score, Eye of the Storm records final resource points, and other battlegrounds and arenas identify the winner; replay logs include a match-result event.
+- Added protocol v6 player gender and compact taxi, mounted, sap, stun, and Spirit of Redemption state telemetry, plus shared race/gender portraits, class icons, and prioritized state indicators across Players, Live Map, and Instance Watch.
+- Added `npm run extract:icons` to extract client-owned portrait, class, and state BLP artwork into gitignored local PNG assets; generic emoji remain the zero-setup fallback.
+- Added synchronized, persisted icon-size controls to Live Map and Instance Watch. Canvas markers now scale progressively with zoom, participant-list icons are larger, and pre-v6 telemetry uses extracted male race portraits instead of emoji when gender is unavailable.
+
 ### Fixed
 
 - Outland/map 530 extraction now filters exact audited white/grey source-padding textures before JPEG output, preserving real water pixels and projection bounds; individual continent maps can be regenerated without touching unrelated continents.

@@ -120,6 +120,23 @@ test('parses protocol v5 authoritative session events', () => {
   assert.equal(snapshot.events[1].targetName, 'Cult Adherent');
 });
 
+test('parses protocol v6 gender and compact player state flags', () => {
+  const playerRow = [
+    'WMAP', 'Jaspianus', 571, 0, 100, 200, 30, 1.5, 80, 1, 1, 9001, 1, 1, 1,
+    0, 0, 0, 0, 0, 0, 1, 100, 0, 100, 0, 0, '', 0, 0, -1, -1, 1, 31,
+  ].join('|');
+  const snapshot = parseLiveMapTelemetrySnapshot([
+    'WMAP_VERSION|6', playerRow, 'WMAP_END|1|0|0|0|0|0|0',
+  ].join('\n'));
+  const [player] = snapshot.players;
+  assert.equal(player.gender, 1);
+  assert.equal(player.onTaxi, true);
+  assert.equal(player.mounted, true);
+  assert.equal(player.sapped, true);
+  assert.equal(player.stunned, true);
+  assert.equal(player.spiritForm, true);
+});
+
 test('rejects truncated snapshots', () => {
   const message = 'WMAP|Jaspianus|571|0|1|2|3|4|80|1|1|9001|1|1|0\nWMAP_END|2';
   assert.equal(parseLiveMapTelemetry(message), null);

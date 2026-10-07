@@ -13,6 +13,9 @@ import type {
   SessionRoutePoint,
   SessionTotals,
 } from './types/electron';
+import { formatBattlegroundOutcome } from './session-outcome';
+
+export { formatBattlegroundOutcome };
 
 export interface SessionRecorderOptions {
   dataDir: string;
@@ -106,6 +109,7 @@ function createIndexEntry(record: SessionRecord, bytes: number): SessionIndexEnt
     participantCount: record.participants.length,
     eventCount: record.events.length,
     routePointCount: record.routes.length,
+    battleground: record.battleground ? { ...record.battleground } : undefined,
     totals: { ...record.totals },
     bytes,
   };
@@ -161,7 +165,11 @@ export class SessionRecorder {
   async list(): Promise<SessionIndexEntry[]> {
     await this.ensureInitialized();
     await this.operationChain;
-    return this.index.map((entry) => ({ ...entry, totals: { ...entry.totals } }));
+    return this.index.map((entry) => ({
+      ...entry,
+      battleground: entry.battleground ? { ...entry.battleground } : undefined,
+      totals: { ...entry.totals },
+    }));
   }
 
   async get(id: string): Promise<SessionRecord | null> {
@@ -319,6 +327,8 @@ export class SessionRecorder {
           isBot: player.isBot,
           teamId: player.teamId,
           classId: player.class,
+          raceId: player.race,
+          gender: player.gender,
           levelStart: player.level,
           levelEnd: player.level,
         };
@@ -326,6 +336,8 @@ export class SessionRecorder {
       }
       participant.levelEnd = player.level;
       participant.teamId = player.teamId;
+      participant.raceId = player.race;
+      participant.gender = player.gender;
     }
   }
 
@@ -346,6 +358,12 @@ export class SessionRecorder {
       wmoGroupId: player.wmoGroupId,
       alive: player.alive,
       inCombat: player.inCombat,
+      onTaxi: player.onTaxi,
+      mounted: player.mounted,
+      sapped: player.sapped,
+      stunned: player.stunned,
+      spiritForm: player.spiritForm,
+      waitingForResurrect: player.waitingForResurrect,
     }));
     active.record.routes.push(...points);
     active.lastRouteAt = now;
@@ -416,6 +434,19 @@ export class SessionRecorder {
     now: number,
   ): void {
     if (!battleground) return;
+    const previousStatus = active.record.battleground?.status;
+    active.record.battleground = {
+      mapId: battleground.mapId,
+      battlegroundTypeId: battleground.battlegroundTypeId,
+      status: battleground.status,
+      winner: battleground.winner,
+      allianceScore: battleground.allianceScore,
+      hordeScore: battleground.hordeScore,
+    };
+    if (battleground.status === 4 && previousStatus !== 4) {
+      const description = formatBattlegroundOutcome(active.record.battleground);
+      if (description) this.addSnapshotEvent(active, 'match-result', now, battleground.winner, '', 1, description);
+    }
     for (const state of battleground.worldStates) {
       const previous = active.worldStates.get(state.id);
       active.worldStates.set(state.id, state.value);
@@ -444,7 +475,7 @@ export class SessionRecorder {
 
   private addSnapshotEvent(
     active: ActiveSession,
-    type: 'boss' | 'objective' | 'flag-capture',
+    type: 'boss' | 'objective' | 'flag-capture' | 'match-result',
     now: number,
     valueId: number,
     valueName: string,

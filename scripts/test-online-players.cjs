@@ -28,8 +28,9 @@ test('SOAP list header does not become a phantom Character row', () => {
 
 test('database rows provide level, race and class without pinfo commands', () => {
   const [player] = playersFromDatabase([{ name: 'Jaspianus', account: 'RNDBOT0', ip: '127.0.0.1',
-    mapId: 530, zoneId: 3521, expansion: 2, gmLevel: 0, level: 80, raceId: 1, classId: 1 }]);
+    mapId: 530, zoneId: 3521, expansion: 2, gmLevel: 0, level: 80, raceId: 1, classId: 1, gender: 1 }]);
   assert.equal(player.level, '80');
   assert.equal(player.className, 'Warrior');
   assert.equal(player.race, 'Human');
+  assert.equal(player.gender, 1);
 });

@@ -9,6 +9,7 @@
     "build:css": "node scripts/build-css.js",
     "build:css:watch": "node scripts/build-css.js --watch",
     "extract:maps": "node scripts/extract-map-assets.mjs",
+    "extract:icons": "node scripts/extract-player-icons.mjs",
     "start": "npm run build:ts && npm run build:css && electron . --no-sandbox",
     "start:web": "node dist/web-server.js",
     "dev": "npm run build:ts && npm run build:css && electron . --dev --no-sandbox",

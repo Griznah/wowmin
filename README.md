@@ -58,6 +58,10 @@ desktop app.
 - Zoom controls with mouse wheel zoom, double-click zoom, drag-to-pan while zoomed, and quick reset back to `100%`
 - Auto-refresh (1 s) with manual refresh; filter by real players, bots, or all, with bot detection resolved from account usernames when available
 - Optional map image backgrounds: place `0.jpg`, `1.jpg`, `530.jpg`, `571.jpg` in `assets/maps/` (see `assets/maps/README.txt`)
+- Shared race/gender portraits, class icons, and compact taxi, mounted, combat,
+  sap, stun, death, spirit-form, and resurrection indicators across Players,
+  Live Map, and Instance Watch. Extracted client artwork is optional; generic
+  emoji are used automatically when it is absent
 - Requires a separate database connection to `acore_characters` unless live telemetry is active
 
 ### Instance / Battleground Watch (New in 3.0.0)
@@ -89,6 +93,10 @@ desktop app.
   1 s telemetry poll; routes sample every 5 s by default
 - **Session history** tab with a browsable index, embedded replay panel, and
   playback controls (play, pause, stop, seek, and 0.5×–16× speed)
+- Completed battlegrounds show the winning faction directly in the history
+  list and replay header. Warsong Gulch shows its flag score, Eye of the Storm
+  shows resource points, and other battlegrounds show the winner without a
+  misleading generic scoreline
 - Replay renders the map artwork with per-participant colored routes (broken
   across death/release/teleport jumps), a chronological event log, and running
   totals at the seek position
@@ -102,7 +110,7 @@ desktop app.
   included in this repository). Install it into
   `azerothcore-wotlk/modules/mod-wowmin-telemetry`, build, and start the
   worldserver as usual (see below)
-- It publishes a versioned `WMAP` protocol (v1–v5) via an administrator-only
+- It publishes a versioned `WMAP` protocol (v1–v6) via an administrator-only
   `wowmin telemetry [mapId] [instanceId]` SOAP command; older module versions
   are still parsed by this client for backward compatibility
 - The module is independent of `mod-playerbots` (playerbot details are an
@@ -354,6 +362,7 @@ mode disables upstream release checks; the Electron desktop build retains them.
 6. Use the mouse wheel or **double-click** to zoom into the map; drag to pan while zoomed, or click the zoom percentage control to reset to `100%`.
 7. Optionally place map image files (`0.jpg`, `1.jpg`, `530.jpg`, `571.jpg`) in `assets/maps/` for visual map backgrounds (see `assets/maps/README.txt`). The app preserves the image aspect ratio automatically.
 8. To generate those from a WoW 3.3.5a client, run `npm run extract:maps -- --source /path/to/WoW` (or the npm shorthand `npm run extract:maps --source /path/to/WoW`) or point it at an extracted `World/Minimaps` folder.
+9. Optionally extract race/gender portraits, class icons, and player-state icons with `npm run extract:icons -- --source /path/to/WoW`. If skipped, WoWMin uses emoji fallbacks.
 
 ### Instance / Battleground Watch
 1. Navigate to the **Instance Watch** tab (keyboard shortcut **Alt+7**). Active runtime instances, raids, battlegrounds, and arenas are discovered automatically and appear as cards in the sidebar; nothing to configure beyond a SOAP connection.
@@ -415,6 +424,25 @@ mode disables upstream release checks; the Electron desktop build retains them.
 2. The header automatically checks GitHub for the latest release and shows your current version.
 3. If a newer release exists, the banner changes state and exposes an **Open Release** button.
 4. Use **Check** any time to manually refresh the release status.
+
+### Extracting player and state icons
+
+WoWMin can use the race/gender portraits, class atlas, and state/spell icons
+from your own WoW 3.3.5a client:
+
+```bash
+npm run extract:icons -- --source "/path/to/WoW 3.3.5a"
+```
+
+The command reads MPQ patches in client precedence order and writes local PNGs
+plus `assets/player-icons/index.json`. These derived files are gitignored and
+are not distributed with WoWMin. Without the index—or when older telemetry does
+not provide state fields—the interface uses generic emoji. Older telemetry
+without gender uses the extracted male race portrait until v6 is deployed.
+Lists stack up to three states by priority; map markers show only the
+highest-priority state so simultaneous effects remain readable. Live Map and
+Instance Watch provide synchronized, persisted 75–250% icon-size controls;
+canvas icons also grow progressively as the map is zoomed.
 
 ### Extracting map backgrounds from the WoW client
 
@@ -517,7 +545,7 @@ wow-admin/
 │   ├── web-server.ts       # Native web service entry point (npm run start:web)
 │   ├── web-electron-shim.ts# Exposes the IPC surface to browser tabs
 │   ├── soap-client.ts      # SOAP/HTTP client for AzerothCore
-│   ├── live-map-telemetry.ts # WMAP protocol (v1–v5) parser + command builder
+│   ├── live-map-telemetry.ts # WMAP protocol (v1–v6) parser + command builder
 │   ├── session-recorder.ts # Session recording, persistence, index, purge
 │   ├── local-logs.ts       # Local (non-SSH) log discovery for web mode
 │   ├── config-store.ts     # Profile persistence
@@ -541,12 +569,15 @@ wow-admin/
 │           ├── map-coords.ts # WoW coordinate conversion utilities
 │           ├── instance-watch.ts # Instance grouping, floors, bounds, projection
 │           ├── session-replay.ts # Replay route/event/total math
+│           ├── player-icons.ts # Shared extracted-icon and emoji fallback logic
 │           └── online-players.ts # Online-player parsing helpers
 ├── assets/
 │   ├── maps/               # Optional continent map backgrounds (0.jpg, 1.jpg, 530.jpg, 571.jpg)
-│   └── instances/          # Optional instance/raid/BG/arena artwork (extracted locally)
+│   ├── instances/          # Optional instance/raid/BG/arena artwork (extracted locally)
+│   └── player-icons/       # Optional client portraits/class/state icons (extracted locally)
 ├── scripts/
 │   ├── extract-map-assets.mjs # WoW minimap/worldmap/dungeon-floor extractor
+│   ├── extract-player-icons.mjs # WoW portrait/class/state icon extractor
 │   └── test-*.cjs          # Self-contained test suites (npm test)
 ├── deploy/
 │   └── wowmin.service.example # Hardened systemd unit template

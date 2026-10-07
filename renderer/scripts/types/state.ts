@@ -18,6 +18,7 @@ export interface PlayerInfo {
   className: string;
   raceId: number;
   classId: number;
+  gender?: number;
 }
 
 export interface ActivityLogEntry {

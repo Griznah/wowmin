@@ -41,6 +41,7 @@ export interface OnlinePlayerRow {
   level: number;
   raceId: number;
   classId: number;
+  gender?: number;
 }
 
 export interface MapOnlineCounts {
@@ -82,6 +83,12 @@ export interface MapPlayerPosition {
   waitingForResurrect?: boolean;
   battlegroundRole?: number;
   wmoGroupId?: number;
+  gender?: number;
+  onTaxi?: boolean;
+  mounted?: boolean;
+  sapped?: boolean;
+  stunned?: boolean;
+  spiritForm?: boolean;
 }
 
 export interface MapBattlegroundWorldState {
@@ -160,7 +167,7 @@ export interface MapPlayerSnapshot {
   capturedAt: number;
 }
 
-export type SessionEventType = 'kill' | 'death' | 'loot' | 'level' | 'boss' | 'objective' | 'flag-capture';
+export type SessionEventType = 'kill' | 'death' | 'loot' | 'level' | 'boss' | 'objective' | 'flag-capture' | 'match-result';
 
 export interface RecordedSessionEvent {
   id: string;
@@ -193,6 +200,12 @@ export interface SessionRoutePoint {
   wmoGroupId?: number;
   alive: boolean;
   inCombat: boolean;
+  onTaxi?: boolean;
+  mounted?: boolean;
+  sapped?: boolean;
+  stunned?: boolean;
+  spiritForm?: boolean;
+  waitingForResurrect?: boolean;
 }
 
 export interface SessionParticipant {
@@ -200,6 +213,8 @@ export interface SessionParticipant {
   isBot: boolean;
   teamId?: number;
   classId: number;
+  raceId?: number;
+  gender?: number;
   levelStart: number;
   levelEnd: number;
 }
@@ -211,6 +226,15 @@ export interface SessionTotals {
   levelUps: number;
   objectives: number;
   flagCaptures: number;
+}
+
+export interface SessionBattlegroundOutcome {
+  mapId: number;
+  battlegroundTypeId: number;
+  status: number;
+  winner: number;
+  allianceScore: number;
+  hordeScore: number;
 }
 
 export interface SessionRecord {
@@ -225,6 +249,7 @@ export interface SessionRecord {
   endedAt: number;
   elapsedMs: number;
   completed: boolean;
+  battleground?: SessionBattlegroundOutcome;
   participants: SessionParticipant[];
   events: RecordedSessionEvent[];
   routes: SessionRoutePoint[];
@@ -244,6 +269,7 @@ export interface SessionIndexEntry {
   participantCount: number;
   eventCount: number;
   routePointCount: number;
+  battleground?: SessionBattlegroundOutcome;
   totals: SessionTotals;
   bytes: number;
 }

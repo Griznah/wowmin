@@ -1114,6 +1114,12 @@ SELECT * FROM creature_template WHERE entry = 1;" spellcheck="false"></textarea>
                 <input type="number" id="map-level-max" min="1" max="80" placeholder="Max" />
               </div>
             </div>
+            <label class="filter-label">Icon size
+              <span class="player-icon-scale-control">
+                <input type="range" id="map-icon-scale" min="75" max="250" step="25" value="125" />
+                <output id="map-icon-scale-value" for="map-icon-scale">125%</output>
+              </span>
+            </label>
             <label class="filter-label">Playerbots DB
               <input type="text" id="map-playerbots-db-name" value="acore_playerbots" />
             </label>
@@ -1197,6 +1203,12 @@ SELECT * FROM creature_template WHERE entry = 1;" spellcheck="false"></textarea>
             </label>
             <label class="auto-refresh-toggle">
               <input type="checkbox" id="instance-auto-refresh" checked /> Auto (1 s)
+            </label>
+            <label>Icon size
+              <span class="player-icon-scale-control">
+                <input type="range" id="instance-icon-scale" min="75" max="250" step="25" value="125" />
+                <output id="instance-icon-scale-value" for="instance-icon-scale">125%</output>
+              </span>
             </label>
             <div class="btn-row">
               <button id="instance-refresh-btn" class="btn btn-small">Refresh now</button>

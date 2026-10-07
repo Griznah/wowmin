@@ -24,6 +24,7 @@ function toPlayer(row: OnlinePlayerRow): PlayerInfo {
     className: CLASS_NAMES[classId] || '',
     raceId,
     classId,
+    gender: row.gender === undefined ? undefined : Number(row.gender),
   };
 }
 

@@ -10,6 +10,7 @@ const TELEMETRY_FIELDS_V1 = 15;
 const TELEMETRY_FIELDS_V2 = 29;
 const TELEMETRY_FIELDS_V3 = 31;
 const TELEMETRY_FIELDS_V4 = 32;
+const TELEMETRY_FIELDS_V6 = 34;
 const BATTLEGROUND_FIELDS = 17;
 const OBJECTIVE_FIELDS = 5;
 const INSTANCE_FIELDS = 4;
@@ -51,7 +52,7 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
   const protocolVersion = versionLines.length > 0
     ? finiteNumber(versionLines[0].slice('WMAP_VERSION|'.length))
     : 1;
-  if (![1, 2, 3, 4, 5].includes(protocolVersion ?? 0)
+  if (![1, 2, 3, 4, 5, 6].includes(protocolVersion ?? 0)
     || versionLines.some((line) => finiteNumber(line.slice('WMAP_VERSION|'.length)) !== protocolVersion)) {
     return null;
   }
@@ -78,7 +79,7 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
     if (line.startsWith('WMAP_END|')) {
       const counts = line.split('|').slice(1).map(finiteNumber);
       if (counts.some((value) => value === null)) return null;
-      if (protocolVersion === 5 && counts.length !== 7) return null;
+      if ((protocolVersion === 5 || protocolVersion === 6) && counts.length !== 7) return null;
       if (protocolVersion === 4 && counts.length !== 6) return null;
       if (protocolVersion === 3 && counts.length !== 3) return null;
       if ((protocolVersion ?? 0) < 3 && counts.length !== 1) return null;
@@ -187,7 +188,7 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
       continue;
     }
     if (line.startsWith('WEVENT|')) {
-      if (protocolVersion !== 5) return null;
+      if ((protocolVersion ?? 0) < 5) return null;
       const fields = line.split('|');
       if (fields.length !== EVENT_FIELDS) return null;
       const values = [...fields.slice(1, 5), fields[6], fields[8], fields[9], fields[11], fields[13]].map(finiteNumber);
@@ -205,11 +206,13 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
     if (!line.startsWith('WMAP|')) continue;
 
     const fields = line.split('|');
-    const expectedFields = (protocolVersion ?? 0) >= 4
-      ? TELEMETRY_FIELDS_V4
-      : protocolVersion === 3
-        ? TELEMETRY_FIELDS_V3
-        : protocolVersion === 2 ? TELEMETRY_FIELDS_V2 : TELEMETRY_FIELDS_V1;
+    const expectedFields = protocolVersion === 6
+      ? TELEMETRY_FIELDS_V6
+      : (protocolVersion ?? 0) >= 4
+        ? TELEMETRY_FIELDS_V4
+        : protocolVersion === 3
+          ? TELEMETRY_FIELDS_V3
+          : protocolVersion === 2 ? TELEMETRY_FIELDS_V2 : TELEMETRY_FIELDS_V1;
     if (fields.length !== expectedFields) return null;
     const name = (protocolVersion ?? 0) >= 2 ? decodeTelemetryField(fields[1]) : fields[1];
     const baseValues = fields.slice(2, TELEMETRY_FIELDS_V1).map(finiteNumber);
@@ -271,6 +274,18 @@ export function parseLiveMapTelemetrySnapshot(message: string): LiveMapTelemetry
       const wmoGroupId = finiteNumber(fields[31]);
       if (wmoGroupId === null) return null;
       player.wmoGroupId = wmoGroupId;
+    }
+
+    if (protocolVersion === 6) {
+      const gender = finiteNumber(fields[32]);
+      const stateFlags = finiteNumber(fields[33]);
+      if (gender === null || stateFlags === null) return null;
+      player.gender = gender;
+      player.onTaxi = (stateFlags & 1) !== 0;
+      player.mounted = (stateFlags & 2) !== 0;
+      player.sapped = (stateFlags & 4) !== 0;
+      player.stunned = (stateFlags & 8) !== 0;
+      player.spiritForm = (stateFlags & 16) !== 0;
     }
 
     players.push(player);

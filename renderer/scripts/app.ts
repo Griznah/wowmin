@@ -1,10 +1,12 @@
 /// <reference path="./types/window.d.ts" />
-import { ts, escapeHtml, showResult, debounce, getMapName, CLASS_COLORS, RACE_ICONS, RACE_NAMES, CLASS_NAMES } from './utils/helpers';
+import { ts, escapeHtml, showResult, debounce, getMapName, CLASS_COLORS, RACE_NAMES, CLASS_NAMES } from './utils/helpers';
 import { parseOnlineList, playersFromDatabase } from './utils/online-players';
 import { type ActiveInstanceSession, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getInstanceCoordinateBounds, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, groupActiveInstanceSessions, parseInstanceSessionKey, projectInstancePosition, projectMinimapTilePosition, zoomInstanceViewAt } from './utils/instance-watch';
 import { CONTINENT_BOUNDS, worldToCanvas } from './utils/map-coords';
 import { getEnglishMotd, getServerUptime } from './utils/dashboard-data';
 import { calculateSessionTotalsAt, formatSessionReplayTime, isSessionRouteDiscontinuity } from './utils/session-replay';
+import { getClassIconHtml, getClassIconImage, getPlayerStateIconsHtml, getPlayerStateIndicators, getRacePortraitHtml, getResponsivePlayerIconScale, getStateIconImage, loadPlayerIconManifest } from './utils/player-icons';
+import { formatBattlegroundOutcome } from '../../src/session-outcome';
 import { AppState, createInitialState, PlayerInfo } from './types/state';
 import type { ConnectionProfile, DbConfig, SoapConfig, UpdateCheckResult, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, MapBattlegroundState, MapInstanceDeath, MapInstanceState, MapPlayerPosition, MapBotWaypoint, CharacterInventoryResult, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow, SessionIndexEntry, SessionRecord, SessionRoutePoint } from '../../src/types/electron';
 import { bindInventoryTableTooltips, formatInventoryLocation, ITEM_QUALITY_COLOR } from './inventory/wow-item-tooltip';
@@ -15,6 +17,63 @@ const state: AppState = createInitialState();
 // ── DOM References ────────────────────────────────────────────────────────
 const $ = <T extends HTMLElement>(id: string): T | null => document.getElementById(id) as T | null;
 const $$ = <T extends HTMLElement>(sel: string): NodeListOf<T> => document.querySelectorAll<T>(sel);
+
+const PLAYER_ICON_SCALE_STORAGE_KEY = 'wowmin.playerIconScale';
+function readStoredPlayerIconScale(): number {
+  try {
+    const value = Number(window.localStorage.getItem(PLAYER_ICON_SCALE_STORAGE_KEY));
+    return Number.isFinite(value) && value > 0 ? value : 1.25;
+  } catch {
+    return 1.25;
+  }
+}
+let playerIconScale = Math.max(0.75, Math.min(2.5, readStoredPlayerIconScale()));
+document.documentElement.style.setProperty('--player-icon-scale', String(playerIconScale));
+
+function getCanvasPlayerIconScale(zoom = 1): number {
+  return getResponsivePlayerIconScale(playerIconScale, zoom);
+}
+
+function drawCanvasClassIcon(
+  ctx: CanvasRenderingContext2D,
+  playerClass: number,
+  x: number,
+  y: number,
+  size: number,
+): boolean {
+  const image = getClassIconImage(playerClass);
+  if (!image) return false;
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(x, y, size / 2, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.drawImage(image, x - size / 2, y - size / 2, size, size);
+  ctx.restore();
+  return true;
+}
+
+function drawCanvasStateIcon(
+  ctx: CanvasRenderingContext2D,
+  player: Parameters<typeof getPlayerStateIndicators>[0],
+  x: number,
+  y: number,
+  scale = 1,
+): void {
+  const state = getPlayerStateIndicators(player, 1)[0];
+  if (!state) return;
+  const image = getStateIconImage(state.key);
+  const size = 13 * scale;
+  if (image) {
+    ctx.drawImage(image, x, y, size, size);
+    return;
+  }
+  ctx.save();
+  ctx.font = `${Math.max(11, 11 * scale)}px sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(state.fallback, x + size / 2, y + size / 2);
+  ctx.restore();
+}
 
 // Connection elements
 const $host = $<HTMLInputElement>('host');
@@ -1083,18 +1142,21 @@ function renderPlayersTable(): void {
     let html = '';
     for (const p of pageData) {
       const classColor = CLASS_COLORS[p.classId] || 'var(--text)';
-      const raceIcon = RACE_ICONS[p.raceId] || '';
+      const livePlayer = playersLiveStates.get(p.name);
+      const portrait = getRacePortraitHtml(p.raceId, livePlayer?.gender ?? p.gender);
+      const classIcon = getClassIconHtml(p.classId);
+      const stateIcons = livePlayer ? getPlayerStateIconsHtml(livePlayer) : '';
       const gmBadge = p.gmLevel > 0 ? `<span class="gm-badge">GM${p.gmLevel}</span>` : '';
       const botBadge = p.isBot ? `<span class="bot-badge">BOT</span>` : '';
 
       html += `<tr class="${p.isBot ? 'row-bot' : 'row-real'}" data-charname="${escapeHtml(p.name)}">
         <td>
           <span class="char-name">${escapeHtml(p.name)}</span>
-          ${gmBadge}${botBadge}
+          ${stateIcons}${gmBadge}${botBadge}
         </td>
         <td class="td-level">${p.level || '—'}</td>
-        <td>${raceIcon} ${escapeHtml(p.race || '—')}</td>
-        <td><span style="color:${classColor}">${escapeHtml(p.className || '—')}</span></td>
+        <td>${portrait} ${escapeHtml(p.race || '—')}</td>
+        <td>${classIcon} <span style="color:${classColor}">${escapeHtml(p.className || '—')}</span></td>
         <td>${escapeHtml(p.mapName)}</td>
         <td>${escapeHtml(p.zoneName)}</td>
         <td>${escapeHtml(p.account)}</td>
@@ -1138,6 +1200,7 @@ function updatePagination(total: number, perPage: number): void {
 }
 
 let playersRefreshInFlight = false;
+let playersLiveStates = new Map<string, MapPlayerPosition>();
 async function refreshPlayers(): Promise<void> {
   if (playersRefreshInFlight) return;
   if (!state.connected && !state.mapDbConnected) {
@@ -1154,6 +1217,16 @@ async function refreshPlayers(): Promise<void> {
       const result = await exec('account onlinelist');
       if (!result.success) throw new Error(result.message);
       state.allPlayers = parseOnlineList(result.message);
+    }
+    if (state.connected) {
+      try {
+        const liveSnapshot = await window.electronAPI.map.getPlayerPositions();
+        playersLiveStates = new Map(liveSnapshot.players.map((player) => [player.name, player]));
+      } catch {
+        playersLiveStates.clear();
+      }
+    } else {
+      playersLiveStates.clear();
     }
     populateMapFilter(state.allPlayers);
     applyPlayersFilter(false);
@@ -5330,6 +5403,8 @@ const $mapZoomOutBtn      = $<HTMLButtonElement>('map-zoom-out-btn');
 const $mapZoomInBtn       = $<HTMLButtonElement>('map-zoom-in-btn');
 const $mapZoomResetBtn    = $<HTMLButtonElement>('map-zoom-reset-btn');
 const $mapInteractionHint = $<HTMLElement>('map-interaction-hint');
+const $mapIconScale = $<HTMLInputElement>('map-icon-scale');
+const $mapIconScaleValue = $<HTMLOutputElement>('map-icon-scale-value');
 
 let mapAllPlayers: MapPlayerPosition[] = [];
 let mapPreviousPositions = new Map<string, Pick<MapPlayerPosition, 'position_x' | 'position_y' | 'position_z'>>();
@@ -5900,6 +5975,7 @@ function renderMapCanvas(): void {
     ctx.restore();
   }
 
+  const markerScale = getCanvasPlayerIconScale(state.mapZoom);
   for (const p of players) {
     const renderedPosition = getRenderedMapPosition(p);
     const { x, y } = projectWorldToViewport(renderedPosition, bounds, content);
@@ -5911,14 +5987,14 @@ function renderMapCanvas(): void {
     if (isSelected) {
       ctx.shadowBlur = 0;
       ctx.beginPath();
-      ctx.arc(x, y, 14, 0, Math.PI * 2);
+      ctx.arc(x, y, 14 * markerScale, 0, Math.PI * 2);
       ctx.strokeStyle = '#ffffff';
       ctx.lineWidth = 2.5;
       ctx.stroke();
     }
 
     if (mapMovingPlayers.has(p.name)) {
-      const pulse = 10 + Math.sin(performance.now() / 100) * 2;
+      const pulse = (10 + Math.sin(performance.now() / 100) * 2) * markerScale;
       ctx.beginPath();
       ctx.arc(x, y, pulse, 0, Math.PI * 2);
       ctx.strokeStyle = 'rgba(79, 195, 247, 0.85)';
@@ -5932,16 +6008,20 @@ function renderMapCanvas(): void {
 
     // Outer coloured dot
     ctx.beginPath();
-    ctx.arc(x, y, isSelected ? 9 : 7, 0, Math.PI * 2);
+    const markerRadius = (isSelected ? 9 : 7) * markerScale;
+    ctx.arc(x, y, markerRadius, 0, Math.PI * 2);
     ctx.fillStyle = dotColor;
     ctx.fill();
 
-    // Inner white highlight
+    // Client class icon when extracted; compact highlight remains the fallback.
     ctx.shadowBlur = 0;
-    ctx.beginPath();
-    ctx.arc(x, y, 2.5, 0, Math.PI * 2);
-    ctx.fillStyle = '#fff';
-    ctx.fill();
+    if (!drawCanvasClassIcon(ctx, p.class, x, y, (isSelected ? 14 : 11) * markerScale)) {
+      ctx.beginPath();
+      ctx.arc(x, y, 2.5 * markerScale, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff';
+      ctx.fill();
+    }
+    drawCanvasStateIcon(ctx, p, x + markerRadius * 0.7, y - markerRadius - 6 * markerScale, markerScale);
 
     // Name label
     if (showLabels || isSelected) {
@@ -5949,7 +6029,7 @@ function renderMapCanvas(): void {
       ctx.font = isSelected ? 'bold 12px sans-serif' : '11px sans-serif';
       ctx.shadowColor = 'rgba(0,0,0,0.8)';
       ctx.shadowBlur  = isSelected ? 3 : 2;
-      ctx.fillText(p.name, x + 12, y + 4);
+      ctx.fillText(p.name, x + markerRadius + 5, y + 4);
       ctx.shadowBlur = 0;
     }
   }
@@ -5979,9 +6059,13 @@ function renderMapPlayerList(): void {
     const color   = CLASS_COLORS[p.class] || '#ccc';
     const clsName = CLASS_NAMES[p.class]  || '';
     const isSel   = p.name === mapSelectedPlayerName;
+    const identity = `<span class="map-player-identity">${getRacePortraitHtml(p.race, p.gender)}${getClassIconHtml(p.class)}</span>`;
+    const stateIcons = getPlayerStateIconsHtml(p);
     html += `<div class="map-player-item${isBot ? ' map-player-bot' : ''}${isSel ? ' map-player-selected' : ''}" data-charname="${escapeHtml(p.name)}" title="${escapeHtml(p.name)} – ${escapeHtml(clsName)} lv${p.level}">
       <span class="map-player-dot" style="background:${color}"></span>
+      ${identity}
       <span class="map-player-name">${escapeHtml(p.name)}</span>
+      ${stateIcons}
       <span class="map-player-lvl">Lv${p.level}</span>
     </div>`;
   }
@@ -6011,7 +6095,9 @@ function renderMapSelectedPanel(): void {
   const mapLabel   = CONTINENT_BOUNDS[player.map]?.label || `Map ${player.map}`;
 
   if (nameEl)    { nameEl.textContent = player.name; nameEl.style.color = classColor; }
-  if (badgeEl)   { badgeEl.innerHTML  = isBot ? '<span class="bot-badge">BOT</span>' : ''; }
+  if (badgeEl) {
+    badgeEl.innerHTML = `${getRacePortraitHtml(player.race, player.gender)}${getClassIconHtml(player.class)}${getPlayerStateIconsHtml(player)}${isBot ? '<span class="bot-badge">BOT</span>' : ''}`;
+  }
   const stateLabel = player.alive ? (player.inCombat ? 'Combat' : 'Alive') : 'Dead';
   if (detailsEl) { detailsEl.textContent = `Lv${player.level} ${raceName} ${clsName} • ${stateLabel}`; }
   if (coordsEl) {
@@ -6055,10 +6141,11 @@ $mapCanvas?.addEventListener('click', (e) => {
   if (!isPointInViewport(mx, my, viewport)) return;
 
   let hit: MapPlayerPosition | null = null;
+  const hitRadius = 14 * getCanvasPlayerIconScale(state.mapZoom);
   for (const p of getMapFilteredPlayers()) {
     const { x, y } = projectWorldToViewport(p, bounds, layout.content);
     const dx = mx - x, dy = my - y;
-    if (dx * dx + dy * dy < 196) { hit = p; break; } // 14 px radius
+    if (dx * dx + dy * dy < hitRadius * hitRadius) { hit = p; break; }
   }
 
   mapSelectedPlayerName = hit ? (mapSelectedPlayerName === hit.name ? null : hit.name) : null;
@@ -6328,6 +6415,34 @@ const $instanceRefreshBtn = $<HTMLButtonElement>('instance-refresh-btn');
 const $instanceFitBtn = $<HTMLButtonElement>('instance-fit-btn');
 const $instanceZoomOutBtn = $<HTMLButtonElement>('instance-zoom-out-btn');
 const $instanceZoomInBtn = $<HTMLButtonElement>('instance-zoom-in-btn');
+const $instanceIconScale = $<HTMLInputElement>('instance-icon-scale');
+const $instanceIconScaleValue = $<HTMLOutputElement>('instance-icon-scale-value');
+
+function setPlayerIconScale(percent: number, render = true): void {
+  playerIconScale = Math.max(0.75, Math.min(2.5, percent / 100));
+  const normalizedPercent = Math.round(playerIconScale * 100);
+  document.documentElement.style.setProperty('--player-icon-scale', String(playerIconScale));
+  for (const input of [$mapIconScale, $instanceIconScale]) if (input) input.value = String(normalizedPercent);
+  for (const output of [$mapIconScaleValue, $instanceIconScaleValue]) {
+    if (output) output.textContent = `${normalizedPercent}%`;
+  }
+  try {
+    window.localStorage.setItem(PLAYER_ICON_SCALE_STORAGE_KEY, String(playerIconScale));
+  } catch {
+    // Keep the in-memory preference when browser storage is unavailable.
+  }
+  if (!render) return;
+  renderPlayersTable();
+  renderMapPlayerList();
+  renderMapSelectedPanel();
+  renderMapCanvas();
+  renderInstanceWatcher();
+  renderSessionReplayCanvas();
+}
+
+setPlayerIconScale(playerIconScale * 100, false);
+$mapIconScale?.addEventListener('input', () => setPlayerIconScale(Number($mapIconScale.value)));
+$instanceIconScale?.addEventListener('input', () => setPlayerIconScale(Number($instanceIconScale.value)));
 const $instanceClearFocusBtn = $<HTMLButtonElement>('instance-clear-focus-btn');
 const $instancePlayerList = $<HTMLElement>('instance-player-list');
 const $instanceBattlegroundCard = $<HTMLElement>('instance-battleground-card');
@@ -6753,10 +6868,16 @@ function renderInstancePlayerList(session: ActiveInstanceSession | null): void {
         ? player.teamId === 1 ? '#3b82f6' : player.teamId === 0 ? '#ef4444' : '#94a3b8'
         : CLASS_COLORS[player.class] || '#aaa';
       const selected = player.name === selectedInstancePlayerName ? ' selected' : '';
+      const identity = `<span class="map-player-identity">${getRacePortraitHtml(player.race, player.gender)}${getClassIconHtml(player.class)}</span>`;
+      const stateIcons = getPlayerStateIconsHtml(player);
       return `<div class="instance-player-row${player.inCombat ? ' in-combat' : ''}${selected}" data-instance-player="${escapeHtml(player.name)}">
         <span class="map-player-dot" style="background:${markerColor}"></span>
-        <span class="instance-player-name">${escapeHtml(player.name)}</span>
-        <span class="instance-player-state">${escapeHtml(details.join(' · '))}</span>
+        ${identity}
+        <span class="instance-player-info">
+          <span class="instance-player-name">${escapeHtml(player.name)}</span>
+          <span class="instance-player-state">${escapeHtml(details.join(' · '))}</span>
+        </span>
+        ${stateIcons}
       </div>`;
     }).join('');
 }
@@ -6805,7 +6926,8 @@ function renderInstanceCanvas(): void {
     ? getInstanceProjectionViewport(width, height, aspectRatio)
     : { x: 0, y: 0, width, height };
   instanceBaseViewport = baseViewport;
-  const viewport = applyInstanceViewTransform(baseViewport, getInstanceViewTransform());
+  const viewTransform = getInstanceViewTransform();
+  const viewport = applyInstanceViewTransform(baseViewport, viewTransform);
   const project = (position: Pick<MapPlayerPosition, 'position_x' | 'position_y'>) => {
     if (asset?.metadata.projection?.type === 'minimapTiles') {
       const metadata = asset.metadata;
@@ -6848,6 +6970,7 @@ function renderInstanceCanvas(): void {
     ? session.players.filter((player) => getParticipantDungeonFloor(player, asset.metadata.floors ?? [])?.id === floor.id)
     : session.players;
   const pendingLabels: { name: string; x: number; y: number; priority: number }[] = [];
+  const markerScale = getCanvasPlayerIconScale(viewTransform.zoom);
   for (const player of visiblePlayers) {
     const trail = (instanceTrails.get(player.name) ?? []).filter((point) =>
       !floor || getParticipantDungeonFloor(point, asset?.metadata.floors ?? [])?.id === floor.id);
@@ -6868,16 +6991,19 @@ function renderInstanceCanvas(): void {
       : player.isBot ? '#94a3b8' : (CLASS_COLORS[player.class] || '#4fc3f7');
     if (player.inCombat) {
       ctx.beginPath();
-      ctx.arc(point.x, point.y, 11, 0, Math.PI * 2);
+      ctx.arc(point.x, point.y, 11 * markerScale, 0, Math.PI * 2);
       ctx.strokeStyle = '#ef4444';
       ctx.lineWidth = 2;
       ctx.stroke();
     }
-    const markerRadius = player.isBot ? 6 : 8;
+    const markerRadius = (player.isBot ? 6 : 8) * markerScale;
     ctx.beginPath();
     ctx.arc(point.x, point.y, markerRadius, 0, Math.PI * 2);
     ctx.fillStyle = player.alive ? color : '#475569';
     ctx.fill();
+    drawCanvasClassIcon(ctx, player.class, point.x, point.y, markerRadius * 1.65);
+    drawCanvasStateIcon(ctx, player, point.x + markerRadius * 0.7, point.y - markerRadius - 6 * markerScale,
+      markerScale);
     if (player.name === selectedInstancePlayerName) {
       ctx.beginPath();
       ctx.arc(point.x, point.y, markerRadius + 4, 0, Math.PI * 2);
@@ -6887,7 +7013,7 @@ function renderInstanceCanvas(): void {
     }
     instanceMarkerHitAreas.push({ name: player.name, x: point.x, y: point.y, radius: markerRadius + 6 });
 
-    const headingLength = 13;
+    const headingLength = 13 * markerScale;
     ctx.beginPath();
     ctx.moveTo(point.x, point.y);
     ctx.lineTo(point.x - Math.sin(player.orientation) * headingLength, point.y - Math.cos(player.orientation) * headingLength);
@@ -6898,8 +7024,8 @@ function renderInstanceCanvas(): void {
     if (visiblePlayers.length <= 60) {
       pendingLabels.push({
         name: player.name,
-        x: point.x + 10,
-        y: point.y - 9,
+        x: point.x + markerRadius + 4,
+        y: point.y - markerRadius - 1,
         priority: (!player.isBot ? 2 : 0) + (player.inCombat ? 1 : 0),
       });
     }
@@ -7207,8 +7333,12 @@ function renderSessionHistoryList(): void {
   $sessionHistoryList.innerHTML = sessionHistoryEntries.map((entry) => {
     const selected = entry.id === selectedSessionRecordId ? ' selected' : '';
     const occurredAt = new Date(entry.startedAt).toLocaleString();
+    const outcome = formatBattlegroundOutcome(entry.battleground);
+    const outcomeClass = entry.battleground?.winner === 1 ? ' alliance'
+      : entry.battleground?.winner === 0 ? ' horde' : '';
     return `<button type="button" class="session-history-item${selected}" data-session-id="${escapeHtml(entry.id)}">
       <strong>${escapeHtml(entry.mapName)} · #${entry.instanceId}</strong>
+      ${outcome ? `<span class="session-history-outcome${outcomeClass}">${escapeHtml(outcome)}</span>` : ''}
       <span>${escapeHtml(sessionTypeLabel(entry.mapType))} · ${entry.participantCount} participants · ${formatSessionReplayTime(entry.elapsedMs)}</span>
       <span>${escapeHtml(occurredAt)} · ${entry.eventCount} events</span>
     </button>`;
@@ -7395,6 +7525,7 @@ function renderSessionReplayCanvas(): void {
     return { x: viewport.x + projected.x, y: viewport.y + projected.y };
   };
 
+  const replayMarkerScale = getCanvasPlayerIconScale();
   const participantColors = new Map(record.participants.map((participant) => [participant.name,
     participant.teamId === 1 ? '#3b82f6' : participant.teamId === 0 ? '#ef4444'
       : CLASS_COLORS[participant.classId] ?? '#94a3b8']));
@@ -7427,8 +7558,12 @@ function renderSessionReplayCanvas(): void {
     const projected = project(current);
     ctx.fillStyle = participantColors.get(participant.name) ?? '#94a3b8';
     ctx.beginPath();
-    ctx.arc(projected.x, projected.y, participant.isBot ? 4 : 5, 0, Math.PI * 2);
+    ctx.arc(projected.x, projected.y, (participant.isBot ? 4 : 5) * replayMarkerScale, 0, Math.PI * 2);
     ctx.fill();
+    drawCanvasClassIcon(ctx, participant.classId, projected.x, projected.y,
+      (participant.isBot ? 7 : 9) * replayMarkerScale);
+    drawCanvasStateIcon(ctx, current, projected.x + 4 * replayMarkerScale, projected.y - 11 * replayMarkerScale,
+      replayMarkerScale);
   }
   ctx.strokeStyle = 'rgba(255,255,255,0.18)';
   ctx.strokeRect(viewport.x + 0.5, viewport.y + 0.5, viewport.width - 1, viewport.height - 1);
@@ -7440,9 +7575,12 @@ function renderSessionReplay(): void {
     $sessionReplayTitle.textContent = record ? `${record.mapName} · #${record.instanceId}` : 'No recorded session selected';
   }
   if ($sessionReplaySubtitle) {
+    const outcome = formatBattlegroundOutcome(record?.battleground);
     $sessionReplaySubtitle.textContent = record
-      ? `${sessionTypeLabel(record.mapType)} · ${record.participants.length} participants · ${new Date(record.startedAt).toLocaleString()}`
+      ? `${outcome ? `${outcome} · ` : ''}${sessionTypeLabel(record.mapType)} · ${record.participants.length} participants · ${new Date(record.startedAt).toLocaleString()}`
       : 'Completed instances, raids, battlegrounds, and arenas appear here.';
+    $sessionReplaySubtitle.classList.toggle('alliance', record?.battleground?.winner === 1);
+    $sessionReplaySubtitle.classList.toggle('horde', record?.battleground?.winner === 0);
   }
   if ($sessionReplaySeek) {
     $sessionReplaySeek.max = String(record?.elapsedMs ?? 0);
@@ -7558,3 +7696,13 @@ const sessionReplayResizeObserver = new ResizeObserver(() => {
 const sessionReplayCanvasWrapper = document.querySelector('.session-replay-canvas-wrapper');
 if (sessionReplayCanvasWrapper) sessionReplayResizeObserver.observe(sessionReplayCanvasWrapper);
 renderSessionReplay();
+
+void loadPlayerIconManifest().then((loaded) => {
+  if (!loaded) return;
+  renderPlayersTable();
+  renderMapPlayerList();
+  renderMapSelectedPanel();
+  renderMapCanvas();
+  renderInstanceWatcher();
+  renderSessionReplayCanvas();
+});

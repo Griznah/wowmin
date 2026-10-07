@@ -39,6 +39,7 @@ yarn-error.log*
 # Assets
 assets/instances/
 assets/maps
+assets/player-icons/
 
 # Service deploy
 deploy/wowmin.service

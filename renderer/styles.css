@@ -34,6 +34,7 @@
   --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45);
   --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace;
   --font-sans: "Inter", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --player-icon-scale: 1.25;
 
   /* Accent / danger tints (replace hard-coded rgba) */
   --tint-accent-05: color-mix(in srgb, var(--color-accent) 6%, transparent);
@@ -3845,7 +3846,7 @@ tbody tr:hover { background: var(--tint-accent-05); }
 
 .instance-player-row {
   display: grid;
-  grid-template-columns: 8px minmax(0, 1fr) auto;
+  grid-template-columns: 8px auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 7px;
   padding: 6px 7px;
@@ -3856,8 +3857,9 @@ tbody tr:hover { background: var(--tint-accent-05); }
 .instance-player-row:hover { background: var(--bg-input); }
 .instance-player-row.in-combat { background: var(--tint-danger-08); }
 .instance-player-row.selected { box-shadow: inset 0 0 0 1px #fbbf24; }
+.instance-player-info { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .instance-player-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.instance-player-state { color: var(--text-muted); font-size: 10px; }
+.instance-player-state { overflow: hidden; color: var(--text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 
 .instance-watch-heading {
   display: flex;
@@ -3913,6 +3915,27 @@ tbody tr:hover { background: var(--tint-accent-05); }
   padding: 12px;
   overflow: hidden;
 }
+.player-portrait-icon,
+.player-class-icon,
+.player-state-icon {
+  display: inline-block;
+  width: calc(20px * var(--player-icon-scale));
+  height: calc(20px * var(--player-icon-scale));
+  flex: 0 0 auto;
+  border-radius: 3px;
+  object-fit: cover;
+  vertical-align: middle;
+}
+.player-class-icon { width: calc(18px * var(--player-icon-scale)); height: calc(18px * var(--player-icon-scale)); }
+.player-state-icons { display: inline-flex; align-items: center; gap: 2px; white-space: nowrap; }
+.player-state-icon { width: calc(16px * var(--player-icon-scale)); height: calc(16px * var(--player-icon-scale)); border: 1px solid rgba(255,255,255,0.2); }
+.icon-fallback { line-height: 1; text-align: center; }
+.map-player-identity { display: inline-flex; align-items: center; gap: 2px; }
+.instance-player-row .player-portrait-icon { width: calc(26px * var(--player-icon-scale)); height: calc(26px * var(--player-icon-scale)); }
+.player-icon-scale-control { display: flex; align-items: center; gap: 8px; }
+.player-icon-scale-control input { min-width: 0; flex: 1; accent-color: var(--accent); }
+.player-icon-scale-control output { width: 38px; color: var(--text-muted); font-size: 10px; text-align: right; }
+
 .session-history-sidebar,
 .session-replay-main,
 .session-history-card { min-height: 0; min-width: 0; }
@@ -3936,6 +3959,11 @@ tbody tr:hover { background: var(--tint-accent-05); }
 .session-history-item.selected { background: var(--tint-accent-12); box-shadow: inset 2px 0 var(--accent); }
 .session-history-item strong { font-size: 12px; }
 .session-history-item span { color: var(--text-muted); font-size: 10px; }
+.session-history-item .session-history-outcome { font-size: 12px; font-weight: 700; }
+.session-history-outcome.alliance,
+#session-replay-subtitle.alliance { color: #93c5fd; }
+.session-history-outcome.horde,
+#session-replay-subtitle.horde { color: #fca5a5; }
 .session-replay-main { display: flex; flex-direction: column; gap: 12px; }
 .session-replay-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; flex: 1; gap: 12px; min-height: 0; }
 .session-replay-map-panel { display: flex; min-height: 0; flex-direction: column; gap: 8px; }

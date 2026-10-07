@@ -703,6 +703,7 @@ interface MapPlayerQueryRow {
   level: number;
   race: number;
   class: number;
+  gender: number;
   account: string | number;
 }
 
@@ -1319,7 +1320,7 @@ ipcMain.handle('players:getOnline', async (): Promise<OnlinePlayerRow[]> => {
            COALESCE(a.last_ip, '') AS ip, c.map AS mapId, c.zone AS zoneId,
            COALESCE(a.expansion, 2) AS expansion,
            COALESCE((SELECT MAX(aa.gmlevel) FROM ${accountAccess} aa WHERE aa.id = c.account), 0) AS gmLevel,
-           c.level, c.race AS raceId, c.\`class\` AS classId
+           c.level, c.race AS raceId, c.\`class\` AS classId, c.gender
     FROM characters c
     LEFT JOIN ${authAccount} a ON a.id = c.account
     WHERE c.online > 0
@@ -1362,7 +1363,7 @@ ipcMain.handle('map:getPlayerPositions', async (_event, mapId?: number, instance
   }
   const whereFilters = filters.length ? ` AND ${filters.join(' AND ')}` : '';
   const result = await mapDbService.query<MapPlayerQueryRow>(
-    `SELECT name, map, instance_id, position_x, position_y, position_z, level, race, \`class\`, account
+    `SELECT name, map, instance_id, position_x, position_y, position_z, level, race, \`class\`, gender, account
        FROM characters WHERE online = 1${whereFilters}`,
     params,
   );
@@ -1395,6 +1396,7 @@ ipcMain.handle('map:getPlayerPositions', async (_event, mapId?: number, instance
       level: Number(row.level),
       race: Number(row.race),
       class: Number(row.class),
+      gender: Number(row.gender),
       account,
       accountId,
       isBot: /^RNDBOT/i.test(account),
