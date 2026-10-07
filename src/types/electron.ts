@@ -89,6 +89,7 @@ export interface MapPlayerPosition {
   sapped?: boolean;
   stunned?: boolean;
   spiritForm?: boolean;
+  flagCarrier?: boolean;
 }
 
 export interface MapBattlegroundWorldState {
@@ -205,6 +206,7 @@ export interface SessionRoutePoint {
   sapped?: boolean;
   stunned?: boolean;
   spiritForm?: boolean;
+  flagCarrier?: boolean;
   waitingForResurrect?: boolean;
 }
 

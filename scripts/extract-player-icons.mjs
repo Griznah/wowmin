@@ -40,6 +40,7 @@ const STATE_ICONS = {
   death: 'Interface\\Icons\\Spell_Shadow_DeathScream.blp',
   spirit: 'Interface\\Icons\\Spell_Holy_GreaterHeal.blp',
   resurrect: 'Interface\\Icons\\Spell_Holy_Resurrection.blp',
+  flag: 'Interface\\Icons\\INV_BannerPVP_03.blp',
 };
 
 function walkFiles(root) {

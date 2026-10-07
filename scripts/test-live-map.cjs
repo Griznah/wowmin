@@ -137,6 +137,17 @@ test('parses protocol v6 gender and compact player state flags', () => {
   assert.equal(player.spiritForm, true);
 });
 
+test('parses protocol v7 battleground flag carrier state', () => {
+  const playerRow = [
+    'WMAP', 'Carrier', 489, 7, 100, 200, 30, 1.5, 80, 1, 1, 9001, 1, 1, 1,
+    3, 0, 1760000000, 77, 0, 0, 1, 100, 0, 100, 0, 0, '', 0, 0, -1, -1, 0, 32,
+  ].join('|');
+  const snapshot = parseLiveMapTelemetrySnapshot([
+    'WMAP_VERSION|7', playerRow, 'WMAP_END|1|0|0|0|0|0|0',
+  ].join('\n'));
+  assert.equal(snapshot.players[0].flagCarrier, true);
+});
+
 test('rejects truncated snapshots', () => {
   const message = 'WMAP|Jaspianus|571|0|1|2|3|4|80|1|1|9001|1|1|0\nWMAP_END|2';
   assert.equal(parseLiveMapTelemetry(message), null);

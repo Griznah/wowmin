@@ -1,7 +1,7 @@
 import type { MapPlayerPosition } from '../../../src/types/electron';
 import { CLASS_NAMES, RACE_ICONS, RACE_NAMES, escapeHtml } from './helpers';
 
-export type PlayerStateIconKey = 'spirit' | 'death' | 'resurrect' | 'sap' | 'stun' | 'taxi' | 'mounted' | 'combat';
+export type PlayerStateIconKey = 'spirit' | 'death' | 'resurrect' | 'flag' | 'sap' | 'stun' | 'taxi' | 'mounted' | 'combat';
 
 interface PlayerIconManifest {
   version: 1;
@@ -21,9 +21,10 @@ const CLASS_FALLBACKS: Record<number, string> = {
 };
 
 const STATE_DEFINITIONS: Record<PlayerStateIconKey, PlayerStateIndicator> = {
-  spirit: { key: 'spirit', label: 'Spirit form', fallback: '👻' },
+  spirit: { key: 'spirit', label: 'Spirit of Redemption', fallback: '👻' },
   death: { key: 'death', label: 'Dead', fallback: '☠️' },
   resurrect: { key: 'resurrect', label: 'Waiting to resurrect', fallback: '⏳' },
+  flag: { key: 'flag', label: 'Carrying battleground flag', fallback: '🚩' },
   sap: { key: 'sap', label: 'Sapped', fallback: '💤' },
   stun: { key: 'stun', label: 'Stunned', fallback: '💫' },
   taxi: { key: 'taxi', label: 'Taxi flight', fallback: '✈️' },
@@ -80,12 +81,15 @@ export function getClassIconHtml(playerClass: number, className = 'player-class-
 }
 
 export function getPlayerStateIndicators(player: Pick<MapPlayerPosition,
-  'alive' | 'inCombat' | 'onTaxi' | 'mounted' | 'sapped' | 'stunned' | 'spiritForm' | 'waitingForResurrect'>,
+  'alive' | 'inCombat' | 'onTaxi' | 'mounted' | 'sapped' | 'stunned' | 'spiritForm' | 'flagCarrier' | 'waitingForResurrect'>,
   limit = 3): PlayerStateIndicator[] {
   const keys: PlayerStateIconKey[] = [];
-  if (player.spiritForm) keys.push('spirit');
-  else if (!player.alive) keys.push('death');
-  if (player.waitingForResurrect) keys.push('resurrect');
+  if (player.spiritForm) return [STATE_DEFINITIONS.spirit].slice(0, Math.max(0, limit));
+  if (!player.alive) {
+    keys.push(player.waitingForResurrect ? 'resurrect' : 'death');
+    return keys.slice(0, Math.max(0, limit)).map((key) => STATE_DEFINITIONS[key]);
+  }
+  if (player.flagCarrier) keys.push('flag');
   if (player.sapped) keys.push('sap');
   if (player.stunned) keys.push('stun');
   if (player.onTaxi) keys.push('taxi');

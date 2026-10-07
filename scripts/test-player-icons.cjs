@@ -41,7 +41,7 @@ test('stacks at most three player states in documented priority order', () => {
     spiritForm: true,
     waitingForResurrect: true,
   });
-  assert.deepEqual(states.map((state) => state.key), ['spirit', 'resurrect', 'sap']);
+  assert.deepEqual(states.map((state) => state.key), ['spirit']);
 });
 
 test('uses male extracted portraits when legacy telemetry has no gender', () => {
@@ -57,10 +57,26 @@ test('scales canvas icons with zoom while keeping configurable bounds', () => {
   assert.equal(getResponsivePlayerIconScale(10, 1), 2.5);
 });
 
-test('uses death over movement and taxi over mounted in compact state stacks', () => {
+test('flag carrier is the highest-priority living map indicator', () => {
+  const states = getPlayerStateIndicators({
+    alive: true,
+    inCombat: true,
+    flagCarrier: true,
+    onTaxi: false,
+    mounted: false,
+    sapped: true,
+    stunned: true,
+    spiritForm: false,
+    waitingForResurrect: false,
+  });
+  assert.deepEqual(states.map((state) => state.key), ['flag', 'sap', 'stun']);
+});
+
+test('dead players only show death and release state', () => {
   const states = getPlayerStateIndicators({
     alive: false,
     inCombat: false,
+    flagCarrier: true,
     onTaxi: true,
     mounted: true,
     sapped: false,
@@ -68,5 +84,33 @@ test('uses death over movement and taxi over mounted in compact state stacks', (
     spiritForm: false,
     waitingForResurrect: false,
   });
-  assert.deepEqual(states.map((state) => state.key), ['death', 'taxi']);
+  assert.deepEqual(states.map((state) => state.key), ['death']);
+});
+
+test('alive players suppress stale death and resurrection indicators', () => {
+  const states = getPlayerStateIndicators({
+    alive: true,
+    inCombat: false,
+    onTaxi: false,
+    mounted: false,
+    sapped: false,
+    stunned: false,
+    spiritForm: false,
+    waitingForResurrect: true,
+  });
+  assert.deepEqual(states, []);
+});
+
+test('released dead players show waiting to resurrect instead of ordinary death', () => {
+  const states = getPlayerStateIndicators({
+    alive: false,
+    inCombat: false,
+    onTaxi: false,
+    mounted: false,
+    sapped: false,
+    stunned: false,
+    spiritForm: false,
+    waitingForResurrect: true,
+  });
+  assert.deepEqual(states.map((state) => state.key), ['resurrect']);
 });

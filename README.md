@@ -58,8 +58,8 @@ desktop app.
 - Zoom controls with mouse wheel zoom, double-click zoom, drag-to-pan while zoomed, and quick reset back to `100%`
 - Auto-refresh (1 s) with manual refresh; filter by real players, bots, or all, with bot detection resolved from account usernames when available
 - Optional map image backgrounds: place `0.jpg`, `1.jpg`, `530.jpg`, `571.jpg` in `assets/maps/` (see `assets/maps/README.txt`)
-- Shared race/gender portraits, class icons, and compact taxi, mounted, combat,
-  sap, stun, death, spirit-form, and resurrection indicators across Players,
+- Shared race/gender portraits, class icons, and compact flag-carrier, taxi,
+  mounted, combat, sap, stun, death, spirit-form, and resurrection indicators across Players,
   Live Map, and Instance Watch. Extracted client artwork is optional; generic
   emoji are used automatically when it is absent
 - Requires a separate database connection to `acore_characters` unless live telemetry is active
@@ -110,7 +110,7 @@ desktop app.
   included in this repository). Install it into
   `azerothcore-wotlk/modules/mod-wowmin-telemetry`, build, and start the
   worldserver as usual (see below)
-- It publishes a versioned `WMAP` protocol (v1–v6) via an administrator-only
+- It publishes a versioned `WMAP` protocol (v1–v7) via an administrator-only
   `wowmin telemetry [mapId] [instanceId]` SOAP command; older module versions
   are still parsed by this client for backward compatibility
 - The module is independent of `mod-playerbots` (playerbot details are an
@@ -545,7 +545,7 @@ wow-admin/
 │   ├── web-server.ts       # Native web service entry point (npm run start:web)
 │   ├── web-electron-shim.ts# Exposes the IPC surface to browser tabs
 │   ├── soap-client.ts      # SOAP/HTTP client for AzerothCore
-│   ├── live-map-telemetry.ts # WMAP protocol (v1–v6) parser + command builder
+│   ├── live-map-telemetry.ts # WMAP protocol (v1–v7) parser + command builder
 │   ├── session-recorder.ts # Session recording, persistence, index, purge
 │   ├── local-logs.ts       # Local (non-SSH) log discovery for web mode
 │   ├── config-store.ts     # Profile persistence

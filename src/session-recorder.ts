@@ -363,6 +363,7 @@ export class SessionRecorder {
       sapped: player.sapped,
       stunned: player.stunned,
       spiritForm: player.spiritForm,
+      flagCarrier: player.flagCarrier,
       waitingForResurrect: player.waitingForResurrect,
     }));
     active.record.routes.push(...points);

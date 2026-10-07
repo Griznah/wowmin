@@ -16,12 +16,14 @@ and session recording built on the separate `mod-wowmin-telemetry` module.
 ### Added
 
 - Session History now persists and prominently displays battleground outcomes. Warsong Gulch records the final flag score, Eye of the Storm records final resource points, and other battlegrounds and arenas identify the winner; replay logs include a match-result event.
-- Added protocol v6 player gender and compact taxi, mounted, sap, stun, and Spirit of Redemption state telemetry, plus shared race/gender portraits, class icons, and prioritized state indicators across Players, Live Map, and Instance Watch.
+- Added protocol v6 player gender and compact taxi, mounted, sap, stun, and Spirit of Redemption state telemetry, plus protocol v7 authoritative Warsong/Silverwing/Netherstorm flag-carrier state. Shared race/gender portraits, class icons, and prioritized state indicators appear across Players, Live Map, Instance Watch, and replay.
 - Added `npm run extract:icons` to extract client-owned portrait, class, and state BLP artwork into gitignored local PNG assets; generic emoji remain the zero-setup fallback.
 - Added synchronized, persisted icon-size controls to Live Map and Instance Watch. Canvas markers now scale progressively with zoom, participant-list icons are larger, and pre-v6 telemetry uses extracted male race portraits instead of emoji when gender is unavailable.
 
 ### Fixed
 
+- Flag carriers now keep a prominent flag indicator until the authoritative carrier aura is removed by a drop, capture, return, or death.
+- Player-state indicators now treat Spirit of Redemption, death/release, and living states as mutually coherent groups. Alive players immediately suppress stale Dead and Waiting to Resurrect icons.
 - Outland/map 530 extraction now filters exact audited white/grey source-padding textures before JPEG output, preserving real water pixels and projection bounds; individual continent maps can be regenerated without touching unrelated continents.
 - Map extraction now applies custom lettered locale patches after numbered patches and resolves artwork directories from `WorldMapArea.dbc`, enabling proper classic/TBC floor artwork and patched WMO/Z floor tables from WDM M/N patches instead of misleading dungeon minimap terrain.
 
