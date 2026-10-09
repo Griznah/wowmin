@@ -103,7 +103,7 @@ test('persists and indexes a completed battleground outcome', async () => {
   const active = snapshot(startedAt * 1000 + 1000, [bgPlayer], { battlegrounds: [battleground] });
   await recorder.ingest(active);
   await recorder.ingest({ ...active, capturedAt: active.capturedAt + 1000,
-    battlegrounds: [{ ...battleground, status: 4, winner: 0, allianceScore: 3 }] });
+    battlegrounds: [{ ...battleground, status: 4, winner: 1, allianceScore: 3 }] });
   await recorder.ingest(snapshot(active.capturedAt + 1010, []));
   await recorder.ingest(snapshot(active.capturedAt + 1020, []));
 
@@ -116,14 +116,61 @@ test('persists and indexes a completed battleground outcome', async () => {
 });
 
 test('formats battleground-specific outcomes', () => {
-  const base = { mapId: 529, battlegroundTypeId: 3, status: 4, winner: 1,
+  const base = { mapId: 529, battlegroundTypeId: 3, status: 4, winner: 0,
     allianceScore: 1200, hordeScore: 1600 };
   assert.equal(formatBattlegroundOutcome(base), 'Horde wins');
   assert.equal(formatBattlegroundOutcome({ ...base, mapId: 566 }), 'Horde wins 1600-1200');
   assert.equal(formatBattlegroundOutcome({ ...base, mapId: 489, winner: 2,
     allianceScore: 2, hordeScore: 2 }), 'Draw 2-2');
-  assert.equal(formatBattlegroundOutcome({ ...base, mapId: 628, winner: 0 }), 'Alliance wins');
+  assert.equal(formatBattlegroundOutcome({ ...base, mapId: 628, winner: 1 }), 'Alliance wins');
   assert.equal(formatBattlegroundOutcome({ ...base, status: 3 }), null);
+});
+
+test('records a final battleground state after all players leave', async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wowmin-bg-final-'));
+  const recorder = new SessionRecorder({ dataDir, routeIntervalMs: 1, completionGraceMs: 10 });
+  const startedAt = Math.floor(Date.now() / 1000);
+  const bgPlayer = { ...player(56, startedAt), map: 489, mapType: 3, teamId: 0 };
+  const battleground = {
+    mapId: 489, instanceId: 56, battlegroundTypeId: 2, status: 3, elapsedMs: 300000,
+    remainingMs: 0, winner: 2, allianceScore: 2, hordeScore: 0, alliancePlayers: 5,
+    hordePlayers: 5, allianceAlive: 5, hordeAlive: 5, nextResurrectMs: 10000,
+    allianceStrategy: -1, hordeStrategy: -1, worldStates: [],
+  };
+  const active = snapshot(startedAt * 1000 + 1000, [bgPlayer], { battlegrounds: [battleground] });
+  await recorder.ingest(active);
+  await recorder.ingest(snapshot(active.capturedAt + 10, [], {
+    battlegrounds: [{ ...battleground, status: 4, winner: 1, allianceScore: 3 }],
+  }));
+  await recorder.ingest(snapshot(active.capturedAt + 30, []));
+
+  const [entry] = await recorder.list();
+  assert.equal(formatBattlegroundOutcome(entry.battleground), 'Alliance wins 3-0');
+  const record = await recorder.get(entry.id);
+  assert.equal(record.events.find((event) => event.type === 'match-result').description, 'Alliance wins 3-0');
+});
+
+test('records EotS resource gains as objectives rather than flag captures', async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wowmin-eots-score-'));
+  const recorder = new SessionRecorder({ dataDir, routeIntervalMs: 1, completionGraceMs: 1 });
+  const startedAt = Math.floor(Date.now() / 1000);
+  const bgPlayer = { ...player(57, startedAt), map: 566, mapType: 3, teamId: 0 };
+  const battleground = {
+    mapId: 566, instanceId: 57, battlegroundTypeId: 7, status: 3, elapsedMs: 300000,
+    remainingMs: 0, winner: 2, allianceScore: 100, hordeScore: 50, alliancePlayers: 5,
+    hordePlayers: 5, allianceAlive: 5, hordeAlive: 5, nextResurrectMs: 10000,
+    allianceStrategy: -1, hordeStrategy: -1, worldStates: [],
+  };
+  const active = snapshot(startedAt * 1000 + 1000, [bgPlayer], { battlegrounds: [battleground] });
+  await recorder.ingest(active);
+  await recorder.ingest({ ...active, capturedAt: active.capturedAt + 10,
+    battlegrounds: [{ ...battleground, allianceScore: 110 }] });
+  await recorder.ingest(snapshot(active.capturedAt + 20, []));
+  await recorder.ingest(snapshot(active.capturedAt + 30, []));
+
+  const [entry] = await recorder.list();
+  assert.equal(entry.totals.flagCaptures, 0);
+  assert.equal(entry.totals.objectives, 1);
 });
 
 test('purges abandoned incomplete checkpoints and temporary files on startup', async () => {

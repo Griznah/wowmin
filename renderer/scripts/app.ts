@@ -20,6 +20,8 @@ const $$ = <T extends HTMLElement>(sel: string): NodeListOf<T> => document.query
 
 const TEAM_ALLIANCE = 0;
 const TEAM_HORDE = 1;
+const PVP_TEAM_HORDE = 0;
+const PVP_TEAM_ALLIANCE = 1;
 const PLAYER_ICON_SCALE_STORAGE_KEY = 'wowmin.playerIconScale';
 function readStoredPlayerIconScale(): number {
   try {
@@ -6782,8 +6784,8 @@ function renderInstanceBattleground(battleground: MapBattlegroundState | null): 
     battleground.hordeStrategy,
   );
   const winner = battleground.status === 4
-    ? battleground.winner === TEAM_ALLIANCE ? ' · Alliance won'
-      : battleground.winner === TEAM_HORDE ? ' · Horde won' : ' · Draw'
+    ? battleground.winner === PVP_TEAM_ALLIANCE ? ' · Alliance won'
+      : battleground.winner === PVP_TEAM_HORDE ? ' · Horde won' : ' · Draw'
     : '';
   if ($instanceBattlegroundPhase) {
     const phaseTime = battleground.status === 2
@@ -7344,8 +7346,8 @@ function renderSessionHistoryList(): void {
     const selected = entry.id === selectedSessionRecordId ? ' selected' : '';
     const occurredAt = new Date(entry.startedAt).toLocaleString();
     const outcome = formatBattlegroundOutcome(entry.battleground);
-    const outcomeClass = entry.battleground?.winner === TEAM_ALLIANCE ? ' alliance'
-      : entry.battleground?.winner === TEAM_HORDE ? ' horde' : '';
+    const outcomeClass = entry.battleground?.winner === PVP_TEAM_ALLIANCE ? ' alliance'
+      : entry.battleground?.winner === PVP_TEAM_HORDE ? ' horde' : '';
     return `<button type="button" class="session-history-item${selected}" data-session-id="${escapeHtml(entry.id)}">
       <strong>${escapeHtml(entry.mapName)} · #${entry.instanceId}</strong>
       ${outcome ? `<span class="session-history-outcome${outcomeClass}">${escapeHtml(outcome)}</span>` : ''}
@@ -7654,8 +7656,8 @@ function renderSessionReplay(): void {
     $sessionReplaySubtitle.textContent = record
       ? `${outcome ? `${outcome} · ` : ''}${sessionTypeLabel(record.mapType)} · ${record.participants.length} participants · ${new Date(record.startedAt).toLocaleString()}`
       : 'Completed instances, raids, battlegrounds, and arenas appear here.';
-    $sessionReplaySubtitle.classList.toggle('alliance', record?.battleground?.winner === TEAM_ALLIANCE);
-    $sessionReplaySubtitle.classList.toggle('horde', record?.battleground?.winner === TEAM_HORDE);
+    $sessionReplaySubtitle.classList.toggle('alliance', record?.battleground?.winner === PVP_TEAM_ALLIANCE);
+    $sessionReplaySubtitle.classList.toggle('horde', record?.battleground?.winner === PVP_TEAM_HORDE);
   }
   if ($sessionReplaySeek) {
     $sessionReplaySeek.max = String(record?.elapsedMs ?? 0);

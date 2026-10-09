@@ -23,6 +23,7 @@ and session recording built on the separate `mod-wowmin-telemetry` module.
 
 ### Fixed
 
+- Battleground Session History and replay now interpret the core `PvPTeamId` winner correctly, retain authoritative final state after participants leave, and classify Eye of the Storm resource gains as score objectives rather than flag captures.
 - Session History now loads persisted local records at application startup and remains available while disconnected from SOAP, the worldserver, and realm databases.
 - New Session History files now use familiar dungeon, raid, and battleground abbreviations in names such as `WSG-3-Oct08-26.json` and `Ramps(H)-22-Oct08-26.json`; collision suffixes preserve every run, and existing numeric filenames remain readable.
 - Corrected AzerothCore `TeamId` handling so Alliance is consistently blue and Horde consistently red in Instance Watch, replay, and battleground outcome styling.

@@ -440,6 +440,15 @@ export class SessionRecorder {
 
     for (const active of [...this.activeSessions.values()]) {
       if (playersBySession.has(active.runtimeKey)) continue;
+      this.recordServerEvents(active, snapshot.events.filter((event) =>
+        event.mapId === active.record.mapId && event.instanceId === active.record.instanceId));
+      this.recordDeaths(active, snapshot.deaths.filter((death) =>
+        death.mapId === active.record.mapId && death.instanceId === active.record.instanceId));
+      this.recordBossTransitions(active, snapshot.instances.find((instance) =>
+        instance.mapId === active.record.mapId && instance.instanceId === active.record.instanceId), now);
+      this.recordBattlegroundTransitions(active, snapshot.battlegrounds.find((battleground) =>
+        battleground.mapId === active.record.mapId && battleground.instanceId === active.record.instanceId), now);
+      if (now - active.lastCheckpointAt >= this.checkpointIntervalMs) await this.checkpoint(active, now);
       active.missingSince ??= now;
       if (now - active.missingSince >= this.completionGraceMs) await this.finalize(active);
     }
@@ -596,7 +605,7 @@ export class SessionRecorder {
     now: number,
   ): void {
     if (previous === null || score <= previous) return;
-    const flagCapture = active.record.mapId === 489 || active.record.mapId === 566;
+    const flagCapture = active.record.mapId === 489;
     this.addSnapshotEvent(active, flagCapture ? 'flag-capture' : 'objective', now, 0, team, score - previous,
       `${team} ${flagCapture ? 'captured a flag' : 'score'} (${score})`);
   }
