@@ -371,10 +371,10 @@ docker run -d --name wowmin \
   ghcr.io/griznah/wowmin:latest
 ```
 
-> The package is created private by default; make it public in the package
-> settings, or authenticate before pulling
-> (`docker login ghcr.io -u <github-user>` with a PAT that has
-> `read:packages`).
+> The workflow flips the package public automatically after each push
+> (GHCR creates new packages private). To pull an older private fork image
+> instead, authenticate first (`docker login ghcr.io -u <github-user>` with a
+> PAT that has `read:packages`).
 
 ## Usage
 
