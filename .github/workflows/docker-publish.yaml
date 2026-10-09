@@ -1,0 +1,148 @@
+name: Build and Push OCI Image
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+# Prevent concurrent runs on the same ref
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secretscan:
+    name: Run truffleHog secrets scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        # actions/checkout@v7.0.1 (pinned SHA: 3d3c42e5aac5ba805825da76410c181273ba90b1)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run truffleHog secrets scan
+        # trufflesecurity/trufflehog@v3.93.7 (pinned SHA: c3e599b7163e8198a55467f3133db0e7b2a492cb)
+        uses: trufflesecurity/trufflehog@363923b901c911a9164f50b6c423f47c15372b1c
+        with:
+          extra_args: --results=verified,unknown
+
+  image-test:
+    name: Run image tests
+    runs-on: ubuntu-latest
+    needs: secretscan
+    steps:
+      - name: Checkout repository
+        # actions/checkout@v7.0.1 (pinned SHA: 3d3c42e5aac5ba805825da76410c181273ba90b1)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        # docker/setup-buildx-action@v4.0.0 (pinned SHA: 4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd)
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003
+
+      - name: Build image (local cache only)
+        # docker/build-push-action@v7.0.0 (pinned SHA: d08e5c354a6adb9ed34480a06d141179aa583294)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: .
+          push: false
+          load: true
+          tags: wowmin:test
+
+      - name: Run container and check UID/GID
+        run: |
+          uid=$(docker run --rm --entrypoint id wowmin:test -u)
+          if [ "$uid" != "1000" ]; then
+            echo "FATAL: Container runs as UID $uid, expected 1000 (node)" >&2
+            exit 1
+          fi
+          echo "PASS: Container runs as non-root UID $uid"
+
+      - name: Run container and check HTTP Basic Auth + static assets
+        run: |
+          cid=$(docker run -d -p 3000:3000 \
+            -e WOWMIN_USERNAME=ci -e WOWMIN_PASSWORD=ci wowmin:test)
+          trap 'docker rm -f $cid' EXIT
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/ || true)
+            [ "$code" != "000" ] && break
+            sleep 1
+          done
+          noauth=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/)
+          authed=$(curl -s -o /dev/null -w '%{http_code}' -u ci:ci http://localhost:3000/)
+          asset=$(curl -s -o /dev/null -w '%{http_code}' -u ci:ci http://localhost:3000/dist/renderer.js)
+          css=$(curl -s -o /dev/null -w '%{http_code}' -u ci:ci http://localhost:3000/styles/output.css)
+          if [ "$noauth" != "401" ] || [ "$authed" != "200" ] || [ "$asset" != "200" ] || [ "$css" != "200" ]; then
+            echo "FATAL: expected 401/200/200/200, got $noauth/$authed/$asset/$css" >&2
+            docker logs $cid
+            exit 1
+          fi
+          echo "PASS: 401 without credentials, 200 with credentials, assets served"
+
+      - name: Stop container and check graceful exit
+        run: |
+          cid=$(docker run -d -p 3001:3000 \
+            -e WOWMIN_USERNAME=ci -e WOWMIN_PASSWORD=ci wowmin:test)
+          sleep 2
+          docker stop -t 15 $cid
+          code=$(docker inspect -f '{{.State.ExitCode}}' $cid)
+          docker rm $cid
+          if [ "$code" != "0" ]; then
+            echo "FATAL: container exited $code on SIGTERM, expected 0" >&2
+            exit 1
+          fi
+          echo "PASS: graceful SIGTERM exit 0"
+
+  build-and-push:
+    name: Build and push OCI image
+    runs-on: ubuntu-latest
+    needs: [image-test]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        # actions/checkout@v7.0.1 (pinned SHA: 3d3c42e5aac5ba805825da76410c181273ba90b1)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        # docker/setup-buildx-action@v4.0.0 (pinned SHA: 4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd)
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003
+
+      - name: Log in to GitHub Container Registry
+        # docker/login-action@v4.0.0 (pinned SHA: b45d80f862d83dbcd57f89517bcf500b2ab88fb2)
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Extract metadata
+        id: meta
+        # docker/metadata-action@v6.0.0 (pinned SHA: 030e881283bb7a6894de51c315a6bfe6a94e05cf)
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
+        with:
+          images: ghcr.io/griznah/wowmin
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Build and push OCI image
+        # docker/build-push-action@v7.0.0 (pinned SHA: d08e5c354a6adb9ed34480a06d141179aa583294)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

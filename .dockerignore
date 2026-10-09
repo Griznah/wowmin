@@ -1,0 +1,11 @@
+.git
+.github
+node_modules
+dist
+out
+plans
+docs
+*.log
+worldserver.conf
+.DS_Store
+renderer/styles/output.css

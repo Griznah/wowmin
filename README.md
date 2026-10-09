@@ -320,6 +320,62 @@ removed automatically at startup.
 Keep `/etc/wowmin.env` mode `0600` and restart the service after edits. Web
 mode disables upstream release checks; the Electron desktop build retains them.
 
+## Docker
+
+The web service ships as a container image. The image is built from the same
+`dist/web-server.js` web mode described above (no Electron at runtime), runs as
+the non-root `node` user (UID 1000), and exits cleanly on SIGTERM.
+
+### Build locally
+
+```bash
+docker build -t wowmin .
+```
+
+### Run
+
+```bash
+docker run -d --name wowmin \
+  -p 3000:3000 \
+  -e WOWMIN_USERNAME=admin \
+  -e WOWMIN_PASSWORD='replace-with-a-strong-password' \
+  -v wowmin-data:/data \
+  wowmin
+```
+
+Open `http://server-address:3000/` and sign in with the HTTP credentials. The
+container honours every `WOWMIN_*` variable documented in
+[Native Web Service](#native-web-service) (SOAP and database hosts, managed
+mode, telemetry, session recording), e.g. add
+`-e WOWMIN_SOAP_HOST=... -e WOWMIN_DB_HOST=...` for server-managed
+connections. `WOWMIN_DATA_DIR` is preset to `/data`; mount a volume there to
+keep profiles and session recordings across restarts.
+
+The same warning applies: the UI exposes raw SQL and server administration
+commands. Always set `WOWMIN_USERNAME`/`WOWMIN_PASSWORD` and put a TLS reverse
+proxy in front when the port is reachable from an untrusted network.
+
+### Prebuilt images (GHCR)
+
+Pushing a tag `vX.Y.Z` triggers
+[`.github/workflows/docker-publish.yaml`](.github/workflows/docker-publish.yaml):
+a secrets scan, an image smoke test (auth enforced, assets served, graceful
+shutdown), then a build pushed to `ghcr.io/griznah/wowmin`, tagged `X.Y.Z`,
+`X.Y` (latest minor line) and `latest`.
+
+```bash
+docker run -d --name wowmin \
+  -p 3000:3000 \
+  -e WOWMIN_USERNAME=admin -e WOWMIN_PASSWORD='...' \
+  -v wowmin-data:/data \
+  ghcr.io/griznah/wowmin:latest
+```
+
+> The package is created private by default; make it public in the package
+> settings, or authenticate before pulling
+> (`docker login ghcr.io -u <github-user>` with a PAT that has
+> `read:packages`).
+
 ## Usage
 
 ### SOAP Connection
