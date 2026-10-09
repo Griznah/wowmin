@@ -15,6 +15,7 @@ and session recording built on the separate `mod-wowmin-telemetry` module.
 
 ### Added
 
+- Paused Session Replay now shows a compact, human-readable recorded-information card when hovering a bot marker; clicking the bot pins the card until another replay element is clicked.
 - Session History now persists and prominently displays battleground outcomes. Warsong Gulch records the final flag score, Eye of the Storm records final resource points, and other battlegrounds and arenas identify the winner; replay logs include a match-result event.
 - Added protocol v6 player gender and compact taxi, mounted, sap, stun, and Spirit of Redemption state telemetry, plus protocol v7 authoritative Warsong/Silverwing/Netherstorm flag-carrier state. Shared race/gender portraits, class icons, and prioritized state indicators appear across Players, Live Map, Instance Watch, and replay.
 - Added `npm run extract:icons` to extract client-owned portrait, class, and state BLP artwork into gitignored local PNG assets; generic emoji remain the zero-setup fallback.
@@ -22,6 +23,9 @@ and session recording built on the separate `mod-wowmin-telemetry` module.
 
 ### Fixed
 
+- Session History now loads persisted local records at application startup and remains available while disconnected from SOAP, the worldserver, and realm databases.
+- New Session History files now use familiar dungeon, raid, and battleground abbreviations in names such as `WSG-3-Oct08-26.json` and `Ramps(H)-22-Oct08-26.json`; collision suffixes preserve every run, and existing numeric filenames remain readable.
+- Corrected AzerothCore `TeamId` handling so Alliance is consistently blue and Horde consistently red in Instance Watch, replay, and battleground outcome styling.
 - Flag carriers now keep a prominent flag indicator until the authoritative carrier aura is removed by a drop, capture, return, or death.
 - Player-state indicators now treat Spirit of Redemption, death/release, and living states as mutually coherent groups. Alive players immediately suppress stale Dead and Waiting to Resurrect icons.
 - Outland/map 530 extraction now filters exact audited white/grey source-padding textures before JPEG output, preserving real water pixels and projection bounds; individual continent maps can be regenerated without touching unrelated continents.

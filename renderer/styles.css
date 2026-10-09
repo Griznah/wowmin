@@ -3855,7 +3855,8 @@ tbody tr:hover { background: var(--tint-accent-05); }
 }
 
 .instance-player-row:hover { background: var(--bg-input); }
-.instance-player-row.in-combat { background: var(--tint-danger-08); }
+.instance-player-row.alliance.in-combat { background: rgba(59, 130, 246, 0.10); }
+.instance-player-row.horde.in-combat { background: var(--tint-danger-08); }
 .instance-player-row.selected { box-shadow: inset 0 0 0 1px #fbbf24; }
 .instance-player-info { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
 .instance-player-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -3969,6 +3970,42 @@ tbody tr:hover { background: var(--tint-accent-05); }
 .session-replay-map-panel { display: flex; min-height: 0; flex-direction: column; gap: 8px; }
 .session-replay-canvas-wrapper { min-height: 320px; }
 #session-replay-canvas { display: block; width: 100%; height: 100%; }
+.session-replay-bot-card {
+  position: absolute;
+  z-index: 4;
+  width: min(280px, calc(100% - 16px));
+  padding: 10px;
+  border: 1px solid rgba(96, 165, 250, 0.5);
+  border-radius: 7px;
+  background: rgba(7, 17, 30, 0.96);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  color: var(--text);
+  pointer-events: none;
+  font-size: 11px;
+  line-height: 1.35;
+}
+.session-replay-bot-card-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.session-replay-bot-card-title strong { color: #fff; font-size: 13px; }
+.session-replay-bot-card-title span {
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(96, 165, 250, 0.14);
+  color: #93c5fd;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.session-replay-bot-card-identity { margin-top: 2px; color: var(--text-muted); }
+.session-replay-bot-card-time { margin-top: 8px; color: #bfdbfe; font-weight: 600; }
+.session-replay-bot-card dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 8px;
+  margin: 7px 0 0;
+}
+.session-replay-bot-card dt { color: var(--text-muted); }
+.session-replay-bot-card dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--text); }
 .session-replay-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .session-replay-controls input[type="range"] { flex: 1; min-width: 120px; }
 .session-replay-controls label { display: flex; align-items: center; gap: 5px; color: var(--text-muted); font-size: 11px; }

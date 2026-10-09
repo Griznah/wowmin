@@ -1,7 +1,7 @@
 /// <reference path="./types/window.d.ts" />
 import { ts, escapeHtml, showResult, debounce, getMapName, CLASS_COLORS, RACE_NAMES, CLASS_NAMES } from './utils/helpers';
 import { parseOnlineList, playersFromDatabase } from './utils/online-players';
-import { type ActiveInstanceSession, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getInstanceCoordinateBounds, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, groupActiveInstanceSessions, parseInstanceSessionKey, projectInstancePosition, projectMinimapTilePosition, zoomInstanceViewAt } from './utils/instance-watch';
+import { type ActiveInstanceSession, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getInstanceCoordinateBounds, getInstanceFactionColor, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, groupActiveInstanceSessions, parseInstanceSessionKey, projectInstancePosition, projectMinimapTilePosition, zoomInstanceViewAt } from './utils/instance-watch';
 import { CONTINENT_BOUNDS, worldToCanvas } from './utils/map-coords';
 import { getEnglishMotd, getServerUptime } from './utils/dashboard-data';
 import { calculateSessionTotalsAt, formatSessionReplayTime, isSessionRouteDiscontinuity } from './utils/session-replay';
@@ -18,6 +18,8 @@ const state: AppState = createInitialState();
 const $ = <T extends HTMLElement>(id: string): T | null => document.getElementById(id) as T | null;
 const $$ = <T extends HTMLElement>(sel: string): NodeListOf<T> => document.querySelectorAll<T>(sel);
 
+const TEAM_ALLIANCE = 0;
+const TEAM_HORDE = 1;
 const PLAYER_ICON_SCALE_STORAGE_KEY = 'wowmin.playerIconScale';
 function readStoredPlayerIconScale(): number {
   try {
@@ -6780,7 +6782,8 @@ function renderInstanceBattleground(battleground: MapBattlegroundState | null): 
     battleground.hordeStrategy,
   );
   const winner = battleground.status === 4
-    ? battleground.winner === 1 ? ' · Alliance won' : battleground.winner === 0 ? ' · Horde won' : ' · Draw'
+    ? battleground.winner === TEAM_ALLIANCE ? ' · Alliance won'
+      : battleground.winner === TEAM_HORDE ? ' · Horde won' : ' · Draw'
     : '';
   if ($instanceBattlegroundPhase) {
     const phaseTime = battleground.status === 2
@@ -6842,7 +6845,6 @@ function renderInstancePlayerList(session: ActiveInstanceSession | null): void {
     $instancePlayerList.innerHTML = '<p class="placeholder">No active participants</p>';
     return;
   }
-  const battleground = getSelectedBattleground();
   const floors = instanceMapAssets.get(session.mapId)?.metadata.floors ?? [];
   $instancePlayerList.innerHTML = [...session.players]
     .sort((left, right) => Number(left.isBot) - Number(right.isBot) || left.name.localeCompare(right.name))
@@ -6864,13 +6866,12 @@ function renderInstancePlayerList(session: ActiveInstanceSession | null): void {
         details.push(`${groupLabel} ${player.groupId}${subgroup}`);
       }
       if (player.targetName) details.push(`Target: ${player.targetName}`);
-      const markerColor = battleground
-        ? player.teamId === 1 ? '#3b82f6' : player.teamId === 0 ? '#ef4444' : '#94a3b8'
-        : CLASS_COLORS[player.class] || '#aaa';
+      const markerColor = getInstanceFactionColor(player.teamId) ?? '#94a3b8';
       const selected = player.name === selectedInstancePlayerName ? ' selected' : '';
+      const factionClass = player.teamId === TEAM_ALLIANCE ? ' alliance' : player.teamId === TEAM_HORDE ? ' horde' : '';
       const identity = `<span class="map-player-identity">${getRacePortraitHtml(player.race, player.gender)}${getClassIconHtml(player.class)}</span>`;
       const stateIcons = getPlayerStateIconsHtml(player);
-      return `<div class="instance-player-row${player.inCombat ? ' in-combat' : ''}${selected}" data-instance-player="${escapeHtml(player.name)}">
+      return `<div class="instance-player-row${factionClass}${player.inCombat ? ' in-combat' : ''}${selected}" data-instance-player="${escapeHtml(player.name)}">
         <span class="map-player-dot" style="background:${markerColor}"></span>
         ${identity}
         <span class="instance-player-info">
@@ -6899,7 +6900,6 @@ function renderInstanceCanvas(): void {
   ctx.fillStyle = '#08111d';
   ctx.fillRect(0, 0, width, height);
   const session = getSelectedInstanceSession();
-  const battleground = getSelectedBattleground();
   $instanceWatchEmpty?.classList.toggle('hidden', Boolean(session));
   if (!session) return;
 
@@ -6969,7 +6969,7 @@ function renderInstanceCanvas(): void {
   const visiblePlayers = floor && asset?.metadata.floors
     ? session.players.filter((player) => getParticipantDungeonFloor(player, asset.metadata.floors ?? [])?.id === floor.id)
     : session.players;
-  const pendingLabels: { name: string; x: number; y: number; priority: number }[] = [];
+  const pendingLabels: { name: string; x: number; y: number; priority: number; color: string }[] = [];
   const markerScale = getCanvasPlayerIconScale(viewTransform.zoom);
   for (const player of visiblePlayers) {
     const trail = (instanceTrails.get(player.name) ?? []).filter((point) =>
@@ -6980,26 +6980,24 @@ function renderInstanceCanvas(): void {
         const projected = project(point);
         if (index === 0) ctx.moveTo(projected.x, projected.y); else ctx.lineTo(projected.x, projected.y);
       });
-      ctx.strokeStyle = player.isBot ? 'rgba(148,163,184,0.38)' : 'rgba(79,195,247,0.65)';
+      ctx.strokeStyle = `${getInstanceFactionColor(player.teamId) ?? '#94a3b8'}80`;
       ctx.lineWidth = 1.5;
       ctx.stroke();
     }
 
     const point = project(player);
-    const color = battleground
-      ? player.teamId === 1 ? '#3b82f6' : player.teamId === 0 ? '#ef4444' : '#94a3b8'
-      : player.isBot ? '#94a3b8' : (CLASS_COLORS[player.class] || '#4fc3f7');
+    const color = getInstanceFactionColor(player.teamId) ?? '#94a3b8';
     if (player.inCombat) {
       ctx.beginPath();
       ctx.arc(point.x, point.y, 11 * markerScale, 0, Math.PI * 2);
-      ctx.strokeStyle = '#ef4444';
+      ctx.strokeStyle = color;
       ctx.lineWidth = 2;
       ctx.stroke();
     }
     const markerRadius = (player.isBot ? 6 : 8) * markerScale;
     ctx.beginPath();
     ctx.arc(point.x, point.y, markerRadius, 0, Math.PI * 2);
-    ctx.fillStyle = player.alive ? color : '#475569';
+    ctx.fillStyle = color;
     ctx.fill();
     drawCanvasClassIcon(ctx, player.class, point.x, point.y, markerRadius * 1.65);
     drawCanvasStateIcon(ctx, player, point.x + markerRadius * 0.7, point.y - markerRadius - 6 * markerScale,
@@ -7027,13 +7025,13 @@ function renderInstanceCanvas(): void {
         x: point.x + markerRadius + 4,
         y: point.y - markerRadius - 1,
         priority: (!player.isBot ? 2 : 0) + (player.inCombat ? 1 : 0),
+        color,
       });
     }
   }
 
   const occupiedLabels: { left: number; right: number; top: number; bottom: number }[] = [];
   ctx.font = '11px sans-serif';
-  ctx.fillStyle = '#e5edf7';
   for (const label of pendingLabels.sort((left, right) => right.priority - left.priority)) {
     const labelWidth = ctx.measureText(label.name).width;
     const rect = { left: label.x - 2, right: label.x + labelWidth + 2, top: label.y - 11, bottom: label.y + 3 };
@@ -7041,6 +7039,7 @@ function renderInstanceCanvas(): void {
       rect.left < used.right && rect.right > used.left && rect.top < used.bottom && rect.bottom > used.top);
     if (overlaps) continue;
     occupiedLabels.push(rect);
+    ctx.fillStyle = label.color;
     ctx.fillText(label.name, label.x, label.y);
   }
 }
@@ -7301,6 +7300,7 @@ const $sessionReplayTitle = $<HTMLElement>('session-replay-title');
 const $sessionReplaySubtitle = $<HTMLElement>('session-replay-subtitle');
 const $sessionReplayTotals = $<HTMLElement>('session-replay-totals');
 const $sessionReplayCanvas = $<HTMLCanvasElement>('session-replay-canvas');
+const $sessionReplayBotCard = $<HTMLElement>('session-replay-bot-card');
 const $sessionReplayEmpty = $<HTMLElement>('session-replay-empty');
 const $sessionReplayEvents = $<HTMLElement>('session-replay-events');
 const $sessionReplayPlayBtn = $<HTMLButtonElement>('session-replay-play-btn');
@@ -7319,6 +7319,16 @@ let sessionReplayFrame: number | null = null;
 let sessionReplayPreviousFrameAt = 0;
 let sessionReplayLastRenderAt = 0;
 let sessionReplayLastFollowedEventMs = -1;
+interface SessionReplayBotHitArea {
+  x: number;
+  y: number;
+  radius: number;
+  participant: SessionRecord['participants'][number];
+  point: SessionRoutePoint;
+  floorIndex?: number;
+}
+let sessionReplayBotHitAreas: SessionReplayBotHitArea[] = [];
+let sessionReplayPinnedBotName: string | null = null;
 
 function sessionTypeLabel(mapType: number): string {
   return ['World', 'Instance', 'Raid', 'Battleground', 'Arena'][mapType] ?? `Type ${mapType}`;
@@ -7334,8 +7344,8 @@ function renderSessionHistoryList(): void {
     const selected = entry.id === selectedSessionRecordId ? ' selected' : '';
     const occurredAt = new Date(entry.startedAt).toLocaleString();
     const outcome = formatBattlegroundOutcome(entry.battleground);
-    const outcomeClass = entry.battleground?.winner === 1 ? ' alliance'
-      : entry.battleground?.winner === 0 ? ' horde' : '';
+    const outcomeClass = entry.battleground?.winner === TEAM_ALLIANCE ? ' alliance'
+      : entry.battleground?.winner === TEAM_HORDE ? ' horde' : '';
     return `<button type="button" class="session-history-item${selected}" data-session-id="${escapeHtml(entry.id)}">
       <strong>${escapeHtml(entry.mapName)} · #${entry.instanceId}</strong>
       ${outcome ? `<span class="session-history-outcome${outcomeClass}">${escapeHtml(outcome)}</span>` : ''}
@@ -7357,7 +7367,7 @@ async function refreshSessionHistory(): Promise<void> {
     renderSessionHistoryList();
     renderSessionReplay();
     if ($sessionHistoryStatus) {
-      $sessionHistoryStatus.textContent = `${sessionHistoryEntries.length} completed session${sessionHistoryEntries.length === 1 ? '' : 's'} in persistent history`;
+      $sessionHistoryStatus.textContent = `${sessionHistoryEntries.length} completed session${sessionHistoryEntries.length === 1 ? '' : 's'} in persistent local history · Worldserver connection not required`;
     }
   } catch (error) {
     if ($sessionHistoryStatus) {
@@ -7368,6 +7378,7 @@ async function refreshSessionHistory(): Promise<void> {
 }
 
 async function selectSessionRecord(id: string): Promise<void> {
+  clearPinnedSessionReplayBotCard();
   stopSessionReplay();
   selectedSessionRecordId = id;
   renderSessionHistoryList();
@@ -7440,6 +7451,56 @@ function updateSessionReplayReadout(): void {
   }
 }
 
+function hideSessionReplayBotCard(force = false): void {
+  if (sessionReplayPinnedBotName && !force) return;
+  $sessionReplayBotCard?.classList.add('hidden');
+}
+
+function clearPinnedSessionReplayBotCard(): void {
+  sessionReplayPinnedBotName = null;
+  hideSessionReplayBotCard(true);
+}
+
+function renderSessionReplayBotCard(hit: SessionReplayBotHitArea, clientX: number, clientY: number): void {
+  if (!$sessionReplayBotCard || !$sessionReplayCanvas) return;
+  const { participant, point } = hit;
+  const level = participant.levelStart === participant.levelEnd
+    ? `Level ${participant.levelEnd}`
+    : `Levels ${participant.levelStart} → ${participant.levelEnd}`;
+  const identity = [CLASS_NAMES[participant.classId] ?? `Class ${participant.classId}`,
+    participant.raceId ? RACE_NAMES[participant.raceId] ?? `Race ${participant.raceId}` : null,
+    participant.gender === 0 ? 'Male' : participant.gender === 1 ? 'Female' : null,
+    level].filter(Boolean).join(' · ');
+  const states = getPlayerStateIndicators(point, 8).map((state) => state.label);
+  const status = [point.alive ? 'Alive' : 'Dead', point.inCombat && point.alive ? 'Combat' : null]
+    .filter(Boolean).join(' · ');
+  const facing = Math.round(((point.orientation * 180 / Math.PI) % 360 + 360) % 360);
+  const location = hit.floorIndex === undefined ? `Facing ${facing}°` : `Facing ${facing}° · Floor ${hit.floorIndex}`;
+  const faction = participant.teamId === TEAM_ALLIANCE ? 'Alliance'
+    : participant.teamId === TEAM_HORDE ? 'Horde' : 'Unknown faction';
+  $sessionReplayBotCard.innerHTML = `
+    <div class="session-replay-bot-card-title"><strong>${escapeHtml(participant.name)}</strong><span>Bot</span></div>
+    <div class="session-replay-bot-card-identity">${escapeHtml(identity)}</div>
+    <div class="session-replay-bot-card-time">At ${formatSessionReplayTime(point.elapsedMs)} · ${escapeHtml(status)}</div>
+    <dl>
+      <dt>Faction</dt><dd>${faction}</dd>
+      <dt>Health</dt><dd>Not recorded</dd>
+      <dt>Position</dt><dd>${point.x.toFixed(1)}, ${point.y.toFixed(1)}, ${point.z.toFixed(1)}</dd>
+      <dt>Direction</dt><dd>${escapeHtml(location)}</dd>
+      ${states.length ? `<dt>States</dt><dd>${escapeHtml(states.join(' · '))}</dd>` : ''}
+    </dl>`;
+  $sessionReplayBotCard.classList.remove('hidden');
+  const wrapperRect = $sessionReplayCanvas.parentElement?.getBoundingClientRect();
+  if (!wrapperRect) return;
+  const margin = 8;
+  const desiredLeft = clientX - wrapperRect.left + 14;
+  const desiredTop = clientY - wrapperRect.top + 14;
+  const left = Math.min(desiredLeft, wrapperRect.width - $sessionReplayBotCard.offsetWidth - margin);
+  const top = Math.min(desiredTop, wrapperRect.height - $sessionReplayBotCard.offsetHeight - margin);
+  $sessionReplayBotCard.style.left = `${Math.max(margin, left)}px`;
+  $sessionReplayBotCard.style.top = `${Math.max(margin, top)}px`;
+}
+
 function getReplayFloor(point: SessionRoutePoint, floors: DungeonMapFloor[]): DungeonMapFloor | null {
   return getParticipantDungeonFloor({
     position_x: point.x,
@@ -7468,6 +7529,8 @@ function getReplayBounds(record: SessionRecord): InstanceCoordinateBounds {
 }
 
 function renderSessionReplayCanvas(): void {
+  sessionReplayBotHitAreas = [];
+  hideSessionReplayBotCard();
   if (!$sessionReplayCanvas) return;
   const wrapper = $sessionReplayCanvas.parentElement;
   if (!wrapper) return;
@@ -7482,7 +7545,10 @@ function renderSessionReplayCanvas(): void {
   ctx.fillRect(0, 0, width, height);
   const record = selectedSessionRecord;
   $sessionReplayEmpty?.classList.toggle('hidden', Boolean(record));
-  if (!record) return;
+  if (!record) {
+    clearPinnedSessionReplayBotCard();
+    return;
+  }
 
   if (!instanceMapAssets.has(record.mapId) && !instanceMapAssetLoads.has(record.mapId)) {
     void loadInstanceMapAsset(record.mapId);
@@ -7527,8 +7593,7 @@ function renderSessionReplayCanvas(): void {
 
   const replayMarkerScale = getCanvasPlayerIconScale();
   const participantColors = new Map(record.participants.map((participant) => [participant.name,
-    participant.teamId === 1 ? '#3b82f6' : participant.teamId === 0 ? '#ef4444'
-      : CLASS_COLORS[participant.classId] ?? '#94a3b8']));
+    getInstanceFactionColor(participant.teamId) ?? CLASS_COLORS[participant.classId] ?? '#94a3b8']));
   for (const participant of record.participants) {
     const route = visiblePoints.filter((point) => point.name === participant.name
       && (!floor || getReplayFloor(point, floors)?.id === floor.id));
@@ -7564,6 +7629,16 @@ function renderSessionReplayCanvas(): void {
       (participant.isBot ? 7 : 9) * replayMarkerScale);
     drawCanvasStateIcon(ctx, current, projected.x + 4 * replayMarkerScale, projected.y - 11 * replayMarkerScale,
       replayMarkerScale);
+    if (participant.isBot) {
+      sessionReplayBotHitAreas.push({
+        x: projected.x,
+        y: projected.y,
+        radius: Math.max(10, 8 * replayMarkerScale),
+        participant,
+        point: current,
+        floorIndex: getReplayFloor(current, floors)?.floorIndex,
+      });
+    }
   }
   ctx.strokeStyle = 'rgba(255,255,255,0.18)';
   ctx.strokeRect(viewport.x + 0.5, viewport.y + 0.5, viewport.width - 1, viewport.height - 1);
@@ -7579,8 +7654,8 @@ function renderSessionReplay(): void {
     $sessionReplaySubtitle.textContent = record
       ? `${outcome ? `${outcome} · ` : ''}${sessionTypeLabel(record.mapType)} · ${record.participants.length} participants · ${new Date(record.startedAt).toLocaleString()}`
       : 'Completed instances, raids, battlegrounds, and arenas appear here.';
-    $sessionReplaySubtitle.classList.toggle('alliance', record?.battleground?.winner === 1);
-    $sessionReplaySubtitle.classList.toggle('horde', record?.battleground?.winner === 0);
+    $sessionReplaySubtitle.classList.toggle('alliance', record?.battleground?.winner === TEAM_ALLIANCE);
+    $sessionReplaySubtitle.classList.toggle('horde', record?.battleground?.winner === TEAM_HORDE);
   }
   if ($sessionReplaySeek) {
     $sessionReplaySeek.max = String(record?.elapsedMs ?? 0);
@@ -7623,6 +7698,7 @@ function playSessionReplay(): void {
   if (sessionReplayPositionMs >= selectedSessionRecord.elapsedMs) sessionReplayPositionMs = 0;
   sessionReplayLastFollowedEventMs = -1;
   sessionReplayPlaying = true;
+  clearPinnedSessionReplayBotCard();
   sessionReplayPreviousFrameAt = 0;
   renderSessionReplay();
   sessionReplayFrame = requestAnimationFrame(sessionReplayTick);
@@ -7689,6 +7765,42 @@ $sessionReplaySeek?.addEventListener('input', () => {
   updateSessionReplayReadout();
   renderSessionReplayCanvas();
 });
+function getSessionReplayBotHit(event: MouseEvent): SessionReplayBotHitArea | undefined {
+  if (!$sessionReplayCanvas) return undefined;
+  const rect = $sessionReplayCanvas.getBoundingClientRect();
+  const x = (event.clientX - rect.left) * $sessionReplayCanvas.width / rect.width;
+  const y = (event.clientY - rect.top) * $sessionReplayCanvas.height / rect.height;
+  return sessionReplayBotHitAreas
+    .map((area) => ({ area, distance: Math.hypot(area.x - x, area.y - y) }))
+    .filter(({ area, distance }) => distance <= area.radius)
+    .sort((left, right) => left.distance - right.distance)[0]?.area;
+}
+
+$sessionReplayCanvas?.addEventListener('mousemove', (event) => {
+  if (sessionReplayPlaying) {
+    clearPinnedSessionReplayBotCard();
+    return;
+  }
+  if (sessionReplayPinnedBotName) return;
+  const hit = getSessionReplayBotHit(event);
+  if (hit) renderSessionReplayBotCard(hit, event.clientX, event.clientY);
+  else hideSessionReplayBotCard();
+});
+$sessionReplayCanvas?.addEventListener('click', (event) => {
+  if (sessionReplayPlaying) return;
+  const hit = getSessionReplayBotHit(event);
+  if (!hit) {
+    clearPinnedSessionReplayBotCard();
+    return;
+  }
+  sessionReplayPinnedBotName = hit.participant.name;
+  renderSessionReplayBotCard(hit, event.clientX, event.clientY);
+});
+$sessionReplayCanvas?.addEventListener('mouseleave', () => hideSessionReplayBotCard());
+document.querySelector('.session-replay-main')?.addEventListener('click', (event) => {
+  if (event.target === $sessionReplayCanvas) return;
+  clearPinnedSessionReplayBotCard();
+});
 
 const sessionReplayResizeObserver = new ResizeObserver(() => {
   if (getActiveMainTabId() === 'history') renderSessionReplayCanvas();
@@ -7696,6 +7808,7 @@ const sessionReplayResizeObserver = new ResizeObserver(() => {
 const sessionReplayCanvasWrapper = document.querySelector('.session-replay-canvas-wrapper');
 if (sessionReplayCanvasWrapper) sessionReplayResizeObserver.observe(sessionReplayCanvasWrapper);
 renderSessionReplay();
+void refreshSessionHistory();
 
 void loadPlayerIconManifest().then((loaded) => {
   if (!loaded) return;

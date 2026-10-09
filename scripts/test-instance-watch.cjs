@@ -20,6 +20,7 @@ const {
   getBattlegroundStatusLabel,
   getBattlegroundStrategyLabel,
   getInstanceCoordinateBounds,
+  getInstanceFactionColor,
   getInstanceMapProfile,
   getInstanceProjectionViewport,
   getParticipantDungeonFloor,
@@ -33,6 +34,12 @@ const {
 function player(name, map, instanceId, x, y) {
   return { name, map, instanceId, position_x: x, position_y: y };
 }
+
+test('uses core TeamId colors consistently', () => {
+  assert.equal(getInstanceFactionColor(0), '#3b82f6');
+  assert.equal(getInstanceFactionColor(1), '#ef4444');
+  assert.equal(getInstanceFactionColor(2), null);
+});
 
 test('parses an active runtime session key into telemetry filters', () => {
   const parsed = parseInstanceSessionKey('489:12');

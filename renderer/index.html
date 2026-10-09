@@ -1304,6 +1304,7 @@ SELECT * FROM creature_template WHERE entry = 1;" spellcheck="false"></textarea>
           <div class="session-replay-map-panel">
             <div class="instance-canvas-wrapper session-replay-canvas-wrapper">
               <canvas id="session-replay-canvas"></canvas>
+              <div id="session-replay-bot-card" class="session-replay-bot-card hidden" role="tooltip"></div>
               <div id="session-replay-empty" class="instance-watch-empty">
                 <strong>No session selected</strong>
                 <span>Select a completed run from the history list.</span>
@@ -1334,7 +1335,7 @@ SELECT * FROM creature_template WHERE entry = 1;" spellcheck="false"></textarea>
             </div>
           </aside>
         </div>
-        <div id="session-history-status" class="map-statusbar">Persistent JSON history is stored by the WoWMin service.</div>
+        <div id="session-history-status" class="map-statusbar">Loading local session history… A worldserver connection is not required.</div>
       </section>
     </div>
   </div>

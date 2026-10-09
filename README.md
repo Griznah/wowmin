@@ -312,8 +312,8 @@ WOWMIN_SESSION_ROUTE_INTERVAL_MS=5000
 WOWMIN_SESSION_COMPLETION_GRACE_MS=15000
 ```
 
-Completed session records are kept indefinitely under
-`$WOWMIN_DATA_DIR/sessions/`; only the explicit **Purge all** button in the
+Completed session records use readable names such as `WSG-3-Oct08-26.json` and are kept indefinitely
+under `$WOWMIN_DATA_DIR/sessions/`; only the explicit **Purge all** button in the
 Session history tab deletes them. Abandoned checkpoints from crashes are
 removed automatically at startup.
 
@@ -373,7 +373,7 @@ mode disables upstream release checks; the Electron desktop build retains them.
 6. The encounter card lists boss states and the session death history; the participant list shows faction, group/subgroup, LFG role, health and power, and target.
 
 ### Session history & replay
-1. Navigate to the **Session history** tab (keyboard shortcut **Alt+8**). Completed runs from `$WOWMIN_DATA_DIR/sessions/` are listed with map, participants, duration, and event count.
+1. Navigate to the **Session history** tab (keyboard shortcut **Alt+8**). Completed runs from `$WOWMIN_DATA_DIR/sessions/` are loaded at startup and remain available without a SOAP, worldserver, or database connection.
 2. **Click a record** to load it into the embedded replay panel.
 3. Use **Play**, **Pause**, **Stop**, the seek slider, and the speed selector (0.5×–16×) to scrub through the run. Routes are drawn incrementally per participant, the event log follows the playhead, and the running totals reflect the seek position.
 4. **Purge all** permanently deletes every completed session record after a confirmation prompt; it does not affect in-progress recordings. Abandoned checkpoints are already removed automatically at startup.

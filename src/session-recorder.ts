@@ -62,8 +62,120 @@ function sessionRuntimeKey(mapId: number, instanceId: number): string {
   return `${mapId}:${instanceId}`;
 }
 
-function safeSessionId(mapId: number, instanceId: number, startedAt: number): string {
-  return `${startedAt}-${mapId}-${instanceId}`;
+const SESSION_MAP_ABBREVIATIONS: Record<number, string> = {
+  30: 'AV',
+  33: 'SFK',
+  34: 'Stocks',
+  43: 'WC',
+  47: 'RFK',
+  48: 'BFD',
+  70: 'Uld',
+  90: 'Gnomer',
+  109: 'ST',
+  129: 'RFD',
+  189: 'SM',
+  209: 'ZF',
+  229: 'BRS',
+  230: 'BRD',
+  249: 'Ony',
+  269: 'BM',
+  289: 'Scholo',
+  309: 'ZG',
+  329: 'Strat',
+  349: 'Mara',
+  389: 'RFC',
+  409: 'MC',
+  429: 'DM',
+  469: 'BWL',
+  489: 'WSG',
+  509: 'AQ20',
+  529: 'AB',
+  531: 'AQ40',
+  532: 'Kara',
+  533: 'Naxx',
+  534: 'Hyjal',
+  540: 'SHH',
+  542: 'BF',
+  543: 'Ramps',
+  544: 'Mags',
+  545: 'SV',
+  546: 'UB',
+  547: 'SP',
+  548: 'SSC',
+  550: 'TK',
+  552: 'Arc',
+  553: 'BOT',
+  554: 'Mech',
+  555: 'SL',
+  556: 'SH',
+  557: 'MT',
+  558: 'AC',
+  559: 'Nagrand',
+  560: 'OHB',
+  562: 'BEA',
+  564: 'BT',
+  565: 'Gruuls',
+  566: 'EOTS',
+  568: 'ZA',
+  572: 'RoL',
+  574: 'UK',
+  575: 'UP',
+  576: 'Nexus',
+  578: 'Oculus',
+  580: 'SWP',
+  585: 'MGT',
+  595: 'CoS',
+  599: 'HoS',
+  600: 'DTK',
+  601: 'AN',
+  602: 'HoL',
+  603: 'Ulduar',
+  604: 'Gundrak',
+  607: 'Sota',
+  608: 'VH',
+  615: 'OS',
+  616: 'EoE',
+  617: 'DS',
+  618: 'RoV',
+  619: 'OK',
+  624: 'VoA',
+  628: 'IoC',
+  631: 'ICC',
+  632: 'FoS',
+  649: 'ToC',
+  650: 'ToC5',
+  658: 'PoS',
+  668: 'HoR',
+  724: 'RS',
+};
+
+const SESSION_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function deriveMapAbbreviation(mapId: number, mapName: string): string {
+  const known = SESSION_MAP_ABBREVIATIONS[mapId];
+  if (known) return known;
+  const words = mapName.match(/[A-Za-z0-9]+/g)?.filter((word) => !['the', 'of'].includes(word.toLowerCase())) ?? [];
+  if (words.length > 1) return words.map((word) => word[0]).join('').slice(0, 8).toUpperCase();
+  if (words.length === 1) return words[0].slice(0, 12);
+  return `Map${mapId}`;
+}
+
+export function readableSessionId(
+  mapId: number,
+  mapName: string,
+  instanceId: number,
+  startedAt: number,
+  mapType = 0,
+  difficulty = 0,
+): string {
+  const baseAbbreviation = deriveMapAbbreviation(mapId, mapName);
+  const abbreviation = mapType === 1 && difficulty > 0 ? `${baseAbbreviation}(H)` : baseAbbreviation;
+  const date = new Date(startedAt);
+  const month = SESSION_MONTHS[date.getUTCMonth()] ?? 'Date';
+  const day = String(date.getUTCDate()).padStart(2, '0');
+  const year = String(date.getUTCFullYear()).slice(-2);
+  return `${abbreviation}-${instanceId}-${month}${day}-${year}`;
 }
 
 function eventDescription(event: MapSessionEvent): string {
@@ -235,6 +347,17 @@ export class SessionRecorder {
       .map((fileName) => fs.rm(path.join(this.sessionDir, fileName), { force: true })));
   }
 
+  private uniqueSessionId(baseId: string): string {
+    const usedIds = new Set([
+      ...this.index.map((entry) => entry.id),
+      ...[...this.activeSessions.values()].map((active) => active.record.id),
+    ]);
+    if (!usedIds.has(baseId)) return baseId;
+    let suffix = 2;
+    while (usedIds.has(`${baseId}-${suffix}`)) suffix += 1;
+    return `${baseId}-${suffix}`;
+  }
+
   private createActive(record: SessionRecord, now: number): ActiveSession {
     return {
       record,
@@ -273,13 +396,17 @@ export class SessionRecorder {
       }
       if (!active) {
         const mapId = representative.map;
+        const mapName = this.mapNames.get(mapId) ?? `Map ${mapId}`;
+        const mapType = representative.mapType ?? 0;
+        const difficulty = representative.difficulty ?? 0;
+        const baseId = readableSessionId(mapId, mapName, representative.instanceId, startedAt, mapType, difficulty);
         const record: SessionRecord = {
           schemaVersion: 1,
-          id: safeSessionId(mapId, representative.instanceId, startedAt),
+          id: this.uniqueSessionId(baseId),
           mapId,
-          mapName: this.mapNames.get(mapId) ?? `Map ${mapId}`,
-          mapType: representative.mapType ?? 0,
-          difficulty: representative.difficulty ?? 0,
+          mapName,
+          mapType,
+          difficulty,
           instanceId: representative.instanceId,
           startedAt,
           endedAt: now,

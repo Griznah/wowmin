@@ -1,7 +1,7 @@
 import type { SessionBattlegroundOutcome } from './types/electron';
 
-const PVP_TEAM_HORDE = 0;
-const PVP_TEAM_ALLIANCE = 1;
+const PVP_TEAM_ALLIANCE = 0;
+const PVP_TEAM_HORDE = 1;
 const PVP_TEAM_NEUTRAL = 2;
 
 // These are the battlegrounds whose team score is meaningful as a compact

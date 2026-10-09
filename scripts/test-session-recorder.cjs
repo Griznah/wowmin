@@ -20,7 +20,7 @@ new Function('module', 'exports', 'require', '__dirname', '__filename', output)(
   __dirname,
   __filename,
 );
-const { SessionRecorder, formatBattlegroundOutcome } = moduleValue.exports;
+const { SessionRecorder, formatBattlegroundOutcome, readableSessionId } = moduleValue.exports;
 
 function snapshot(capturedAt, players, overrides = {}) {
   return {
@@ -42,6 +42,17 @@ function player(instanceId, startedAt = 100) {
     alive: true, inCombat: true, mapType: 2, difficulty: 0, sessionStartedAt: startedAt,
   };
 }
+
+test('builds readable session file names', () => {
+  const startedAt = Date.UTC(2026, 9, 8, 14, 30);
+  assert.equal(readableSessionId(489, 'Warsong Gulch', 3, startedAt), 'WSG-3-Oct08-26');
+  assert.equal(readableSessionId(33, 'Shadowfang Keep', 17, startedAt), 'SFK-17-Oct08-26');
+  assert.equal(readableSessionId(543, 'Hellfire Citadel: Ramparts', 22, startedAt, 1, 1),
+    'Ramps(H)-22-Oct08-26');
+  assert.equal(readableSessionId(540, 'Hellfire Citadel: The Shattered Halls', 23, startedAt),
+    'SHH-23-Oct08-26');
+  assert.equal(readableSessionId(568, "Zul'Aman", 24, startedAt), 'ZA-24-Oct08-26');
+});
 
 test('records, deduplicates, persists, and indexes a completed session', async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wowmin-recorder-'));
@@ -69,6 +80,8 @@ test('records, deduplicates, persists, and indexes a completed session', async (
   assert.equal(index[0].eventCount, 2);
   assert.equal(index[0].totals.lootItems, 2);
   assert.equal(index[0].totals.deaths, 1);
+  assert.match(index[0].id, /^ICC-42-[A-Z][a-z]{2}\d{2}-\d{2}$/);
+  assert.ok((await fs.readdir(path.join(dataDir, 'sessions'))).includes(`${index[0].id}.json`));
   const record = await recorder.get(index[0].id);
   assert.equal(record.completed, true);
   assert.equal(record.events.length, 2);
@@ -80,7 +93,7 @@ test('persists and indexes a completed battleground outcome', async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wowmin-bg-outcome-'));
   const recorder = new SessionRecorder({ dataDir, routeIntervalMs: 1, completionGraceMs: 1 });
   const startedAt = Math.floor(Date.now() / 1000);
-  const bgPlayer = { ...player(55, startedAt), map: 489, mapType: 3, teamId: 1 };
+  const bgPlayer = { ...player(55, startedAt), map: 489, mapType: 3, teamId: 0 };
   const battleground = {
     mapId: 489, instanceId: 55, battlegroundTypeId: 2, status: 3, elapsedMs: 300000,
     remainingMs: 0, winner: 2, allianceScore: 2, hordeScore: 2, alliancePlayers: 5,
@@ -90,7 +103,7 @@ test('persists and indexes a completed battleground outcome', async () => {
   const active = snapshot(startedAt * 1000 + 1000, [bgPlayer], { battlegrounds: [battleground] });
   await recorder.ingest(active);
   await recorder.ingest({ ...active, capturedAt: active.capturedAt + 1000,
-    battlegrounds: [{ ...battleground, status: 4, winner: 1, allianceScore: 3 }] });
+    battlegrounds: [{ ...battleground, status: 4, winner: 0, allianceScore: 3 }] });
   await recorder.ingest(snapshot(active.capturedAt + 1010, []));
   await recorder.ingest(snapshot(active.capturedAt + 1020, []));
 
@@ -103,13 +116,13 @@ test('persists and indexes a completed battleground outcome', async () => {
 });
 
 test('formats battleground-specific outcomes', () => {
-  const base = { mapId: 529, battlegroundTypeId: 3, status: 4, winner: 0,
+  const base = { mapId: 529, battlegroundTypeId: 3, status: 4, winner: 1,
     allianceScore: 1200, hordeScore: 1600 };
   assert.equal(formatBattlegroundOutcome(base), 'Horde wins');
   assert.equal(formatBattlegroundOutcome({ ...base, mapId: 566 }), 'Horde wins 1600-1200');
   assert.equal(formatBattlegroundOutcome({ ...base, mapId: 489, winner: 2,
     allianceScore: 2, hordeScore: 2 }), 'Draw 2-2');
-  assert.equal(formatBattlegroundOutcome({ ...base, mapId: 628, winner: 1 }), 'Alliance wins');
+  assert.equal(formatBattlegroundOutcome({ ...base, mapId: 628, winner: 0 }), 'Alliance wins');
   assert.equal(formatBattlegroundOutcome({ ...base, status: 3 }), null);
 });
 
