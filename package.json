@@ -1,6 +1,6 @@
 {
   "name": "wow-admin",
-  "version": "3.0.1",
+  "version": "3.0.2",
   "description": "AzerothCore admin tool (web service or Electron desktop) with SOAP, database editing, live worldserver telemetry, instance watch, and session replay",
   "main": "dist/main.js",
   "scripts": {
