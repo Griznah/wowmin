@@ -188,6 +188,111 @@ export interface StreamFrame {
 
 export type StreamStatus = 'starting' | 'streaming' | 'unavailable';
 
+// A player's or creature's server-driven movement path: the waypoints still
+// ahead, ending at the destination. No points means it is no longer on a path.
+export interface StreamPath {
+  guid: number;
+  // The player's name; empty for a creature's path (see `creature`).
+  name: string;
+  creature: boolean;
+  splineId: number;
+  // The middle of a long path was dropped; the last point is the destination.
+  truncated: boolean;
+  points: Array<[number, number, number]>;
+}
+
+export interface StreamCreatureSample {
+  guid: number;
+  entry: number;
+  x: number;
+  y: number;
+  z: number;
+  orientation: number;
+  healthPct: number;
+  alive: boolean;
+  inCombat: boolean;
+  hostile: boolean;
+  boss: boolean;
+  // A player's pet, guardian, or charmed creature.
+  playerControlled: boolean;
+  // 0 for no target; a player's guid when targetIsPlayer, else a creature's.
+  targetGuid: number;
+  targetIsPlayer: boolean;
+  wmoGroupId: number;
+}
+
+export interface StreamCreatureUpdate {
+  mapId: number;
+  instanceId: number;
+  serverTimeMs: number;
+  creatures: StreamCreatureSample[];
+}
+
+// An action a playerbot carried out; a run of the same action is one entry.
+export interface StreamBotAction {
+  name: string;
+  // How often it ran in a row, and the relevance it last ran with.
+  repeats: number;
+  relevance: number;
+  // Since it last ran, as of the update's serverTimeMs.
+  ageMs: number;
+}
+
+// What a playerbot is deciding (mod-playerbots only).
+export interface StreamBotDecision {
+  guid: number;
+  name: string;
+  state: 'combat' | 'idle' | 'dead';
+  // The core's MovementGeneratorType; null for none.
+  motionType: number | null;
+  // 0 idle, 1 wander, 2 normal, 3 combat, 4 forced.
+  movePriority: number;
+  // Where it last chose to move, and how long ago; null if nowhere on this map.
+  moveTarget: { x: number; y: number; z: number; ageMs: number } | null;
+  // Whom it follows or chases; 0 for none.
+  motionTargetGuid: number;
+  motionTargetIsPlayer: boolean;
+  targetGuid: number;
+  targetIsPlayer: boolean;
+  // Strategies of its current state, sorted by name.
+  strategies: string[];
+  // Newest first.
+  actions: StreamBotAction[];
+}
+
+export interface StreamBotUpdate {
+  mapId: number;
+  instanceId: number;
+  serverTimeMs: number;
+  bots: StreamBotDecision[];
+}
+
+export interface StreamListeners {
+  onFrame: (frame: StreamFrame) => void;
+  onStatus: (status: StreamStatus) => void;
+  onPaths?: (update: StreamPathUpdate) => void;
+  onCreatures?: (update: StreamCreatureUpdate) => void;
+  onBots?: (update: StreamBotUpdate) => void;
+}
+
+// creature_template details for labelling streamed creatures.
+export interface CreatureInfo {
+  entry: number;
+  name: string;
+  subname: string;
+  minLevel: number;
+  maxLevel: number;
+  // 0 normal, 1 elite, 2 rare elite, 3 boss, 4 rare.
+  rank: number;
+}
+
+export interface StreamPathUpdate {
+  mapId: number;
+  instanceId: number;
+  serverTimeMs: number;
+  paths: StreamPath[];
+}
+
 export interface MapPlayerSnapshot {
   players: MapPlayerPosition[];
   battlegrounds: MapBattlegroundState[];
@@ -607,6 +712,7 @@ export type IpcChannels = {
   'map:getOnlineCounts': () => MapOnlineCounts;
   'players:getOnline': () => OnlinePlayerRow[];
   'map:getBotWaypoint': (request: MapBotWaypointRequest) => MapBotWaypoint | null;
+  'map:getCreatureInfo': (entries: number[]) => CreatureInfo[];
   'sessions:list': () => SessionIndexEntry[];
   'sessions:get': (id: string) => SessionRecord | null;
   'sessions:purgeCompleted': () => number;

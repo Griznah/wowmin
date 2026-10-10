@@ -1222,6 +1222,13 @@ SELECT * FROM creature_template WHERE entry = 1;" spellcheck="false"></textarea>
                 <output id="instance-horizontal-fade-value" for="instance-horizontal-fade">40 yd</output>
               </span>
             </label>
+            <label title="Creatures in the instance, from the live stream. Near party shows those within 50 yards of a player.">Mobs
+              <select id="instance-mobs-mode">
+                <option value="near">Near party</option>
+                <option value="all">All</option>
+                <option value="off">Off</option>
+              </select>
+            </label>
             <div class="btn-row">
               <button id="instance-refresh-btn" class="btn btn-small">Refresh now</button>
               <button id="instance-fit-btn" class="btn btn-small" title="Reset pan, zoom, rotation, and tilt">Fit view</button>
@@ -1229,6 +1236,8 @@ SELECT * FROM creature_template WHERE entry = 1;" spellcheck="false"></textarea>
               <button id="instance-zoom-in-btn" class="btn btn-small" title="Zoom in">+</button>
               <button id="instance-clear-focus-btn" class="btn btn-small hidden" title="Clear participant focus">Clear focus</button>
               <button id="instance-follow-btn" class="btn btn-small" title="Keep the selected participant centred" aria-pressed="false">Follow</button>
+              <button id="instance-paths-btn" class="btn btn-small" title="Show where bots and mobs are heading. Needs the live stream." aria-pressed="true">Paths</button>
+              <button id="instance-decisions-btn" class="btn btn-small" title="Show what each bot is doing and where it chose to move. Needs the live stream and mod-playerbots." aria-pressed="true">Decisions</button>
             </div>
           </div>
         </div>
@@ -1249,6 +1258,11 @@ SELECT * FROM creature_template WHERE entry = 1;" spellcheck="false"></textarea>
             <div id="instance-boss-list" class="instance-boss-list"></div>
             <div id="instance-death-history" class="instance-death-history"></div>
           </div>
+        </div>
+
+        <div id="instance-bot-card" class="card instance-bot-card hidden">
+          <div class="card-header"><h3>Bot decisions</h3></div>
+          <div id="instance-bot-decisions" class="card-body instance-bot-decisions"></div>
         </div>
 
         <div class="card instance-player-list-card">
@@ -1274,6 +1288,7 @@ SELECT * FROM creature_template WHERE entry = 1;" spellcheck="false"></textarea>
         <div class="instance-canvas-wrapper">
           <canvas id="instance-watch-scene" class="instance-watch-scene" hidden></canvas>
           <canvas id="instance-watch-canvas" tabindex="0"></canvas>
+          <pre id="instance-debug-overlay" class="instance-debug-overlay" hidden></pre>
           <div id="instance-view-controls" class="map-zoom-controls instance-view-controls hidden">
             <button id="instance-rotate-left-btn" class="btn btn-tiny" title="Rotate left (Q). Middle-drag or Shift+drag to rotate and tilt freely." aria-label="Rotate view left">⟲</button>
             <button id="instance-rotate-right-btn" class="btn btn-tiny" title="Rotate right (E). Middle-drag or Shift+drag to rotate and tilt freely." aria-label="Rotate view right">⟳</button>

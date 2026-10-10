@@ -4,7 +4,7 @@ import packageJson from '../package.json';
 import { SoapClient } from './soap-client';
 import { ConfigStore } from './config-store';
 import { getDbService, DatabaseService } from './database/db-service';
-import { SoapConfig, SoapResult, ConnectionProfile, DbConfig, DbConnectionState, QueryResult, FieldInfo, UpdateCheckResult, EntityMediaPreviewRequest, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, LogMonitorFileTailResult, MapPlayerPosition, MapPlayerSnapshot, MapOnlineCounts, OnlinePlayerRow, MapBotWaypointRequest, MapBotWaypoint, CharacterInventoryResult, CharacterInventoryItemRow, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow, SessionIndexEntry, SessionRecord } from './types/electron';
+import { SoapConfig, SoapResult, ConnectionProfile, DbConfig, DbConnectionState, QueryResult, FieldInfo, UpdateCheckResult, EntityMediaPreviewRequest, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, LogMonitorFileTailResult, MapPlayerPosition, MapPlayerSnapshot, MapOnlineCounts, OnlinePlayerRow, MapBotWaypointRequest, MapBotWaypoint, CreatureInfo, CharacterInventoryResult, CharacterInventoryItemRow, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow, SessionIndexEntry, SessionRecord } from './types/electron';
 import { inspectRemoteLogs, readRemoteLogTail } from './log-monitor-service';
 import { buildLiveMapTelemetryCommand, parseLiveMapTelemetrySnapshot } from './live-map-telemetry';
 import { SessionRecorder } from './session-recorder';
@@ -1430,6 +1430,37 @@ ipcMain.handle('sessions:list', async (): Promise<SessionIndexEntry[]> => sessio
 ipcMain.handle('sessions:get', async (_event, id: string): Promise<SessionRecord | null> => sessionRecorder.get(id));
 
 ipcMain.handle('sessions:purgeCompleted', async (): Promise<number> => sessionRecorder.purgeCompleted());
+
+// Names, levels, and ranks for creatures in the live stream, by entry.
+ipcMain.handle('map:getCreatureInfo', async (_event, entries: unknown): Promise<CreatureInfo[]> => {
+  const ids = [...new Set((Array.isArray(entries) ? entries : []).map(Number))]
+    .filter((id) => Number.isInteger(id) && id > 0)
+    .slice(0, 500);
+  const charDb = getCharactersDbService();
+  if (!ids.length || !charDb?.config) return [];
+  const worldDb = process.env.WOWMIN_WORLD_DB || deriveWorldDatabaseName(charDb.config.database);
+  const result = await charDb.query<{
+    entry: number;
+    name: string;
+    subname: string | null;
+    minlevel: number;
+    maxlevel: number;
+    rank: number;
+  }>(
+    `SELECT entry, name, subname, minlevel, maxlevel, \`rank\`
+       FROM ${escapeIdentifier(worldDb)}.\`creature_template\`
+      WHERE entry IN (${ids.map(() => '?').join(', ')})`,
+    ids,
+  );
+  return result.rows.map((row) => ({
+    entry: Number(row.entry),
+    name: row.name,
+    subname: row.subname ?? '',
+    minLevel: Number(row.minlevel),
+    maxLevel: Number(row.maxlevel),
+    rank: Number(row.rank),
+  }));
+});
 
 ipcMain.handle('map:getBotWaypoint', async (_event, request: MapBotWaypointRequest): Promise<MapBotWaypoint | null> => {
   try {

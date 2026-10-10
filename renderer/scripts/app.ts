@@ -4,14 +4,14 @@ import { parseOnlineList, playersFromDatabase } from './utils/online-players';
 import { type ActiveInstanceSession, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getInstanceCoordinateBounds, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, groupActiveInstanceSessions, parseInstanceSessionKey, zoomInstanceViewAt } from './utils/instance-watch';
 import { clampIsoPitch, createFlatProjection, createIsoView, DEFAULT_ISO_YAW, type FadeSettings, getFadeVolumes, getHeightBand, getIsoPanForCenter, getNextQuarterTurn, ISO_PITCH, type IsoView, type MapProjection, resolveMinimapTileProjection, type SceneBox } from './utils/map-projection';
 import { InstanceSceneView } from './instance-scene/scene-view';
-import { applyLiveSample, LivePositionBuffer } from './utils/live-positions';
+import { applyLiveSample, creaturePathKey, LiveBotStore, LiveCreatureBuffer, LivePathStore, LivePositionBuffer, trimPathToPosition } from './utils/live-positions';
 import { CONTINENT_BOUNDS, worldToCanvas } from './utils/map-coords';
 import { getEnglishMotd, getServerUptime } from './utils/dashboard-data';
 import { calculateSessionTotalsAt, formatSessionReplayTime, isSessionRouteDiscontinuity } from './utils/session-replay';
 import { getClassIconHtml, getClassIconImage, getPlayerStateIconsHtml, getPlayerStateIndicators, getRacePortraitHtml, getResponsivePlayerIconScale, getStateIconImage, loadPlayerIconManifest } from './utils/player-icons';
 import { formatBattlegroundOutcome } from '../../src/session-outcome';
 import { AppState, createInitialState, PlayerInfo } from './types/state';
-import type { StreamStatus } from '../../src/types/electron';
+import type { CreatureInfo, StreamBotDecision, StreamCreatureSample, StreamStatus } from '../../src/types/electron';
 import type { ConnectionProfile, DbConfig, SoapConfig, UpdateCheckResult, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, MapBattlegroundState, MapInstanceDeath, MapInstanceState, MapPlayerPosition, MapBotWaypoint, CharacterInventoryResult, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow, SessionIndexEntry, SessionRecord, SessionRoutePoint } from '../../src/types/electron';
 import { bindInventoryTableTooltips, formatInventoryLocation, ITEM_QUALITY_COLOR } from './inventory/wow-item-tooltip';
 
@@ -6469,6 +6469,12 @@ const $instanceFadeRangeValue = $<HTMLOutputElement>('instance-fade-range-value'
 const $instanceHorizontalFade = $<HTMLInputElement>('instance-horizontal-fade');
 const $instanceHorizontalFadeValue = $<HTMLOutputElement>('instance-horizontal-fade-value');
 const $instanceFollowBtn = $<HTMLButtonElement>('instance-follow-btn');
+const $instancePathsBtn = $<HTMLButtonElement>('instance-paths-btn');
+const $instanceMobsMode = $<HTMLSelectElement>('instance-mobs-mode');
+const $instanceDecisionsBtn = $<HTMLButtonElement>('instance-decisions-btn');
+const $instanceBotCard = $<HTMLElement>('instance-bot-card');
+const $instanceBotDecisions = $<HTMLElement>('instance-bot-decisions');
+const $instanceDebugOverlay = $<HTMLElement>('instance-debug-overlay');
 const $instanceWatchTitle = $<HTMLElement>('instance-watch-title');
 const $instanceWatchSubtitle = $<HTMLElement>('instance-watch-subtitle');
 const $instanceWatchStatus = $<HTMLElement>('instance-watch-status');
@@ -6532,6 +6538,41 @@ let instancePanStart: { x: number; y: number; panX: number; panY: number; moved:
 const instanceMapAssets = new Map<number, LoadedInstanceMapAsset | null>();
 // Live position stream for the selected session (web service only).
 const instanceLivePositions = new LivePositionBuffer();
+const instanceLivePaths = new LivePathStore();
+const instanceLiveCreatures = new LiveCreatureBuffer();
+type InstanceMobsMode = 'near' | 'all' | 'off';
+const INSTANCE_MOBS_STORAGE_KEY = 'wowmin.instanceMobs';
+let instanceMobsMode = readStoredInstanceMobsMode();
+// "Near party" shows creatures within this many yards (horizontally) of a
+// visible player, and within INSTANCE_MOBS_NEAR_HEIGHT of their height.
+const INSTANCE_MOBS_NEAR_YARDS = 50;
+const INSTANCE_MOBS_NEAR_HEIGHT = 20;
+// Ordinary mobs are labelled from this zoom in; bosses always are.
+const INSTANCE_MOB_LABEL_ZOOM = 2.5;
+// creature_template details by entry; null while loading or when unknown.
+const instanceCreatureInfo = new Map<number, CreatureInfo | null>();
+let instanceCreatureInfoQueue = new Set<number>();
+let instanceCreatureInfoTimer: ReturnType<typeof setTimeout> | null = null;
+const INSTANCE_PATHS_STORAGE_KEY = 'wowmin.instancePaths';
+let instanceShowPaths = readStoredInstancePaths();
+// What each bot is deciding (mod-playerbots), keyed by name.
+const instanceLiveBots = new LiveBotStore();
+const INSTANCE_DECISIONS_STORAGE_KEY = 'wowmin.instanceDecisions';
+let instanceShowDecisions = readStoredInstanceDecisions();
+// Where a bot chose to move is drawn while the choice is this recent.
+const INSTANCE_MOVE_TARGET_MS = 10_000;
+// An action is what a bot is doing while it last ran this recently.
+const INSTANCE_CURRENT_ACTION_MS = 3000;
+const INSTANCE_BOT_CARD_INTERVAL_MS = 250;
+let instanceBotCardRenderedAt = 0;
+// ?debug in the page URL shows render and stream statistics over the view.
+const instanceDebug = new URLSearchParams(window.location.search).has('debug');
+const INSTANCE_DEBUG_WINDOW_MS = 2000;
+const INSTANCE_DEBUG_INTERVAL_MS = 500;
+const instanceDebugEvents = new Map<string, Array<{ at: number; value: number }>>();
+let instanceDebugCounts = { players: 0, mobsShown: 0, mobsStreamed: 0, paths: 0, bots: 0 };
+let instanceDebugLastFrameAt = 0;
+let instanceDebugRenderedAt = 0;
 // Redraw cap while animating live positions.
 const INSTANCE_LIVE_FRAME_MS = 33;
 let instanceLiveStream: { key: string; stop: () => void; status: StreamStatus } | null = null;
@@ -6582,15 +6623,43 @@ function syncInstanceLiveStream(): void {
   instanceLiveStream?.stop();
   instanceLiveStream = null;
   instanceLivePositions.clear();
+  instanceLivePaths.clear();
+  instanceLiveCreatures.clear();
+  instanceLiveBots.clear();
+  instanceDebugEvents.clear();
   if (!wanted || !streamPositions) return;
   const stream: { key: string; stop: () => void; status: StreamStatus } = { key: wanted.key, stop: () => {}, status: 'starting' };
-  stream.stop = streamPositions(wanted.mapId, wanted.instanceId, (frame) => {
-    if (instanceLiveStream !== stream) return;
-    instanceLivePositions.push(frame, performance.now());
-    startInstanceLiveAnimation();
-  }, (status) => {
-    if (instanceLiveStream !== stream) return;
-    stream.status = status;
+  stream.stop = streamPositions(wanted.mapId, wanted.instanceId, {
+    onFrame: (frame) => {
+      if (instanceLiveStream !== stream) return;
+      const now = performance.now();
+      if (instanceDebug) {
+        noteInstanceDebug('frame', instanceDebugLastFrameAt ? now - instanceDebugLastFrameAt : 0, now);
+        instanceDebugLastFrameAt = now;
+      }
+      instanceLivePositions.push(frame, now);
+      startInstanceLiveAnimation();
+    },
+    onStatus: (status) => {
+      if (instanceLiveStream !== stream) return;
+      stream.status = status;
+    },
+    onPaths: (update) => {
+      if (instanceLiveStream !== stream) return;
+      instanceLivePaths.push(update, performance.now());
+      noteInstanceDebug('paths', update.paths.length);
+    },
+    onCreatures: (update) => {
+      if (instanceLiveStream !== stream) return;
+      instanceLiveCreatures.push(update, performance.now());
+      noteInstanceDebug('creatures', update.creatures.length);
+      requestInstanceCreatureInfo(update.creatures.map((creature) => creature.entry));
+    },
+    onBots: (update) => {
+      if (instanceLiveStream !== stream) return;
+      instanceLiveBots.push(update, performance.now());
+      noteInstanceDebug('bots', update.bots.length);
+    },
   });
   instanceLiveStream = stream;
 }
@@ -6752,6 +6821,198 @@ function setInstanceFollowSelected(enabled: boolean): void {
     // Preference is per-session only when storage is unavailable.
   }
   renderInstanceCanvas();
+}
+
+function readStoredInstancePaths(): boolean {
+  try {
+    return window.localStorage.getItem(INSTANCE_PATHS_STORAGE_KEY) !== 'false';
+  } catch {
+    return true;
+  }
+}
+
+function setInstanceShowPaths(enabled: boolean): void {
+  instanceShowPaths = enabled;
+  $instancePathsBtn?.setAttribute('aria-pressed', String(enabled));
+  try {
+    window.localStorage.setItem(INSTANCE_PATHS_STORAGE_KEY, String(enabled));
+  } catch {
+    // Preference is per-session only when storage is unavailable.
+  }
+  renderInstanceCanvas();
+}
+
+function readStoredInstanceDecisions(): boolean {
+  try {
+    return window.localStorage.getItem(INSTANCE_DECISIONS_STORAGE_KEY) !== 'false';
+  } catch {
+    return true;
+  }
+}
+
+function setInstanceShowDecisions(enabled: boolean): void {
+  instanceShowDecisions = enabled;
+  $instanceDecisionsBtn?.setAttribute('aria-pressed', String(enabled));
+  try {
+    window.localStorage.setItem(INSTANCE_DECISIONS_STORAGE_KEY, String(enabled));
+  } catch {
+    // Preference is per-session only when storage is unavailable.
+  }
+  instanceBotCardRenderedAt = 0;
+  renderInstanceCanvas();
+}
+
+function readStoredInstanceMobsMode(): InstanceMobsMode {
+  try {
+    const stored = window.localStorage.getItem(INSTANCE_MOBS_STORAGE_KEY);
+    return stored === 'all' || stored === 'off' ? stored : 'near';
+  } catch {
+    return 'near';
+  }
+}
+
+function setInstanceMobsMode(mode: InstanceMobsMode): void {
+  instanceMobsMode = mode;
+  if ($instanceMobsMode) $instanceMobsMode.value = mode;
+  try {
+    window.localStorage.setItem(INSTANCE_MOBS_STORAGE_KEY, mode);
+  } catch {
+    // Preference is per-session only when storage is unavailable.
+  }
+  renderInstanceCanvas();
+}
+
+// Looks up names and ranks for creature entries not seen before, batching the
+// entries from a burst of stream updates into one request.
+function requestInstanceCreatureInfo(entries: number[]): void {
+  for (const entry of entries) {
+    if (!instanceCreatureInfo.has(entry)) {
+      instanceCreatureInfo.set(entry, null);
+      instanceCreatureInfoQueue.add(entry);
+    }
+  }
+  if (!instanceCreatureInfoQueue.size || instanceCreatureInfoTimer) return;
+  instanceCreatureInfoTimer = setTimeout(() => {
+    instanceCreatureInfoTimer = null;
+    const batch = [...instanceCreatureInfoQueue];
+    instanceCreatureInfoQueue = new Set();
+    window.electronAPI.map.getCreatureInfo(batch).then((infos) => {
+      for (const info of infos) instanceCreatureInfo.set(info.entry, info);
+    }).catch(() => {
+      // Unlabelled until the next session; markers still draw.
+    });
+  }, 100);
+}
+
+const isBossCreature = (creature: StreamCreatureSample, info: CreatureInfo | null | undefined): boolean =>
+  creature.boss || info?.rank === 3;
+
+// Creature marker: red if hostile, yellow otherwise, green for players' pets,
+// grey when dead. Elites get a gold rim, bosses a larger skull marker, and a
+// health ring shows once a creature is hurt.
+function drawInstanceCreature(
+  ctx: CanvasRenderingContext2D,
+  creature: StreamCreatureSample,
+  info: CreatureInfo | null | undefined,
+  point: { x: number; y: number },
+  scale: number,
+): void {
+  const boss = isBossCreature(creature, info);
+  const elite = info?.rank === 1 || info?.rank === 2;
+  const radius = (boss ? 7 : elite ? 4.5 : 3.5) * scale;
+  const color = !creature.alive ? '#64748b'
+    : creature.playerControlled ? '#4ade80'
+      : creature.hostile ? '#ef4444' : '#facc15';
+  ctx.save();
+  ctx.globalAlpha = !creature.alive ? 0.55 : creature.inCombat || boss ? 1 : 0.75;
+  if (creature.inCombat && creature.alive) {
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, radius + 3 * scale, 0, Math.PI * 2);
+    ctx.strokeStyle = '#f97316';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+  ctx.beginPath();
+  ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
+  ctx.fillStyle = boss && creature.alive ? '#7f1d1d' : color;
+  ctx.fill();
+  ctx.lineWidth = boss || elite ? 1.75 : 1;
+  ctx.strokeStyle = boss || elite ? '#fbbf24' : 'rgba(8,17,29,0.9)';
+  ctx.stroke();
+  if (boss) drawCanvasSkull(ctx, point.x, point.y, radius * 0.62, creature.alive ? '#f8fafc' : '#cbd5e1');
+  if (creature.alive && creature.healthPct < 100) {
+    const fraction = Math.max(0, creature.healthPct) / 100;
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, radius + 1.5 * scale, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * fraction);
+    ctx.strokeStyle = fraction > 0.5 ? '#22c55e' : fraction > 0.2 ? '#eab308' : '#dc2626';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawCanvasSkull(ctx: CanvasRenderingContext2D, x: number, y: number, size: number, color: string): void {
+  ctx.save();
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(x, y - size * 0.15, size * 0.75, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillRect(x - size * 0.42, y + size * 0.3, size * 0.84, size * 0.45);
+  ctx.fillStyle = '#7f1d1d';
+  ctx.beginPath();
+  ctx.arc(x - size * 0.3, y - size * 0.15, size * 0.2, 0, Math.PI * 2);
+  ctx.arc(x + size * 0.3, y - size * 0.15, size * 0.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// Draws a player's or creature's remaining movement path: a dashed line from the marker
+// through each waypoint, with a ring at the destination. A truncated path's
+// skipped middle is drawn fainter.
+function drawInstancePath(
+  ctx: CanvasRenderingContext2D,
+  player: Pick<MapPlayerPosition, 'position_x' | 'position_y' | 'position_z'>,
+  points: Array<[number, number, number]>,
+  truncated: boolean,
+  project: (x: number, y: number, z: number) => { x: number; y: number },
+  color: string,
+  scale: number,
+): void {
+  const screen = [project(player.position_x, player.position_y, player.position_z),
+    ...points.map(([x, y, z]) => project(x, y, z))];
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 1.75;
+  ctx.setLineDash([6, 4]);
+  ctx.globalAlpha = 0.85;
+  const solidEnd = truncated ? screen.length - 1 : screen.length;
+  ctx.beginPath();
+  screen.slice(0, solidEnd).forEach((point, index) => {
+    if (index === 0) ctx.moveTo(point.x, point.y); else ctx.lineTo(point.x, point.y);
+  });
+  ctx.stroke();
+  if (truncated && screen.length > 1) {
+    ctx.globalAlpha = 0.35;
+    ctx.setLineDash([2, 5]);
+    ctx.beginPath();
+    ctx.moveTo(screen[screen.length - 2].x, screen[screen.length - 2].y);
+    ctx.lineTo(screen[screen.length - 1].x, screen[screen.length - 1].y);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 0.85;
+  for (const point of screen.slice(1, -1)) {
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, 2 * scale, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  const destination = screen[screen.length - 1];
+  ctx.beginPath();
+  ctx.arc(destination.x, destination.y, 4.5 * scale, 0, Math.PI * 2);
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.restore();
 }
 
 // Starts an orbit drag (middle button, or Shift with the main button) when the
@@ -7232,6 +7493,10 @@ function renderInstancePlayerList(session: ActiveInstanceSession | null): void {
         details.push(`${groupLabel} ${player.groupId}${subgroup}`);
       }
       if (player.targetName) details.push(`Target: ${player.targetName}`);
+      const action = player.isBot && instanceShowDecisions
+        ? getCurrentBotAction(instanceLiveBots.get(player.name, performance.now()))
+        : null;
+      if (action) details.push(`Doing: ${action}`);
       const markerColor = battleground
         ? player.teamId === 1 ? '#3b82f6' : player.teamId === 0 ? '#ef4444' : '#94a3b8'
         : CLASS_COLORS[player.class] || '#aaa';
@@ -7319,6 +7584,15 @@ function prefersReducedMotion(): boolean {
 }
 
 function renderInstanceCanvas(followPass = false): void {
+  const startedAt = performance.now();
+  drawInstanceCanvas(followPass);
+  if (!instanceDebug) return;
+  const now = performance.now();
+  noteInstanceDebug('render', now - startedAt, now);
+  if (now - instanceDebugRenderedAt >= INSTANCE_DEBUG_INTERVAL_MS) renderInstanceDebugOverlay(now);
+}
+
+function drawInstanceCanvas(followPass: boolean): void {
   if (!$instanceWatchCanvas) return;
   const wrapper = $instanceWatchCanvas.parentElement;
   if (!wrapper) return;
@@ -7341,6 +7615,7 @@ function renderInstanceCanvas(followPass = false): void {
   if (!session) {
     if ($instanceWatchScene) $instanceWatchScene.hidden = true;
     $instanceViewControls?.classList.add('hidden');
+    renderInstanceBotCard(null, performance.now());
     return;
   }
 
@@ -7403,8 +7678,89 @@ function renderInstanceCanvas(followPass = false): void {
   const visiblePlayers = floor && asset?.metadata.floors
     ? session.players.filter((player) => getParticipantDungeonFloor(player, asset.metadata.floors ?? [])?.id === floor.id)
     : session.players;
-  const pendingLabels: { name: string; x: number; y: number; priority: number }[] = [];
+  // An 'action' label is a bot's current action, under its name.
+  const pendingLabels: { name: string; x: number; y: number; priority: number; action?: boolean }[] = [];
   const markerScale = getCanvasPlayerIconScale(viewTransform.zoom);
+  const live = instanceLiveStream?.key === session.key;
+  const liveNow = performance.now();
+  const creatures = live && instanceMobsMode !== 'off'
+    ? instanceLiveCreatures.samples(liveNow).filter((creature) => {
+      if (floor && asset?.metadata.floors && getParticipantDungeonFloor({
+        position_x: creature.x, position_y: creature.y, position_z: creature.z, wmoGroupId: creature.wmoGroupId,
+      }, asset.metadata.floors)?.id !== floor.id) return false;
+      return instanceMobsMode === 'all' || isBossCreature(creature, instanceCreatureInfo.get(creature.entry))
+        || visiblePlayers.some((player) =>
+          Math.hypot(player.position_x - creature.x, player.position_y - creature.y) <= INSTANCE_MOBS_NEAR_YARDS
+          && Math.abs(player.position_z - creature.z) <= INSTANCE_MOBS_NEAR_HEIGHT);
+    })
+    : [];
+  const decisions = new Map<string, StreamBotDecision>();
+  if (instanceShowDecisions && live) {
+    for (const player of visiblePlayers) {
+      const decision = player.isBot ? instanceLiveBots.get(player.name, liveNow) : null;
+      if (decision) decisions.set(player.name, decision);
+    }
+  }
+  let pathsDrawn = 0;
+  // Paths, move targets, and target lines go under every marker.
+  for (const player of visiblePlayers) {
+    const moveTarget = decisions.get(player.name)?.moveTarget;
+    if (!moveTarget || moveTarget.ageMs > INSTANCE_MOVE_TARGET_MS) continue;
+    if (Math.hypot(moveTarget.x - player.position_x, moveTarget.y - player.position_y) < 2) continue;
+    drawInstanceMoveTarget(ctx, project(player), projection.worldToScreen(moveTarget.x, moveTarget.y, moveTarget.z),
+      CLASS_COLORS[player.class] || '#94a3b8', 1 - 0.7 * (moveTarget.ageMs / INSTANCE_MOVE_TARGET_MS), markerScale);
+  }
+  if (instanceShowPaths && live) {
+    for (const player of visiblePlayers) {
+      const path = instanceLivePaths.get(player.name, liveNow);
+      if (!path) continue;
+      const points = trimPathToPosition(path.points, [player.position_x, player.position_y, player.position_z]);
+      drawInstancePath(ctx, player, points, path.truncated, projection.worldToScreen,
+        CLASS_COLORS[player.class] || '#4fc3f7', markerScale);
+      pathsDrawn += 1;
+    }
+    for (const creature of creatures) {
+      const path = creature.alive ? instanceLivePaths.get(creaturePathKey(creature.guid), liveNow) : null;
+      if (!path) continue;
+      const points = trimPathToPosition(path.points, [creature.x, creature.y, creature.z]);
+      drawInstancePath(ctx, { position_x: creature.x, position_y: creature.y, position_z: creature.z }, points,
+        path.truncated, projection.worldToScreen, creature.hostile ? '#f87171' : '#fde047', markerScale * 0.75);
+      pathsDrawn += 1;
+    }
+  }
+  if (creatures.length) {
+    const playersByGuid = new Map(visiblePlayers.flatMap((player) => {
+      const guid = instanceLivePositions.guidOf(player.name);
+      return guid === null ? [] : [[guid, player] as const];
+    }));
+    ctx.save();
+    ctx.strokeStyle = 'rgba(239,68,68,0.45)';
+    ctx.lineWidth = 1;
+    for (const creature of creatures) {
+      const target = creature.alive && creature.inCombat && creature.targetIsPlayer
+        ? playersByGuid.get(creature.targetGuid)
+        : undefined;
+      if (!target) continue;
+      const from = projection.worldToScreen(creature.x, creature.y, creature.z);
+      const to = project(target);
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.stroke();
+    }
+    ctx.restore();
+    // Dead first, so the living draw over corpses.
+    const ordered = [...creatures].sort((left, right) => Number(left.alive) - Number(right.alive));
+    for (const creature of ordered) {
+      const info = instanceCreatureInfo.get(creature.entry);
+      const point = projection.worldToScreen(creature.x, creature.y, creature.z);
+      drawInstanceCreature(ctx, creature, info, point, markerScale);
+      const boss = isBossCreature(creature, info);
+      if (info && creature.alive && (boss || viewTransform.zoom >= INSTANCE_MOB_LABEL_ZOOM)) {
+        pendingLabels.push({ name: info.name, x: point.x + 6 * markerScale, y: point.y - 4 * markerScale, priority: boss ? 1 : -1 });
+      }
+    }
+  }
   for (const player of visiblePlayers) {
     const trail = (instanceTrails.get(player.name) ?? []).filter((point) =>
       !floor || getParticipantDungeonFloor(point, asset?.metadata.floors ?? [])?.id === floor.id);
@@ -7462,13 +7818,23 @@ function renderInstanceCanvas(followPass = false): void {
         y: point.y - markerRadius - 1,
         priority: (!player.isBot ? 2 : 0) + (player.inCombat ? 1 : 0),
       });
+      const action = getCurrentBotAction(decisions.get(player.name));
+      if (action) {
+        pendingLabels.push({
+          name: action,
+          x: point.x + markerRadius + 4,
+          y: point.y - markerRadius + 14,
+          priority: player.name === selectedInstancePlayerName ? 1.5 : -0.5,
+          action: true,
+        });
+      }
     }
   }
 
   const occupiedLabels: { left: number; right: number; top: number; bottom: number }[] = [];
-  ctx.font = '11px sans-serif';
-  ctx.fillStyle = '#e5edf7';
   for (const label of pendingLabels.sort((left, right) => right.priority - left.priority)) {
+    ctx.font = label.action ? 'italic 10px sans-serif' : '11px sans-serif';
+    ctx.fillStyle = label.action ? '#fcd34d' : '#e5edf7';
     const labelWidth = ctx.measureText(label.name).width;
     const rect = { left: label.x - 2, right: label.x + labelWidth + 2, top: label.y - 11, bottom: label.y + 3 };
     const overlaps = occupiedLabels.some((used) =>
@@ -7477,6 +7843,186 @@ function renderInstanceCanvas(followPass = false): void {
     occupiedLabels.push(rect);
     ctx.fillText(label.name, label.x, label.y);
   }
+
+  instanceDebugCounts = {
+    players: visiblePlayers.length,
+    mobsShown: creatures.length,
+    mobsStreamed: live ? instanceLiveCreatures.samples(liveNow).length : 0,
+    paths: pathsDrawn,
+    bots: decisions.size,
+  };
+  if (liveNow - instanceBotCardRenderedAt >= INSTANCE_BOT_CARD_INTERVAL_MS) renderInstanceBotCard(session, liveNow);
+}
+
+// The action a bot is carrying out now, or null if it has done nothing lately.
+function getCurrentBotAction(decision: StreamBotDecision | null | undefined): string | null {
+  const latest = decision?.actions[0];
+  return latest && latest.ageMs <= INSTANCE_CURRENT_ACTION_MS ? latest.name : null;
+}
+
+// A dotted line from a bot to where it last chose to move, ending in a diamond.
+function drawInstanceMoveTarget(
+  ctx: CanvasRenderingContext2D,
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  color: string,
+  opacity: number,
+  scale: number,
+): void {
+  const size = 4.5 * scale;
+  ctx.save();
+  ctx.globalAlpha = Math.max(0.2, Math.min(1, opacity));
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.25;
+  ctx.setLineDash([2, 4]);
+  ctx.beginPath();
+  ctx.moveTo(from.x, from.y);
+  ctx.lineTo(to.x, to.y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.moveTo(to.x, to.y - size);
+  ctx.lineTo(to.x + size, to.y);
+  ctx.lineTo(to.x, to.y + size);
+  ctx.lineTo(to.x - size, to.y);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(8,17,29,0.75)';
+  ctx.fill();
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
+}
+
+// Names for the core's MovementGeneratorType values.
+const BOT_MOTION_LABELS: Record<number, string> = {
+  0: 'Standing still', 1: 'Wandering', 2: 'Walking waypoints', 3: 'Wandering', 4: 'Confused', 5: 'Chasing',
+  6: 'Returning home', 7: 'On a flight path', 8: 'Moving to a point', 9: 'Fleeing', 10: 'Distracted',
+  11: 'Fleeing for help', 12: 'Fleeing for help', 13: 'Fleeing', 14: 'Following', 15: 'Turning',
+  16: 'Moved by an effect', 17: 'Escorting', 18: 'In formation',
+};
+const BOT_MOVE_PRIORITY_LABELS = ['idle', 'wander', 'normal', 'combat', 'forced'];
+const BOT_STATE_LABELS: Record<StreamBotDecision['state'], string> = {
+  combat: 'In combat', idle: 'Out of combat', dead: 'Dead',
+};
+
+function formatInstanceAge(ageMs: number): string {
+  if (ageMs < 1000) return 'now';
+  if (ageMs < 60_000) return `${Math.floor(ageMs / 1000)} s ago`;
+  return `${Math.floor(ageMs / 60_000)} min ago`;
+}
+
+// A streamed unit's name: a player's from the stream, a creature's from the
+// world database.
+function getInstanceUnitName(guid: number, isPlayer: boolean): string {
+  if (isPlayer) return instanceLivePositions.nameOf(guid) ?? `Player #${guid}`;
+  const creature = instanceLiveCreatures.latest(guid);
+  if (!creature) return `Creature #${guid}`;
+  return instanceCreatureInfo.get(creature.entry)?.name ?? `Creature ${creature.entry}`;
+}
+
+// The sidebar card: the focused bot's decisions in detail, or every bot's
+// current action when no bot is focused.
+function renderInstanceBotCard(session: ActiveInstanceSession | null, now: number): void {
+  if (!$instanceBotCard || !$instanceBotDecisions) return;
+  instanceBotCardRenderedAt = now;
+  const live = Boolean(session && instanceLiveStream?.key === session.key);
+  const bots = live && instanceShowDecisions && session
+    ? session.players.flatMap((player) => {
+      const decision = player.isBot ? instanceLiveBots.get(player.name, now) : null;
+      return decision ? [{ player, decision }] : [];
+    })
+    : [];
+  $instanceBotCard.classList.toggle('hidden', !bots.length);
+  if (!bots.length) return;
+  const focused = bots.find(({ player }) => player.name === selectedInstancePlayerName);
+  const html = focused ? getInstanceBotDetailHtml(focused.player.name, focused.decision) : bots
+    .sort((left, right) => left.player.name.localeCompare(right.player.name))
+    .map(({ player, decision }) => {
+      const action = getCurrentBotAction(decision);
+      return `<div class="instance-bot-summary" data-instance-player="${escapeHtml(player.name)}">
+        <span class="instance-bot-state-dot ${decision.state}"></span>
+        <span class="instance-bot-summary-name">${escapeHtml(player.name)}</span>
+        <span class="instance-bot-summary-action">${action ? escapeHtml(action) : '—'}</span>
+      </div>`;
+    }).join('') + '<p class="instance-bot-hint">Select a bot for its strategies and recent actions.</p>';
+  // Ages tick every second; skip identical redraws so clicks are not lost.
+  if ($instanceBotDecisions.innerHTML !== html) $instanceBotDecisions.innerHTML = html;
+}
+
+function getInstanceBotDetailHtml(name: string, decision: StreamBotDecision): string {
+  const lines: string[] = [];
+  const motion = decision.motionType === null ? null : BOT_MOTION_LABELS[decision.motionType] ?? `Motion ${decision.motionType}`;
+  if (motion) {
+    const whom = decision.motionTargetGuid
+      ? ` <strong>${escapeHtml(getInstanceUnitName(decision.motionTargetGuid, decision.motionTargetIsPlayer))}</strong>`
+      : '';
+    lines.push(`${escapeHtml(motion)}${whom}`);
+  }
+  if (decision.targetGuid) {
+    lines.push(`Target <strong>${escapeHtml(getInstanceUnitName(decision.targetGuid, decision.targetIsPlayer))}</strong>`);
+  }
+  if (decision.moveTarget) {
+    const priority = BOT_MOVE_PRIORITY_LABELS[decision.movePriority] ?? String(decision.movePriority);
+    lines.push(`Chose a move ${formatInstanceAge(decision.moveTarget.ageMs)} (${escapeHtml(priority)} priority)`);
+  }
+  const actions = decision.actions.map((action) => `<tr${action.ageMs > INSTANCE_CURRENT_ACTION_MS ? ' class="old"' : ''}>
+      <td>${escapeHtml(action.name)}${action.repeats > 1 ? ` <span class="instance-bot-repeats">×${action.repeats}</span>` : ''}</td>
+      <td title="Relevance">${Math.round(action.relevance * 10) / 10}</td>
+      <td>${formatInstanceAge(action.ageMs)}</td>
+    </tr>`).join('');
+  const strategies = decision.strategies.map((strategy) => `<span>${escapeHtml(strategy)}</span>`).join('');
+  return `<div class="instance-bot-head"><strong>${escapeHtml(name)}</strong>
+      <span class="instance-bot-state ${decision.state}">${BOT_STATE_LABELS[decision.state]}</span></div>
+    ${lines.map((line) => `<div class="instance-bot-line">${line}</div>`).join('')}
+    <h4>Recent actions</h4>
+    ${actions ? `<table class="instance-bot-actions"><tbody>${actions}</tbody></table>` : '<p class="instance-bot-hint">None yet.</p>'}
+    <h4>Strategies ${decision.state === 'combat' ? 'in combat' : decision.state === 'dead' ? 'while dead' : 'out of combat'}</h4>
+    <div class="instance-bot-strategies">${strategies || '<span>none</span>'}</div>`;
+}
+
+// Records a debug statistic: an occurrence at `at` with an optional value.
+function noteInstanceDebug(kind: string, value = 0, at = performance.now()): void {
+  if (!instanceDebug) return;
+  const events = instanceDebugEvents.get(kind) ?? [];
+  events.push({ at, value });
+  while (events.length && at - events[0].at > INSTANCE_DEBUG_WINDOW_MS) events.shift();
+  instanceDebugEvents.set(kind, events);
+}
+
+function getInstanceDebugStats(kind: string, now: number): { rate: number; average: number; max: number; total: number } {
+  const events = (instanceDebugEvents.get(kind) ?? []).filter((event) => now - event.at <= INSTANCE_DEBUG_WINDOW_MS);
+  const total = events.reduce((sum, event) => sum + event.value, 0);
+  return {
+    rate: events.length / (INSTANCE_DEBUG_WINDOW_MS / 1000),
+    average: events.length ? total / events.length : 0,
+    max: events.reduce((max, event) => Math.max(max, event.value), 0),
+    total,
+  };
+}
+
+function renderInstanceDebugOverlay(now: number): void {
+  if (!$instanceDebugOverlay) return;
+  instanceDebugRenderedAt = now;
+  $instanceDebugOverlay.hidden = false;
+  const render = getInstanceDebugStats('render', now);
+  const frames = getInstanceDebugStats('frame', now);
+  const perSecond = (kind: string) => (getInstanceDebugStats(kind, now).total / (INSTANCE_DEBUG_WINDOW_MS / 1000)).toFixed(1);
+  const session = getSelectedInstanceSession();
+  const scene = $instanceWatchScene && !$instanceWatchScene.hidden
+    ? `3D · ${$instanceWatchScene.dataset.drawCalls ?? '?'} draws · ${Math.round(Number($instanceWatchScene.dataset.triangles ?? 0) / 1000)}k tris`
+    : 'flat map';
+  const floor = session ? getSelectedDungeonFloor(session, instanceMapAssets.get(session.mapId) ?? null) : null;
+  const transform = getInstanceViewTransform();
+  const counts = instanceDebugCounts;
+  const lines = [
+    `render  ${render.rate.toFixed(1)} fps · ${render.average.toFixed(1)} ms avg · ${render.max.toFixed(1)} max`,
+    `scene   ${scene}`,
+    `stream  ${instanceLiveStream?.status ?? 'off'} · ${frames.rate.toFixed(1)} frames/s · gap max ${Math.round(frames.max)} ms`,
+    `        per s: ${perSecond('paths')} paths · ${perSecond('creatures')} mobs · ${perSecond('bots')} bots`,
+    `shown   ${counts.players} players · ${counts.mobsShown}/${counts.mobsStreamed} mobs · ${counts.paths} paths · ${counts.bots} bots`,
+    `view    zoom ${transform.zoom.toFixed(2)} · yaw ${Math.round(getInstanceViewYaw() * 180 / Math.PI)}° · pitch ${Math.round(getInstanceViewPitch() * 180 / Math.PI)}°${floor ? ` · floor ${floor.floorIndex}` : ''}`,
+  ];
+  $instanceDebugOverlay.textContent = lines.join('\n');
 }
 
 function renderInstanceWatcher(): void {
@@ -7750,6 +8296,31 @@ $instanceRotateRightBtn?.addEventListener('click', () => rotateInstanceView(1));
 $instanceView3dBtn?.addEventListener('click', () => setInstanceView3d(!instanceView3d));
 $instanceFollowBtn?.setAttribute('aria-pressed', String(instanceFollowSelected));
 $instanceFollowBtn?.addEventListener('click', () => setInstanceFollowSelected(!instanceFollowSelected));
+$instancePathsBtn?.setAttribute('aria-pressed', String(instanceShowPaths));
+if ($instancePathsBtn && !window.electronAPI.map.streamPositions) $instancePathsBtn.disabled = true;
+$instancePathsBtn?.addEventListener('click', () => setInstanceShowPaths(!instanceShowPaths));
+$instanceDecisionsBtn?.setAttribute('aria-pressed', String(instanceShowDecisions));
+if ($instanceDecisionsBtn && !window.electronAPI.map.streamPositions) $instanceDecisionsBtn.disabled = true;
+$instanceDecisionsBtn?.addEventListener('click', () => setInstanceShowDecisions(!instanceShowDecisions));
+// Pointer-down too, as the card redraws every second and a click could
+// straddle a redraw.
+for (const type of ['pointerdown', 'click'] as const) {
+  $instanceBotDecisions?.addEventListener(type, (event) => {
+    const row = (event.target as HTMLElement).closest<HTMLElement>('[data-instance-player]');
+    const name = row?.dataset.instancePlayer;
+    if (name && name !== selectedInstancePlayerName) focusInstancePlayer(name);
+  });
+}
+if (instanceDebug) {
+  setInterval(() => {
+    if (getActiveMainTabId() === 'instances') renderInstanceDebugOverlay(performance.now());
+  }, INSTANCE_DEBUG_INTERVAL_MS);
+}
+if ($instanceMobsMode) {
+  $instanceMobsMode.value = instanceMobsMode;
+  $instanceMobsMode.disabled = !window.electronAPI.map.streamPositions;
+  $instanceMobsMode.addEventListener('change', () => setInstanceMobsMode($instanceMobsMode.value as InstanceMobsMode));
+}
 setInstanceFadeRange(instanceFadeRange, false);
 $instanceFadeRange?.addEventListener('input', () => setInstanceFadeRange(Number($instanceFadeRange.value)));
 setInstanceHorizontalFade(instanceHorizontalFade, false);

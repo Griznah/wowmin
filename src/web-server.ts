@@ -192,7 +192,13 @@ const server = createServer(async (request, response) => {
     });
     response.write('retry: 3000\n\n');
     const send = (event: string, data: unknown) => response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    const unwatch = telemetryStream.watch(mapId, instanceId, (frame) => send('frame', frame), (status) => send('status', status));
+    const unwatch = telemetryStream.watch(mapId, instanceId, {
+      onFrame: (frame) => send('frame', frame),
+      onStatus: (status) => send('status', status),
+      onPaths: (update) => send('paths', update),
+      onCreatures: (update) => send('creatures', update),
+      onBots: (update) => send('bots', update),
+    });
     // Comment lines keep idle connections open through proxies.
     const keepAlive = setInterval(() => response.write(': keep-alive\n\n'), 15000);
     request.on('close', () => {

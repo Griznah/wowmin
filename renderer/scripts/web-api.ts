@@ -65,16 +65,21 @@ if (!window.electronAPI) {
       },
       disconnect: () => invoke('map:disconnect'),
       getPlayerPositions: (mapId, instanceId) => invoke('map:getPlayerPositions', mapId, instanceId),
-      streamPositions: (mapId, instanceId, onFrame, onStatus) => {
+      streamPositions: (mapId, instanceId, listeners) => {
         const source = new EventSource(`/api/stream?map=${mapId}&instance=${instanceId}`);
-        source.addEventListener('frame', (event) => onFrame(JSON.parse((event as MessageEvent<string>).data)));
-        source.addEventListener('status', (event) => onStatus(JSON.parse((event as MessageEvent<string>).data)));
+        const data = (event: Event) => JSON.parse((event as MessageEvent<string>).data);
+        source.addEventListener('frame', (event) => listeners.onFrame(data(event)));
+        source.addEventListener('status', (event) => listeners.onStatus(data(event)));
+        source.addEventListener('paths', (event) => listeners.onPaths?.(data(event)));
+        source.addEventListener('creatures', (event) => listeners.onCreatures?.(data(event)));
+        source.addEventListener('bots', (event) => listeners.onBots?.(data(event)));
         // EventSource reconnects by itself; report the gap meanwhile.
-        source.addEventListener('error', () => onStatus('starting'));
+        source.addEventListener('error', () => listeners.onStatus('starting'));
         return () => source.close();
       },
       getOnlineCounts: () => invoke('map:getOnlineCounts'),
       getBotWaypoint: (request) => invoke('map:getBotWaypoint', request),
+      getCreatureInfo: (entries) => invoke('map:getCreatureInfo', entries),
     },
     sessions: {
       list: () => invoke('sessions:list'),
