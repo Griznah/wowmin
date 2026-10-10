@@ -85,8 +85,8 @@ if (!window.electronAPI) {
       getCharacterInventory: (characterName) => invoke('inventory:getCharacterInventory', characterName),
     },
     config: {
-      getProfiles: () => Promise.resolve([]),
-      getActiveProfileId: () => Promise.resolve(null),
+      getProfiles: () => invoke('config:getProfiles'),
+      getActiveProfileId: () => invoke('config:getActiveProfileId'),
       addProfile: (profile) => invoke('config:addProfile', profile),
       updateProfile: (id, fields) => invoke('config:updateProfile', { id, fields }),
       deleteProfile: async (id) => { await invoke('config:deleteProfile', id); },
