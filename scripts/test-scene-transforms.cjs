@@ -230,15 +230,25 @@ test('builds four up-facing triangles per quad and leaves holes out', async () =
 
 test('crops terrain to the play area and spots placeholder tiles', async () => {
   const { chunkInArea, isPlaceholderArea, playArea, CHUNK_SIZE } = await load('terrain.mjs');
+  // Floors are kept apart, each widened by the margin.
   const area = playArea([{ bounds: { minX: 0, maxX: 100, minY: -50, maxY: 50 } }, { bounds: { minX: 200, maxX: 300, minY: 0, maxY: 10 } }], null, 10);
-  assert.deepEqual(area, { minX: -10, maxX: 310, minY: -60, maxY: 60 });
-  assert.deepEqual(playArea([], { minX: 1, maxX: 2, minY: 3, maxY: 4 }, 0), { minX: 1, maxX: 2, minY: 3, maxY: 4 });
-  assert.equal(playArea([], null), null);
+  assert.deepEqual(area, [{ minX: -10, maxX: 110, minY: -60, maxY: 60 }, { minX: 190, maxX: 310, minY: -10, maxY: 20 }]);
+  assert.deepEqual(playArea([], { minX: 1, maxX: 2, minY: 3, maxY: 4 }, 0), [{ minX: 1, maxX: 2, minY: 3, maxY: 4 }]);
+  // Nothing to go by keeps no ground.
+  assert.deepEqual(playArea([], null), []);
+  assert.ok(!chunkInArea([0, 0], []));
+  // Without floors or world map bounds, the area the buildings cover.
+  assert.deepEqual(playArea([], null, 5, [{ minX: 0, maxX: 10, minY: 0, maxY: 10, minZ: 0, maxZ: 1 }, { minX: 20, maxX: 30, minY: -5, maxY: 0 }]),
+    [{ minX: -5, maxX: 35, minY: -10, maxY: 15 }]);
+  assert.deepEqual(playArea([], { minX: 1, maxX: 2, minY: 3, maxY: 4 }, 0, [{ minX: 0, maxX: 10, minY: 0, maxY: 10 }]), [{ minX: 1, maxX: 2, minY: 3, maxY: 4 }]);
   // A chunk spans [north - size, north] by [west - size, west].
   assert.ok(chunkInArea([0, 0], area));
   assert.ok(chunkInArea([-10 + CHUNK_SIZE - 1, 0], area));
   assert.ok(!chunkInArea([-11, 0], area));
   assert.ok(!chunkInArea([400 + CHUNK_SIZE, 0], area));
+  // Between the two floors' boxes.
+  assert.ok(!chunkInArea([150 + CHUNK_SIZE / 2, 0], area));
+  assert.ok(chunkInArea([250, 0], area));
   assert.ok(chunkInArea([999, 999], null));
   const chunk = (z, heights, layers = []) => ({ position: [0, 0, z], vertexHeights: heights, layers });
   assert.ok(isPlaceholderArea({ chunks: [chunk(0, [0, 0]), chunk(0, [0, 0])] }));
@@ -251,7 +261,7 @@ test('crops terrain to the play area and spots placeholder tiles', async () => {
   assert.ok(!isPlaceholderChunk(chunk(0, [0, 0], [{}])));
 });
 
-test('reads MCCV vertex shading as colour multipliers', async () => {
+test('reads MCCV vertex shading as RGB bytes', async () => {
   const { readVertexShading, CHUNK_VERTEX_COUNT } = await load('terrain.mjs');
   const mccv = Buffer.alloc(8 + CHUNK_VERTEX_COUNT * 4);
   mccv.write('VCCM', 0, 'ascii');
@@ -263,8 +273,8 @@ test('reads MCCV vertex shading as colour multipliers', async () => {
   const mcnk = Buffer.concat([Buffer.from('KNCM', 'ascii'), Buffer.alloc(4), data]);
   mcnk.writeUInt32LE(data.length, 4);
   const [colors] = readVertexShading(mcnk);
-  // BGRA (127, 254, 0) → RGB (0, 2, 1).
-  near(colors[0], 0, 'red'); near(colors[1], 2, 'green'); near(colors[2], 1, 'blue');
+  // BGRA (127, 254, 0) → RGB (0, 254, 127): ×0, ×2, ×1.
+  assert.deepEqual([...colors.slice(0, 3)], [0, 254, 127]);
   assert.equal(readVertexShading(Buffer.concat([Buffer.from('KNCM', 'ascii'), Buffer.from([128, 0, 0, 0]), Buffer.alloc(128)]))[0], null);
 });
 

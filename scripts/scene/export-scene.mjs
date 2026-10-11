@@ -382,10 +382,11 @@ export async function exportMapScene({
   }
 
   // Terrain, cropped to the area players use (placeholder tiles are skipped).
+  // A map with no floors, world map bounds, or buildings to go by gets none.
   const terrain = { tiles: 0, chunks: 0, bounds: null };
-  if (!wdt.wmoOnly) {
+  const area = wdt.wmoOnly ? [] : playArea(floors, worldMapBounds, undefined, groups);
+  if (area.length) {
     const bigAlpha = Boolean(findChunk(readChunks(wdtBuffer), 'MPHD').readUInt32LE(0) & WDT_FLAG_BIG_ALPHA);
-    const area = playArea(floors, worldMapBounds);
     const buffer = document.getRoot().listBuffers()[0] ?? document.createBuffer();
     const accessor = (type, array) => document.createAccessor().setType(type).setArray(array).setBuffer(buffer);
     // Each ground texture once, as a material named for its layer index.
@@ -446,7 +447,7 @@ export async function exportMapScene({
       const mesh = document.createMesh(`terrain-${x}-${y}`).addPrimitive(document.createPrimitive()
         .setAttribute('POSITION', accessor('VEC3', tile.positions))
         .setAttribute('NORMAL', accessor('VEC3', tile.normals))
-        .setAttribute('COLOR_0', accessor('VEC3', tile.colors))
+        .setAttribute('COLOR_0', accessor('VEC3', tile.colors).setNormalized(true))
         .setAttribute('_LAYERS', accessor('VEC4', tile.layers))
         .setAttribute('_CELL', accessor('VEC2', tile.cells))
         .setIndices(accessor('SCALAR', tile.indices))

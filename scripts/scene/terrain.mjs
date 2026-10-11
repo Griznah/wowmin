@@ -28,8 +28,12 @@ const MCNK_FLAG_HAS_SHADOW = 0x1;
 export const SPLAT_SIZE = 64;
 export const ATLAS_SIZE = SPLAT_SIZE * 16;
 const SHADOW_LIGHT = 150;
-// MCCV colours are multipliers centred on this value.
-const MCCV_ONE = 127;
+// MCCV colours are multipliers centred on this value. Scenes store the raw
+// bytes (as normalized colours, so 1.0 is 255) and the viewer scales them.
+export const MCCV_ONE = 127;
+// A vertex's layer index when the layer is unused (scenes store layer
+// indices as bytes).
+export const NO_LAYER = 255;
 // WDT MPHD flag: alpha maps are 8-bit (or compressed), not 4-bit.
 export const WDT_FLAG_BIG_ALPHA = 0x4;
 
@@ -123,7 +127,7 @@ export function chunkNormals(raw) {
   return normals;
 }
 
-// Each chunk's MCCV vertex shading as RGB multipliers (1 = unchanged), or
+// Each chunk's MCCV vertex shading as RGB bytes (MCCV_ONE = unchanged), or
 // null where the chunk has none. `adtBuffer` is the whole ADT file.
 export function readVertexShading(adtBuffer) {
   return readChunks(adtBuffer).filter((chunk) => chunk.id === 'MCNK').map(({ data }) => {
@@ -133,13 +137,13 @@ export function readVertexShading(adtBuffer) {
     const start = offset - 8;
     if (!offset || start + 8 + CHUNK_VERTEX_COUNT * 4 > data.length) return null;
     if (data.toString('ascii', start, start + 4) !== 'VCCM') return null;
-    const colors = new Float32Array(CHUNK_VERTEX_COUNT * 3);
+    const colors = new Uint8Array(CHUNK_VERTEX_COUNT * 3);
     for (let index = 0; index < CHUNK_VERTEX_COUNT; index += 1) {
       const base = start + 8 + index * 4;
       // BGRA bytes.
-      colors[index * 3] = data[base + 2] / MCCV_ONE;
-      colors[index * 3 + 1] = data[base + 1] / MCCV_ONE;
-      colors[index * 3 + 2] = data[base] / MCCV_ONE;
+      colors[index * 3] = data[base + 2];
+      colors[index * 3 + 1] = data[base + 1];
+      colors[index * 3 + 2] = data[base];
     }
     return colors;
   });
@@ -171,12 +175,14 @@ export function isPlaceholderChunk(chunk) {
   return (chunk.vertexHeights ?? []).every((height) => height === 0);
 }
 
-// Whether a chunk at `position` (its north-west corner) overlaps `area`
-// ({ minX, maxX, minY, maxY }); a null area keeps everything.
+// Whether a chunk at `position` (its north-west corner) overlaps `area`: a
+// box ({ minX, maxX, minY, maxY }) or a list of them. A null area keeps
+// everything.
 export function chunkInArea(position, area) {
   if (!area) return true;
   const [north, west] = position;
-  return north >= area.minX && north - CHUNK_SIZE <= area.maxX && west >= area.minY && west - CHUNK_SIZE <= area.maxY;
+  const boxes = Array.isArray(area) ? area : [area];
+  return boxes.some((box) => north >= box.minX && north - CHUNK_SIZE <= box.maxX && west >= box.minY && west - CHUNK_SIZE <= box.maxY);
 }
 
 // One tile's terrain, cropped to `area`: merged positions, normals, colours,
@@ -210,12 +216,15 @@ export function buildTerrainTile(adtBuffer, { bigAlpha, area = null, textureInde
     }
     positions.push(chunkPositionsArray);
     normals.push(chunkNormals(chunk.vertexNormals));
-    colors.push(shading[chunkIndex] ?? new Float32Array(CHUNK_VERTEX_COUNT * 3).fill(1));
+    colors.push(shading[chunkIndex] ?? new Uint8Array(CHUNK_VERTEX_COUNT * 3).fill(MCCV_ONE));
     const row = Math.floor(chunkIndex / 16);
     const column = chunkIndex % 16;
-    const layers = [0, 1, 2, 3].map((layer) => (chunk.layers[layer] ? textureIndex(chunk.layers[layer].texture) : -1));
-    layerIndices.push(new Float32Array(CHUNK_VERTEX_COUNT * 4).map((_, index) => layers[index % 4]));
-    cells.push(new Float32Array(CHUNK_VERTEX_COUNT * 2).map((_, index) => (index % 2 ? column : row)));
+    const layers = [0, 1, 2, 3].map((layer) => {
+      const index = chunk.layers[layer] ? textureIndex(chunk.layers[layer].texture) : -1;
+      return index >= 0 && index < NO_LAYER ? index : NO_LAYER;
+    });
+    layerIndices.push(new Uint8Array(CHUNK_VERTEX_COUNT * 4).map((_, index) => layers[index % 4]));
+    cells.push(new Uint8Array(CHUNK_VERTEX_COUNT * 2).map((_, index) => (index % 2 ? column : row)));
     packChunkSplats(atlas, row, column, chunk.layers, shadows[chunkIndex]);
     for (const index of chunkIndices(chunk.holes)) indices.push(index + vertexCount);
     vertexCount += CHUNK_VERTEX_COUNT;
@@ -223,7 +232,7 @@ export function buildTerrainTile(adtBuffer, { bigAlpha, area = null, textureInde
   });
   if (!chunkCount || !indices.length) return null;
   const concat = (parts) => {
-    const out = new Float32Array(parts.reduce((sum, part) => sum + part.length, 0));
+    const out = new parts[0].constructor(parts.reduce((sum, part) => sum + part.length, 0));
     let offset = 0;
     for (const part of parts) {
       out.set(part, offset);
@@ -246,16 +255,20 @@ export function buildTerrainTile(adtBuffer, { bigAlpha, area = null, textureInde
   };
 }
 
-// The area to keep terrain for: the dungeon map floors, or the map's world
-// map bounds, widened by `margin` yards; null to keep it all.
-export function playArea(floors, worldMapBounds, margin = 100) {
-  const boxes = (floors ?? []).map((floor) => floor.bounds).filter(Boolean);
-  if (!boxes.length && worldMapBounds) boxes.push(worldMapBounds);
-  if (!boxes.length) return null;
-  return {
-    minX: Math.min(...boxes.map((box) => box.minX)) - margin,
-    maxX: Math.max(...boxes.map((box) => box.maxX)) + margin,
-    minY: Math.min(...boxes.map((box) => box.minY)) - margin,
-    maxY: Math.max(...boxes.map((box) => box.maxY)) + margin,
-  };
+// The area to keep terrain for, as a list of boxes: each dungeon map floor,
+// or the map's world map bounds, or failing both the area the map's
+// buildings cover (`buildings`, boxes in world coordinates), widened by
+// `margin` yards. Floors are kept apart, since a map's floors can be far
+// from each other (Icecrown Citadel's spire). An empty list when there is
+// nothing to go by.
+export function playArea(floors, worldMapBounds, margin = 100, buildings = []) {
+  let boxes = (floors ?? []).map((floor) => floor.bounds).filter(Boolean);
+  if (!boxes.length && worldMapBounds) boxes = [worldMapBounds];
+  if (!boxes.length && buildings.length) {
+    boxes = [{
+      minX: Math.min(...buildings.map((box) => box.minX)), maxX: Math.max(...buildings.map((box) => box.maxX)),
+      minY: Math.min(...buildings.map((box) => box.minY)), maxY: Math.max(...buildings.map((box) => box.maxY)),
+    }];
+  }
+  return boxes.map((box) => ({ minX: box.minX - margin, maxX: box.maxX + margin, minY: box.minY - margin, maxY: box.maxY + margin }));
 }

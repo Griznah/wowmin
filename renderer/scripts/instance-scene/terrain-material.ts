@@ -18,8 +18,9 @@ import {
 // mixed over it by its alpha), darkened by the baked shadow, then shaded by
 // the vertex colours (MCCV) and lit. Built by scripts/scene/terrain.mjs and
 // export-scene.mjs: per vertex `_layers` (four layer indices into the map's
-// texture array, -1 for none) and `_cell` (the chunk's row and column in the
-// tile); per tile an alpha atlas (RGB: layers 2-4, A: light).
+// texture array; 255, or -1 in older scenes, for none) and `_cell` (the
+// chunk's row and column in the tile); per tile an alpha atlas (RGB: layers
+// 2-4, A: light).
 
 const TILE_SIZE = 1600 / 3;
 const CHUNK_SIZE = TILE_SIZE / 16;
@@ -29,6 +30,10 @@ const LAYER_TEXTURE_SIZE = 256;
 // Under the scene's lights, a plain white diffuse is far too bright; this
 // brings the ground to about the client's level. Tuned by eye.
 const GROUND_BRIGHTNESS = 0.75;
+// Vertex shading stored as bytes (normalized, so 1.0 is 255) is centred on
+// 127 (MCCV_ONE in scripts/scene/terrain.mjs); older scenes stored floats
+// already centred on 1.
+export const BYTE_SHADING_SCALE = 255 / 127;
 
 // Packs the map's ground textures into one texture array (resampled to one
 // size), in the order of their layer indices.
@@ -102,10 +107,12 @@ const FRAGMENT = `
   vec2 inCell = clamp(inTile - cell, 0.5 / 64.0, 63.5 / 64.0);
   vec4 splat = texture2D(wowTerrainAlpha, (cell + inCell) / 16.0);
   vec4 layers = floor(vWowLayers + 0.5);
-  vec3 ground = layers.x >= 0.0 ? texture(wowTerrainLayers, vec3(repeatUv, layers.x)).rgb : vec3(0.5);
-  if (layers.y >= 0.0) ground = mix(ground, texture(wowTerrainLayers, vec3(repeatUv, layers.y)).rgb, splat.r);
-  if (layers.z >= 0.0) ground = mix(ground, texture(wowTerrainLayers, vec3(repeatUv, layers.z)).rgb, splat.g);
-  if (layers.w >= 0.0) ground = mix(ground, texture(wowTerrainLayers, vec3(repeatUv, layers.w)).rgb, splat.b);
+  bvec4 used = bvec4(layers.x >= 0.0 && layers.x < 254.5, layers.y >= 0.0 && layers.y < 254.5,
+    layers.z >= 0.0 && layers.z < 254.5, layers.w >= 0.0 && layers.w < 254.5);
+  vec3 ground = used.x ? texture(wowTerrainLayers, vec3(repeatUv, layers.x)).rgb : vec3(0.5);
+  if (used.y) ground = mix(ground, texture(wowTerrainLayers, vec3(repeatUv, layers.y)).rgb, splat.r);
+  if (used.z) ground = mix(ground, texture(wowTerrainLayers, vec3(repeatUv, layers.z)).rgb, splat.g);
+  if (used.w) ground = mix(ground, texture(wowTerrainLayers, vec3(repeatUv, layers.w)).rgb, splat.b);
   diffuseColor.rgb *= ground * splat.a;
 }
 `;
@@ -115,15 +122,19 @@ export function createTerrainMaterial({
   alpha,
   origin,
   vertexShaded,
+  shadingScale = 1,
   partyFade,
 }: {
   layers: DataArrayTexture;
   alpha: Texture;
   origin: [number, number];
   vertexShaded: boolean;
+  // Multiplies the vertex shading: BYTE_SHADING_SCALE for byte colours.
+  shadingScale?: number;
   partyFade: (shader: WebGLProgramParametersWithUniforms) => void;
 }): MeshLambertMaterial {
-  const material = new MeshLambertMaterial({ color: new Color(GROUND_BRIGHTNESS, GROUND_BRIGHTNESS, GROUND_BRIGHTNESS), vertexColors: vertexShaded });
+  const brightness = GROUND_BRIGHTNESS * (vertexShaded ? shadingScale : 1);
+  const material = new MeshLambertMaterial({ color: new Color(brightness, brightness, brightness), vertexColors: vertexShaded });
   const uniforms = {
     wowTerrainLayers: { value: layers },
     wowTerrainAlpha: { value: alpha },

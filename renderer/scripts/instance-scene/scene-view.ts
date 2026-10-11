@@ -31,7 +31,7 @@ import { type FadeSettings, type FadeVolume, type IsoView, MAX_FADE_VOLUMES } fr
 import type { CombatEffectStore, Point3, UnitKey } from '../utils/spell-events';
 import { applyIsoCamera } from './iso-camera';
 import { SpellEffectLayer, type UnitAnchorRole } from './spell-effects';
-import { buildLayerArray, createTerrainMaterial, prepareAlphaAtlas } from './terrain-material';
+import { buildLayerArray, BYTE_SHADING_SCALE, createTerrainMaterial, prepareAlphaAtlas } from './terrain-material';
 import { SpellVisualLayer, type UnitInfo } from './spell-visual-layer';
 import { type UnitModelPose, UnitModelLayer } from './unit-models';
 
@@ -458,14 +458,17 @@ export class InstanceSceneView {
       // shading as colour. Plain ground if its textures are missing.
       if (source.userData.wowTerrain) {
         const alpha = terrain?.alphas.get(source.userData.alpha as string);
+        const shadingScale = mesh.geometry.getAttribute('color')?.normalized ? BYTE_SHADING_SCALE : 1;
         if (!terrain || !alpha) {
-          const plain = new MeshLambertMaterial({ color: TERRAIN_COLOR, vertexColors: vertexLit });
+          const plain = new MeshLambertMaterial({
+            color: new Color(TERRAIN_COLOR).multiplyScalar(vertexLit ? shadingScale : 1), vertexColors: vertexLit,
+          });
           plain.onBeforeCompile = this.injectPartyFade;
           return plain;
         }
         return createTerrainMaterial({
           layers: terrain.layers, alpha, origin: source.userData.origin as [number, number],
-          vertexShaded: vertexLit, partyFade: this.injectPartyFade,
+          vertexShaded: vertexLit, shadingScale, partyFade: this.injectPartyFade,
         });
       }
       const key = `${source.uuid}|${vertexLit}`;
