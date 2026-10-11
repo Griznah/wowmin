@@ -476,4 +476,10 @@ test('takes the box the buildings in the play area fill', async () => {
   assert.deepEqual(buildingReach(groups, []), { minX: 0, maxX: 510, minY: 0, maxY: 10, minZ: -100, maxZ: 300 });
   assert.equal(buildingReach([], []), null);
   assert.equal(buildingReach(groups, [{ minX: 1000, maxX: 1100, minY: 0, maxY: 10 }]), null);
+  // Graveyards and start points count, and so do buildings near them (a
+  // start platform outside the world map).
+  const area = [{ minX: -10, maxX: 100, minY: -10, maxY: 20 }];
+  assert.deepEqual(buildingReach(groups, area, [[300, 5, 50]]), { minX: 0, maxX: 300, minY: 0, maxY: 10, minZ: -5, maxZ: 50 });
+  assert.deepEqual(buildingReach(groups, area, [[450, 5, 0]]), { minX: 0, maxX: 510, minY: 0, maxY: 10, minZ: -100, maxZ: 300 });
+  assert.deepEqual(buildingReach([], [], [[1, 2, 3]]), { minX: 1, maxX: 1, minY: 2, maxY: 2, minZ: 3, maxZ: 3 });
 });

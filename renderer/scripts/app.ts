@@ -6649,8 +6649,12 @@ const INSTANCE_ORBIT_SPEED = 0.008;
 const INSTANCE_FOLLOW_STORAGE_KEY = 'wowmin.instanceFollow';
 let instanceFollowSelected = readStoredInstanceFollow();
 const INSTANCE_FOLLOW_EASE_MS = 700;
-let instanceFollowAnimation: { fromX: number; fromY: number; toX: number; toY: number; startedAt: number } | null = null;
-let instanceOrbitStart: { x: number; y: number; yaw: number; pitch: number; center: [number, number, number] } | null = null;
+// Where Follow is gliding the pan to, and when it last stepped.
+let instanceFollowAnimation: { toX: number; toY: number; lastAt: number } | null = null;
+// An orbit drag spins about `center`, which stays at canvas pixel `anchor`.
+let instanceOrbitStart: {
+  x: number; y: number; yaw: number; pitch: number; center: [number, number, number]; anchor: { x: number; y: number };
+} | null = null;
 let instanceView3d = readStoredInstanceView3d();
 let instanceSceneView: InstanceSceneView | null | undefined;
 let instanceIsoContext: { box: SceneBox; width: number; height: number; view: IsoView } | null = null;
@@ -7349,20 +7353,28 @@ function drawInstancePath(
 }
 
 // Starts an orbit drag (middle button, or Shift with the main button) when the
-// 3D scene is showing. Spins and tilts about the point under the view centre.
+// 3D scene is showing. Spins and tilts about the scene point under the
+// pointer, which stays under it; over empty space, about the view centre.
 function beginInstanceOrbit(event: PointerEvent): boolean {
   const session = getSelectedInstanceSession();
-  if (!session || !instanceIsoContext || !isInstanceSceneShowing(session.mapId, instanceMapAssets.get(session.mapId) ?? null)) {
+  if (!session || !instanceIsoContext || !$instanceWatchCanvas
+    || !isInstanceSceneShowing(session.mapId, instanceMapAssets.get(session.mapId) ?? null)) {
     return false;
   }
   instanceRotation = null;
   instanceFollowAnimation = null;
+  const { view, width, height } = instanceIsoContext;
+  const rect = $instanceWatchCanvas.getBoundingClientRect();
+  const x = (event.clientX - rect.left) * (width / rect.width);
+  const y = (event.clientY - rect.top) * (height / rect.height);
+  const picked = getInstanceSceneView()?.pick(view, width, height, x, y) ?? null;
   instanceOrbitStart = {
     x: event.clientX,
     y: event.clientY,
     yaw: getInstanceViewYaw(),
     pitch: getInstanceViewPitch(),
-    center: instanceIsoContext.view.center,
+    center: picked ?? view.center,
+    anchor: picked ? { x, y } : { x: width / 2, y: height / 2 },
   };
   return true;
 }
@@ -7375,7 +7387,9 @@ function updateInstanceOrbit(event: PointerEvent): void {
   const { zoom } = getInstanceViewTransform();
   instanceViewYaws.set(selectedInstanceKey, yaw);
   instanceViewPitches.set(selectedInstanceKey, pitch);
-  setInstanceViewTransform({ zoom, ...getIsoPanForCenter(box, width, height, yaw, pitch, zoom, instanceOrbitStart.center) });
+  const { panX, panY } = getIsoPanForCenter(box, width, height, yaw, pitch, zoom, instanceOrbitStart.center);
+  const { anchor } = instanceOrbitStart;
+  setInstanceViewTransform({ zoom, panX: panX + anchor.x - width / 2, panY: panY + anchor.y - height / 2 });
   renderInstanceCanvas();
 }
 
@@ -7416,9 +7430,12 @@ function renderInstanceScene(
     ...landmarks,
   ], fade);
   const band = getHeightBand(floorPlayers.map((player) => player.position_z));
+  // Without a dungeon floor, the reach box (the scene's own bounds cover
+  // only its buildings, not ground-built places like Eye of the Storm's
+  // start platforms).
   let fitBox: SceneBox = floor && floorHeights
     ? { ...floor.bounds, minZ: floorHeights.minZ, maxZ: floorHeights.maxZ }
-    : scene.bounds;
+    : reach ?? scene.bounds;
   // With a horizontal fade most of the floor is hidden, so frame the party's
   // bubble instead. The framing is captured, not live: it is taken on the
   // first view, on Fit view, and when the party changes floor, so the view
@@ -7910,13 +7927,12 @@ function drawInstanceFlatBackground(
   ctx.strokeRect(viewport.x + 0.5, viewport.y + 0.5, viewport.width - 1, viewport.height - 1);
 }
 
-// Eases the pan towards a follow target. Telemetry arrives once a second, so
-// the glide settles before the next position comes in.
+// Glides the pan towards a follow target: each frame closes part of the gap
+// (INSTANCE_FOLLOW_EASE_MS takes it most of the way), and a new target only
+// moves the destination, so a unit moving every frame is tracked smoothly.
 function followInstancePan(targetX: number, targetY: number): void {
   const { panX, panY, zoom } = getInstanceViewTransform();
-  const target = instanceFollowAnimation;
   if (Math.abs(targetX - panX) + Math.abs(targetY - panY) <= 0.5) return;
-  if (target && Math.abs(target.toX - targetX) + Math.abs(target.toY - targetY) <= 0.5) return;
   if (prefersReducedMotion()) {
     instanceFollowAnimation = null;
     setInstanceViewTransform({ zoom, panX: targetX, panY: targetY });
@@ -7924,7 +7940,7 @@ function followInstancePan(targetX: number, targetY: number): void {
     return;
   }
   const running = Boolean(instanceFollowAnimation);
-  instanceFollowAnimation = { fromX: panX, fromY: panY, toX: targetX, toY: targetY, startedAt: performance.now() };
+  instanceFollowAnimation = { toX: targetX, toY: targetY, lastAt: instanceFollowAnimation?.lastAt ?? performance.now() };
   if (!running) requestAnimationFrame(stepInstanceFollow);
 }
 
@@ -7934,16 +7950,19 @@ function stepInstanceFollow(now: number): void {
     instanceFollowAnimation = null;
     return;
   }
-  const progress = Math.min(1, (now - animation.startedAt) / INSTANCE_FOLLOW_EASE_MS);
-  const eased = 1 - (1 - progress) ** 3;
-  setInstanceViewTransform({
-    zoom: getInstanceViewTransform().zoom,
-    panX: animation.fromX + (animation.toX - animation.fromX) * eased,
-    panY: animation.fromY + (animation.toY - animation.fromY) * eased,
-  });
+  // The frame's timestamp can come before the last step's.
+  const elapsed = Math.max(0, now - animation.lastAt);
+  animation.lastAt = Math.max(animation.lastAt, now);
+  // About 95% of the way in INSTANCE_FOLLOW_EASE_MS.
+  const share = 1 - Math.exp((-3 * elapsed) / INSTANCE_FOLLOW_EASE_MS);
+  const { panX, panY, zoom } = getInstanceViewTransform();
+  const nextX = panX + (animation.toX - panX) * share;
+  const nextY = panY + (animation.toY - panY) * share;
+  const arrived = Math.abs(animation.toX - nextX) + Math.abs(animation.toY - nextY) <= 0.5;
+  setInstanceViewTransform({ zoom, panX: arrived ? animation.toX : nextX, panY: arrived ? animation.toY : nextY });
   renderInstanceCanvas(true);
-  if (progress < 1) requestAnimationFrame(stepInstanceFollow);
-  else instanceFollowAnimation = null;
+  if (arrived) instanceFollowAnimation = null;
+  else requestAnimationFrame(stepInstanceFollow);
 }
 
 function prefersReducedMotion(): boolean {

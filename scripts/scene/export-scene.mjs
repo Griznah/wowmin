@@ -88,19 +88,41 @@ async function writeCompressed(document) {
     .writeBinary(document);
 }
 
-// The box the buildings in the play area (`area`, a list of boxes; empty
-// for all of them) take up: players don't get beyond the outermost
-// buildings, above the tallest roof, or below the lowest foundation, so the
-// viewer leaves out what lies beyond (the mountains around a battleground and
-// the flat ground past them). Null without buildings.
-export function buildingReach(groups, area) {
+// The box players can reach: the buildings in the play area (`area`, a list
+// of boxes; empty for all of them), the map's graveyards and start points
+// (`points`, [x, y, z]), and any building within SAFE_POINT_REACH yards of
+// one (a battleground's start platforms, outside its world map). Players
+// don't get beyond the outermost buildings, above the tallest roof, or below
+// the lowest foundation, so the viewer leaves out what lies beyond (the
+// mountains around a battleground and the flat ground past them). Null when
+// there is nothing to go by.
+const SAFE_POINT_REACH = 100;
+
+export function buildingReach(groups, area, points = []) {
   const inArea = (group) => !area.length || area.some((box) =>
     group.minX <= box.maxX && group.maxX >= box.minX && group.minY <= box.maxY && group.maxY >= box.minY);
-  const kept = groups.filter(inArea);
-  if (!kept.length) return null;
-  const low = (key) => Math.min(...kept.map((group) => group[key]));
-  const high = (key) => Math.max(...kept.map((group) => group[key]));
+  const nearPoint = (group) => points.some(([x, y]) => Math.hypot(
+    Math.max(group.minX - x, 0, x - group.maxX), Math.max(group.minY - y, 0, y - group.maxY)) <= SAFE_POINT_REACH);
+  const boxes = [
+    ...groups.filter((group) => inArea(group) || nearPoint(group)),
+    ...points.map(([x, y, z]) => ({ minX: x, maxX: x, minY: y, maxY: y, minZ: z, maxZ: z })),
+  ];
+  if (!boxes.length) return null;
+  const low = (key) => Math.min(...boxes.map((box) => box[key]));
+  const high = (key) => Math.max(...boxes.map((box) => box[key]));
   return { minX: low('minX'), maxX: high('maxX'), minY: low('minY'), maxY: high('maxY'), minZ: low('minZ'), maxZ: high('maxZ') };
+}
+
+// The map's graveyards and start points (WorldSafeLocs.dbc: map, x, y, z),
+// places players are sure to reach.
+export function safePoints(readFile, mapId) {
+  const buffer = readFile('DBFilesClient\\WorldSafeLocs.dbc');
+  if (!buffer) return [];
+  const points = [];
+  for (const record of readDbc(buffer).records()) {
+    if (record.uint(1) === mapId) points.push([record.float(2), record.float(3), record.float(4)]);
+  }
+  return points;
 }
 
 // A floor's height range is the union of its WMO groups' ranges. Groups shared
@@ -532,7 +554,7 @@ export async function exportMapScene({
       bounds,
       groups: groups.map(({ wmoGroupId, exterior, minZ, maxZ }) => ({ wmoGroupId, exterior, minZ, maxZ })),
       floors: computeFloorHeights(floors, groups),
-      buildingReach: buildingReach(groups, area),
+      buildingReach: buildingReach(groups, area, safePoints(readFile, mapId)),
       ...(terrain.tiles ? { terrain: { tiles: terrain.tiles, chunks: terrain.chunks, bounds: terrain.bounds } } : {}),
     },
     stats: {

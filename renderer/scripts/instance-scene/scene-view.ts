@@ -17,10 +17,12 @@ import {
   NormalBlending,
   Object3D,
   OrthographicCamera,
+  Raycaster,
   Scene,
   Sphere,
   SRGBColorSpace,
   type Texture,
+  Vector2,
   Vector3,
   WebGLRenderer,
   type WebGLProgramParametersWithUniforms,
@@ -28,7 +30,7 @@ import {
 import { type GLTF, GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 
-import { type FadeSettings, type FadeVolume, type IsoView, MAX_FADE_VOLUMES } from '../utils/map-projection';
+import { type FadeSettings, type FadeVolume, getSceneFade, type IsoView, MAX_FADE_VOLUMES } from '../utils/map-projection';
 import type { CombatEffectStore, Point3, UnitKey } from '../utils/spell-events';
 import { applyIsoCamera } from './iso-camera';
 import { SpellEffectLayer, type UnitAnchorRole } from './spell-effects';
@@ -193,6 +195,9 @@ export class InstanceSceneView {
   private readonly liquids = new Map<string, Array<{ material: MeshBasicMaterial; frames: Texture[] }>>();
   // What the canvas currently shows, to skip redrawing an unchanged frame.
   private lastFrameKey = '';
+  // The fade the last frame drew with, for picking only what can be seen.
+  private lastFade: { volumes: FadeVolume[]; fade: FadeSettings } | null = null;
+  private readonly raycaster = new Raycaster();
 
   constructor(private readonly canvas: HTMLCanvasElement, private readonly onChange: () => void) {
     this.renderer = new WebGLRenderer({ canvas, antialias: true });
@@ -374,6 +379,7 @@ export class InstanceSceneView {
       }
     }
     this.lastFrameKey = frameKey;
+    this.lastFade = { volumes: active, fade };
     if (this.shown !== root) {
       if (this.shown) this.scene.remove(this.shown);
       this.scene.add(root);
@@ -407,6 +413,31 @@ export class InstanceSceneView {
     this.canvas.dataset.drawCalls = String(this.renderer.info.render.calls);
     this.canvas.dataset.triangles = String(this.renderer.info.render.triangles);
     return true;
+  }
+
+  // The scene point (server coordinates) seen at canvas pixel (x, y) in
+  // `view`: the nearest surface that is drawn there, skipping geometry the
+  // fade or the reach cut leaves out. Null over empty space.
+  pick(view: IsoView, width: number, height: number, x: number, y: number): Point3 | null {
+    const root = this.shown;
+    if (!root || !this.lastFade) return null;
+    const { volumes, fade } = this.lastFade;
+    applyIsoCamera(this.camera, view, width, height);
+    this.camera.updateMatrixWorld();
+    this.raycaster.setFromCamera(new Vector2((x / width) * 2 - 1, 1 - (y / height) * 2), this.camera);
+    const reach = fade.reach;
+    for (const hit of this.raycaster.intersectObject(root, true)) {
+      let shown = true;
+      for (let object: Object3D | null = hit.object; object; object = object.parent) shown &&= object.visible;
+      if (!shown) continue;
+      // Three.js is Y-up: server (x, y, z) is (x, -z, y) here.
+      const point: Point3 = [hit.point.x, -hit.point.z, hit.point.y];
+      if (reach && (point[0] < reach.minX || point[0] > reach.maxX || point[1] < reach.minY || point[1] > reach.maxY
+        || point[2] < reach.minZ || point[2] > reach.maxZ)) continue;
+      if (getSceneFade(point, volumes, fade) < 0.5) continue;
+      return point;
+    }
+    return null;
   }
 
   // One function for every material, so three.js shares the compiled program.
