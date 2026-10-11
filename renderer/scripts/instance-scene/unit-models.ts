@@ -68,7 +68,7 @@ export interface UnitModelPose {
 }
 
 // Effect points the converter exports on the skeleton.
-export type UnitPointRole = 'handRight' | 'handLeft' | 'chest' | 'head' | 'overhead';
+export type UnitPointRole = 'handRight' | 'handLeft' | 'chest' | 'head' | 'breath' | 'overhead';
 
 // The ring on the floor under a model, with a pointer the way it faces.
 export interface UnitMarkerStyle {

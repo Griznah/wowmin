@@ -211,7 +211,7 @@ export class InstanceSceneView {
     const point = this.units.pointOf(unit, role);
     if (point) return point;
     const height = this.units.heightOf(unit) ?? DEFAULT_UNIT_HEIGHT;
-    const up = role === 'overhead' ? height + 0.3 : role === 'head' ? height * HEAD_HEIGHT : height * CHEST_HEIGHT;
+    const up = role === 'overhead' ? height + 0.3 : role === 'head' || role === 'breath' ? height * HEAD_HEIGHT : height * CHEST_HEIGHT;
     return [feet[0], feet[1], feet[2] + up];
   }
 

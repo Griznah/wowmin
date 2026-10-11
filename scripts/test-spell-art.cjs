@@ -194,6 +194,16 @@ test('spawns particles on planes and spheres, and counts emission', () => {
     horizontalRange: 0, speed: 2, speedVariation: 0, zSource: 0 }, fixed(0, 1, 0, 1));
   near(Math.hypot(...sphere.position), 3, 'radius');
   near(sphere.velocity[0] / 2, sphere.position[0] / 3, 'outward');
+  // A narrow sphere emitter points forward (+X), like a breath; its
+  // horizontal range fans it out sideways, its vertical range up and down.
+  const breath = (vertical, horizontal) => tracks.spawnParticle({ emitterType: 2, areaLength: 0, areaWidth: 0,
+    verticalRange: 0.1, horizontalRange: 1, speed: 10, speedVariation: 0, zSource: 0 }, fixed(0, vertical, horizontal, 0));
+  const ahead = breath(0, 0);
+  near(ahead.velocity[0], 10, 'straight ahead');
+  near(ahead.velocity[2], 0, 'level');
+  const fanned = breath(0, 1);
+  near(Math.atan2(fanned.velocity[1], fanned.velocity[0]), 1, 'fanned sideways');
+  near(Math.asin(breath(1, 0).velocity[2] / 10), 0.1, 'tilted up');
   // zSource: away from a point below.
   const source = tracks.spawnParticle({ emitterType: 1, areaLength: 0, areaWidth: 0, verticalRange: 0, horizontalRange: 0,
     speed: 5, speedVariation: 0, zSource: 2 }, fixed(0));
@@ -219,7 +229,7 @@ test('picks the kit a cast plays, its body slots, and the animations it names', 
   assert.equal(kits.slotAnchor('leftHand'), 'handLeft');
   assert.equal(kits.slotAnchor('rightWeapon'), 'handRight');
   assert.equal(kits.slotAnchor('base'), 'feet');
-  assert.equal(kits.slotAnchor('breath'), 'head');
+  assert.equal(kits.slotAnchor('breath'), 'breath');
   assert.equal(kits.slotAnchor('special2'), 'chest');
   assert.equal(kits.kitAnimationName(125), 'ChannelCastOmni');
   assert.equal(kits.kitAnimationName(9), 'CombatWound');

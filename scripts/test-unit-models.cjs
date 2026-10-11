@@ -175,8 +175,12 @@ test('picks effect points from the attachment table, preferring spell hands', as
     { role: 'handLeft', bone: 11, position: [2, 0, 0] },
     { role: 'chest', bone: 13, position: [15, 0, 0] },
     { role: 'head', bone: 14, position: [11, 0, 0] },
+    // No mouth point: breath falls back to the helm.
+    { role: 'breath', bone: 14, position: [11, 0, 0] },
     { role: 'overhead', bone: 14, position: [11, 0, 0] },
   ]);
+  assert.deepEqual(effectPoints([point(17, 86), point(20, 56)]).filter((entry) => entry.role === 'breath'),
+    [{ role: 'breath', bone: 86, position: [17, 0, 0] }]);
   // Spiders and the like have no attachment points at all.
   assert.deepEqual(effectPoints([]), []);
 });

@@ -26,6 +26,7 @@
     <label>Area yd <input name="area" type="number" value="0" step="any" title="The spell's radius, for an area spell"></label>
     <label>Lasting ms <input name="lasting" type="number" value="0" title="How long a lasting area stays, such as Consecration's"></label>
     <label><input name="ground" type="checkbox"> On the target's ground</label>
+    <label>Caster display <input name="caster" type="number" value="0" title="A creature display ID to cast with instead of the gnome, such as 22657 for a proto-drake"></label>
     <label><input name="heal" type="checkbox"> Heal (target an ally)</label>
     <label>Speed <input name="rate" type="number" value="1" step="0.05" min="0.05"></label>
     <label><input name="glows" type="checkbox" checked> Level 1 glows</label>
@@ -41,6 +42,7 @@
     <button type="button" data-preset='{"spell":2120,"cast":2000,"area":8,"lasting":8000,"ground":true}'>Flamestrike</button>
     <button type="button" data-preset='{"spell":43265,"area":10,"lasting":10000,"ground":true}'>Death and Decay</button>
     <button type="button" data-preset='{"spell":1449,"area":10}'>Arcane Explosion</button>
+    <button type="button" data-preset='{"spell":50653,"cast":2000,"caster":22657}'>Proto-Drake Flame Breath</button>
     <span id="preview-status"></span>
   </form>
   <canvas id="preview-canvas"></canvas>

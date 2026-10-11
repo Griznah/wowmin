@@ -20,8 +20,11 @@ const TEXTURE_TYPE_MONSTER_1 = 11;
 const IDENTITY_ROTATION = [0, 0, 0, 1];
 // Points spell effects are drawn at, by M2 attachment ID; the first one the
 // model has wins. 22/21 are the spell hands, 1/2 the hands, 15 the chest, 11
-// the helm (20 the head), and 18 the name point above the head.
-const EFFECT_POINTS = { handRight: [22, 1], handLeft: [21, 2], chest: [15], head: [11, 20], overhead: [18, 11] };
+// the helm (20 the head), 17 the mouth (breath), and 18 the name point above
+// the head.
+const EFFECT_POINTS = {
+  handRight: [22, 1], handLeft: [21, 2], chest: [15], head: [11, 20], breath: [17, 11, 20], overhead: [18, 11],
+};
 
 // The effect points a skeleton has, from its attachment table.
 export function effectPoints(skeletonAttachments) {

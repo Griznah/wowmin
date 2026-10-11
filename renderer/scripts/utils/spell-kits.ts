@@ -5,7 +5,7 @@ import type { CastGlow } from './spell-events';
 // can be tested without three.js.
 
 // Where on a unit an effect sits (as SpellEffectLayer's anchors).
-export type UnitAnchorRole = 'handRight' | 'handLeft' | 'chest' | 'head' | 'overhead' | 'feet';
+export type UnitAnchorRole = 'handRight' | 'handLeft' | 'chest' | 'head' | 'breath' | 'overhead' | 'feet';
 
 // A spell's art as served by /assets/models/visual/<spellId>.json
 // (scripts/scene/spell-visuals.mjs).
@@ -47,7 +47,8 @@ export function kitAnimationName(anim: number | undefined): string | null {
 // Kit body slots onto the points units have.
 export function slotAnchor(slot: string): UnitAnchorRole {
   switch (slot) {
-    case 'head': case 'breath': return 'head';
+    case 'head': return 'head';
+    case 'breath': return 'breath';
     case 'base': case 'world': return 'feet';
     case 'leftHand': case 'leftWeapon': return 'handLeft';
     case 'rightHand': case 'rightWeapon': return 'handRight';

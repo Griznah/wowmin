@@ -25,7 +25,12 @@ import { CombatEffectStore, type Point3, type UnitKey } from './utils/spell-even
 const CASTER: UnitKey = 'p1';
 const TARGET: UnitKey = 'c2';
 const ALLY: UnitKey = 'p3';
-const CASTER_URL = 'assets/models/character/7-0-0-0-1-1-1-0-0.0.0.1867.0.0.0.0.0.0.472.0.0.0.glb';
+const GNOME_URL = 'assets/models/character/7-0-0-0-1-1-1-0-0.0.0.1867.0.0.0.0.0.0.472.0.0.0.glb';
+// The caster: the gnome mage, or a creature display (form or query `caster`).
+const casterUrl = (): string => {
+  const display = Number(field('caster').value) || 0;
+  return display > 0 ? `assets/models/creature/${display}.glb` : GNOME_URL;
+};
 const TARGET_URL = 'assets/models/creature/23561.glb';
 const ALLY_URL = 'assets/models/character/1-0-2-1-3-2-2-0-1128.1060.0.9674.51619.1184.3415.0.2952.13963.2806.32558.0.0.glb';
 const MIN_LOOP_MS = 5000;
@@ -37,7 +42,7 @@ const facing = new Map<UnitKey, number>([[CASTER, 0], [TARGET, Math.PI], [ALLY, 
 const form = document.getElementById('preview-form') as HTMLFormElement;
 const field = (name: string) => form.elements.namedItem(name) as HTMLInputElement;
 const params = new URLSearchParams(window.location.search);
-for (const name of ['spell', 'speed', 'cast', 'channel', 'bolt', 'area', 'lasting', 'rate']) {
+for (const name of ['spell', 'speed', 'cast', 'channel', 'bolt', 'area', 'lasting', 'caster', 'rate']) {
   const value = params.get(name);
   if (value !== null) field(name).value = value;
 }
@@ -76,7 +81,7 @@ const anchor = (unit: UnitKey, role: UnitAnchorRole): Point3 | null => {
   const point = units.pointOf(unit, role);
   if (point) return point;
   const height = units.heightOf(unit) ?? DEFAULT_HEIGHT;
-  return [feet[0], feet[1], feet[2] + height * (role === 'overhead' ? 1.1 : role === 'head' ? 0.9 : 0.6)];
+  return [feet[0], feet[1], feet[2] + height * (role === 'overhead' ? 1.1 : role === 'head' || role === 'breath' ? 0.9 : 0.6)];
 };
 
 function pose(id: UnitKey, url: string): UnitModelPose {
@@ -184,7 +189,7 @@ function frame(): void {
   const strikes = new Map(cues.map((cue) => [cue.unit, cue.kind] as const));
   const animations = visuals.takeAnimations();
   units.update([CASTER, TARGET, ALLY].map((id) => ({
-    ...pose(id, id === CASTER ? CASTER_URL : id === TARGET ? TARGET_URL : ALLY_URL),
+    ...pose(id, id === CASTER ? casterUrl() : id === TARGET ? TARGET_URL : ALLY_URL),
     strike: strikes.get(id) ?? null,
     kitLoop: animations.get(id)?.loop ?? null,
     kitOnce: animations.get(id)?.once ?? null,
@@ -210,7 +215,7 @@ form.addEventListener('submit', (submitted) => {
 document.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((button) => {
   button.addEventListener('click', () => {
     const preset = JSON.parse(button.dataset.preset!) as Record<string, number | boolean>;
-    for (const name of ['spell', 'speed', 'cast', 'channel', 'bolt', 'area', 'lasting']) field(name).value = String(preset[name] ?? 0);
+    for (const name of ['spell', 'speed', 'cast', 'channel', 'bolt', 'area', 'lasting', 'caster']) field(name).value = String(preset[name] ?? 0);
     field('heal').checked = Boolean(preset.heal);
     field('ground').checked = Boolean(preset.ground);
     form.requestSubmit();

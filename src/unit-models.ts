@@ -13,7 +13,8 @@ const BUILD_TIMEOUT_MS = 60000;
 // 2: spell effect points (hands, chest, overhead).
 // 3: a head point; spell effect models and spell art lookups.
 // 4: animations spell kits name (channelling, hit reactions, other casts).
-export const UNIT_MODEL_CACHE_VERSION = 4;
+// 5: a breath point (the mouth), for breath effects.
+export const UNIT_MODEL_CACHE_VERSION = 5;
 // Spell art (effect models and spell lookups) changes more often than unit
 // models, so it has its own version and folder, art-v<version>/, and can be
 // rebuilt without rebuilding every unit.

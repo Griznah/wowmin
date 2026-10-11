@@ -102,13 +102,19 @@ export interface SpawnParams {
 // emitter (Z up). `random` returns numbers in [-1, 1).
 export function spawnParticle(params: SpawnParams, random: Random = signedRandom): { position: Vec3; velocity: Vec3 } {
   const speed = params.speed * (1 + random() * params.speedVariation);
-  // Polar angle from straight up, and azimuth round it.
-  const polar = random() * params.verticalRange;
-  const azimuth = random() * params.horizontalRange;
-  const direction: Vec3 = [Math.sin(polar) * Math.cos(azimuth), Math.sin(polar) * Math.sin(azimuth), Math.cos(polar)];
+  const vertical = random() * params.verticalRange;
+  const horizontal = random() * params.horizontalRange;
+  // Plane emitters: the polar angle from straight up, and the azimuth round
+  // it. Sphere emitters: the elevation above or below the horizontal, and
+  // the azimuth from straight ahead (+X), so narrow ranges make a cone or
+  // fan pointing forward, as a dragon's breath does (wowdev.wiki).
+  const sphere = params.emitterType === 2;
+  const direction: Vec3 = sphere
+    ? [Math.cos(vertical) * Math.cos(horizontal), Math.cos(vertical) * Math.sin(horizontal), Math.sin(vertical)]
+    : [Math.sin(vertical) * Math.cos(horizontal), Math.sin(vertical) * Math.sin(horizontal), Math.cos(vertical)];
   let position: Vec3;
   let velocity: Vec3;
-  if (params.emitterType === 2) {
+  if (sphere) {
     // Sphere: a shell between the two radii, flying outward.
     const radius = params.areaLength + ((random() + 1) / 2) * (params.areaWidth - params.areaLength);
     position = [direction[0] * radius, direction[1] * radius, direction[2] * radius];
