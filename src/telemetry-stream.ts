@@ -2,7 +2,7 @@ import * as dgram from 'dgram';
 
 import type {
   StreamAppearance, StreamAppearanceUpdate, StreamAuraCategory, StreamBotDecision, StreamCombatEvent, StreamCombatEventKind,
-  StreamCombatEventUpdate, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame, StreamListeners,
+  StreamCombatEventUpdate, StreamUnitAuras, StreamUnitAuraUpdate, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame, StreamListeners,
   StreamPath, StreamPathUpdate, StreamPlayerSample, StreamStatus,
 } from './types/electron';
 
@@ -27,6 +27,7 @@ const CREATURE_MAGIC = 'WMC1';
 const BOT_MAGIC = 'WMB1';
 const APPEARANCE_MAGIC = 'WMA1';
 const COMBAT_MAGIC = 'WME1';
+const UNIT_AURA_MAGIC = 'WMU1';
 const VERSION = 1;
 const HEADER_SIZE = 28;
 const PLAYER_SIZE = 30;
@@ -309,6 +310,23 @@ export function parseCombatEventDatagram(buffer: Buffer): StreamCombatEventUpdat
   };
 }
 
+export function parseUnitAuraDatagram(buffer: Buffer): StreamUnitAuraUpdate | null {
+  const header = readEntryHeader(buffer, UNIT_AURA_MAGIC);
+  if (!header) return null;
+  const units: StreamUnitAuras[] = [];
+  let offset = PATH_HEADER_SIZE;
+  for (let index = 0; index < header.count; index += 1) {
+    if (offset + 8 > buffer.length) return null;
+    const count = buffer.readUInt8(offset + 5);
+    if (offset + 8 + count * 4 > buffer.length) return null;
+    const spellIds: number[] = [];
+    for (let aura = 0; aura < count; aura += 1) spellIds.push(buffer.readUInt32LE(offset + 8 + aura * 4));
+    units.push({ guid: buffer.readUInt32LE(offset), creature: Boolean(buffer.readUInt8(offset + 4) & 1), spellIds });
+    offset += 8 + count * 4;
+  }
+  return { mapId: header.mapId, instanceId: header.instanceId, serverTimeMs: header.serverTimeMs, units };
+}
+
 type CommandRunner = (command: string) => Promise<{ success: boolean; message: string }>;
 
 interface WatchedSession {
@@ -425,6 +443,10 @@ export class TelemetryStream {
       this.receiveCombatEvents(message);
       return;
     }
+    if (magic === UNIT_AURA_MAGIC) {
+      this.receiveUnitAuras(message);
+      return;
+    }
     const datagram = parseStreamDatagram(message);
     if (!datagram) return;
     const session = this.sessions.get(`${datagram.mapId}:${datagram.instanceId}`);
@@ -515,6 +537,14 @@ export class TelemetryStream {
     const session = this.sessions.get(`${update.mapId}:${update.instanceId}`);
     if (!session) return;
     for (const listener of session.listeners) listener.onCombatEvents?.(update);
+  }
+
+  private receiveUnitAuras(message: Buffer): void {
+    const update = parseUnitAuraDatagram(message);
+    if (!update?.units.length) return;
+    const session = this.sessions.get(`${update.mapId}:${update.instanceId}`);
+    if (!session) return;
+    for (const listener of session.listeners) listener.onUnitAuras?.(update);
   }
 
   private setStatus(session: WatchedSession, status: StreamStatus): void {

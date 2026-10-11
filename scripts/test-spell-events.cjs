@@ -217,6 +217,8 @@ test('tints units by their strongest notable aura until it is removed or runs ou
   store.advance(LIVE_RENDER_DELAY_MS, tenYards);
   assert.equal(store.tint('c900'), auraTintColor('crowdControl'));
   assert.deepEqual(plain([...store.tints()]), [['c900', auraTintColor('crowdControl')]]);
+  // An aura the client's art shows gets no tint; the next strongest does.
+  assert.equal(store.tint('c900', (spellId) => spellId === 118), auraTintColor('offensive'));
   store.push(update([event({ kind: 'auraRemove', spellId: 118 })]), 1000);
   store.advance(1000 + LIVE_RENDER_DELAY_MS, tenYards);
   assert.equal(store.tint('c900'), auraTintColor('offensive'));

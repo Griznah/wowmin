@@ -19,10 +19,11 @@ function loadModule(relativePath) {
 }
 
 const {
-  parseBotDatagram, parseCombatEventDatagram, parseCreatureDatagram, parsePathDatagram, parseStreamDatagram,
+  parseBotDatagram, parseCombatEventDatagram, parseCreatureDatagram, parsePathDatagram, parseStreamDatagram, parseUnitAuraDatagram,
 } = loadModule('../src/telemetry-stream.ts');
 const {
-  LIVE_BOT_STALE_MS, LIVE_CREATURE_STALE_MS, LIVE_PATH_STALE_MS, LIVE_RENDER_DELAY_MS, LiveBotStore, LiveCreatureBuffer,
+  LIVE_AURA_STALE_MS, LIVE_BOT_STALE_MS, LIVE_CREATURE_STALE_MS, LIVE_PATH_STALE_MS, LIVE_RENDER_DELAY_MS, LiveAuraStore, LiveBotStore,
+  LiveCreatureBuffer,
   LivePathStore, LivePositionBuffer,
   creaturePathKey, lerpAngle, trimPathToPosition,
 } = loadModule('../renderer/scripts/utils/live-positions.ts');
@@ -312,6 +313,48 @@ test('parses combat events, their flags, and the dropped count', () => {
   const good = combatDatagram({ events: [{ kind: 6 }] });
   assert.equal(parseCombatEventDatagram(good.subarray(0, good.length - 1)), null);
   assert.equal(parseCreatureDatagram(good), null);
+});
+
+// Builds a datagram as BuildUnitAuraDatagrams in WowMinTelemetry.cpp does.
+function unitAuraDatagram(units) {
+  const header = Buffer.alloc(24);
+  header.write('WMU1', 0, 'latin1');
+  header.writeUInt8(1, 4);
+  header.writeUInt32LE(601, 8);
+  header.writeUInt32LE(7, 12);
+  header.writeUInt32LE(5000, 16);
+  header.writeUInt16LE(units.length, 20);
+  return Buffer.concat([header, ...units.map((unit) => {
+    const entry = Buffer.alloc(8 + unit.spellIds.length * 4);
+    entry.writeUInt32LE(unit.guid, 0);
+    entry.writeUInt8(unit.creature ? 1 : 0, 4);
+    entry.writeUInt8(unit.spellIds.length, 5);
+    unit.spellIds.forEach((spellId, index) => entry.writeUInt32LE(spellId, 8 + index * 4));
+    return entry;
+  })]);
+}
+
+test('parses unit aura lists and keeps each unit\'s latest until it goes stale or empties', () => {
+  const parsed = parseUnitAuraDatagram(unitAuraDatagram([
+    { guid: 1, creature: false, spellIds: [48066, 48068] },
+    { guid: 900, creature: true, spellIds: [] },
+  ]));
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.units)), [
+    { guid: 1, creature: false, spellIds: [48066, 48068] },
+    { guid: 900, creature: true, spellIds: [] },
+  ]);
+  const good = unitAuraDatagram([{ guid: 1, creature: false, spellIds: [17] }]);
+  assert.equal(parseUnitAuraDatagram(good.subarray(0, good.length - 1)), null);
+  assert.equal(parseCreatureDatagram(good), null);
+
+  const store = new LiveAuraStore();
+  store.push(parsed, 1000);
+  store.push({ units: [{ guid: 900, creature: true, spellIds: [853] }] }, 1000);
+  assert.deepEqual(JSON.parse(JSON.stringify([...store.all(1000)])), [['p1', [48066, 48068]], ['c900', [853]]]);
+  // An empty list clears the unit; silence past the stale time drops it.
+  store.push({ units: [{ guid: 900, creature: true, spellIds: [] }] }, 2000);
+  assert.deepEqual([...store.all(2000).keys()], ['p1']);
+  assert.equal(store.all(1000 + LIVE_AURA_STALE_MS + 1).size, 0);
 });
 
 test('interpolates creatures and drops ones that stop being sent', () => {

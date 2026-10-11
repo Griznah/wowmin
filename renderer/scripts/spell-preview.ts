@@ -20,7 +20,8 @@ import { CombatEffectStore, type Point3, type UnitKey } from './utils/spell-even
 // client's. Query or form: spell, speed (missile yards/s), cast (ms), channel
 // (ms; a channelled spell instead of a missile), bolt (a spell the channel
 // fires each second, flying at `speed`), area (radius), lasting (ms, a
-// lasting area), ground (the area on the target's ground), heal.
+// lasting area), ground (the area on the target's ground), aura (ms the
+// spell's aura stays on the target), caster (a creature display), heal.
 
 const CASTER: UnitKey = 'p1';
 const TARGET: UnitKey = 'c2';
@@ -42,7 +43,7 @@ const facing = new Map<UnitKey, number>([[CASTER, 0], [TARGET, Math.PI], [ALLY, 
 const form = document.getElementById('preview-form') as HTMLFormElement;
 const field = (name: string) => form.elements.namedItem(name) as HTMLInputElement;
 const params = new URLSearchParams(window.location.search);
-for (const name of ['spell', 'speed', 'cast', 'channel', 'bolt', 'area', 'lasting', 'caster', 'rate']) {
+for (const name of ['spell', 'speed', 'cast', 'channel', 'bolt', 'area', 'lasting', 'aura', 'caster', 'rate']) {
   const value = params.get(name);
   if (value !== null) field(name).value = value;
 }
@@ -116,7 +117,8 @@ function scheduleLoop(at: number): number {
   const radius = Math.max(0, Number(field('area').value) || 0);
   const lastingMs = Math.max(0, Number(field('lasting').value) || 0);
   const ground = field('ground').checked;
-  const length = Math.max(MIN_LOOP_MS, castMs + Math.max(channelMs, lastingMs) + 3000);
+  const auraMs = Math.max(0, Number(field('aura').value) || 0);
+  const length = Math.max(MIN_LOOP_MS, castMs + Math.max(channelMs, lastingMs, auraMs) + 3000);
   const heal = field('heal').checked;
   const target = heal ? { targetGuid: 3, targetCreature: false } : { targetGuid: 2, targetCreature: true };
   const [from, to] = [positions.get(CASTER)!, positions.get(heal ? ALLY : TARGET)!];
@@ -154,7 +156,25 @@ function scheduleLoop(at: number): number {
   }
   push(at + castMs, { kind: 'castGo', missileSpeed: speed, helpful: heal });
   push(at + castMs + travel, { kind: heal ? 'heal' : 'damage', value: 1234, helpful: heal });
+  if (auraMs > 0) {
+    auraWindows.push({ unit: heal ? ALLY : TARGET, spellId, from: at + castMs + travel, to: at + castMs + travel + auraMs });
+  }
   return length;
+}
+
+// Auras the loop has put on units, as the module's aura lists would say.
+const auraWindows: Array<{ unit: UnitKey; spellId: number; from: number; to: number }> = [];
+function currentAuras(now: number): Map<UnitKey, number[]> {
+  const auras = new Map<UnitKey, number[]>();
+  for (let index = auraWindows.length - 1; index >= 0; index -= 1) {
+    const window = auraWindows[index];
+    if (window.to <= now) {
+      auraWindows.splice(index, 1);
+      continue;
+    }
+    if (window.from <= now) auras.set(window.unit, [...(auras.get(window.unit) ?? []), window.spellId]);
+  }
+  return auras;
 }
 
 const timers: Array<{ at: number; run: () => void }> = [];
@@ -198,7 +218,7 @@ function frame(): void {
     anchor,
     scale: (unit) => units.scaleOf(unit) ?? 1,
     facing: (unit) => facing.get(unit) ?? 0,
-  }, camera);
+  }, camera, currentAuras(virtualNow));
   glows.update(field('glows').checked ? store : null, virtualNow, anchor, (entry) => visuals.handles(entry));
   renderer.render(scene, camera);
   const status = document.getElementById('preview-status');
@@ -210,12 +230,13 @@ form.addEventListener('submit', (submitted) => {
   submitted.preventDefault();
   store.clear();
   timers.length = 0;
+  auraWindows.length = 0;
   nextLoopAt = virtualNow;
 });
 document.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((button) => {
   button.addEventListener('click', () => {
     const preset = JSON.parse(button.dataset.preset!) as Record<string, number | boolean>;
-    for (const name of ['spell', 'speed', 'cast', 'channel', 'bolt', 'area', 'lasting', 'caster']) field(name).value = String(preset[name] ?? 0);
+    for (const name of ['spell', 'speed', 'cast', 'channel', 'bolt', 'area', 'lasting', 'aura', 'caster']) field(name).value = String(preset[name] ?? 0);
     field('heal').checked = Boolean(preset.heal);
     field('ground').checked = Boolean(preset.ground);
     form.requestSubmit();

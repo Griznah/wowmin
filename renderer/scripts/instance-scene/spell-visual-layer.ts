@@ -56,6 +56,9 @@ export class SpellVisualLayer {
     rain: { template: EffectTemplate; scale: number; rate: number; carry: number; center: Point3; yaw: number } | null;
   }>();
   private lastUpdateAt = 0;
+  // Aura art on units, by unit and state kit: its effects, and the pose it
+  // names (an aura's pose wins over a cast's: a stunned unit isn't casting).
+  private readonly states = new Map<string, { unit: UnitKey; kit: VisualKit; effects: PlayingEffect[] }>();
   private readonly onceAnimations = new Map<UnitKey, string>();
   private particleCount = 0;
 
@@ -85,6 +88,13 @@ export class SpellVisualLayer {
     return typeof visual === 'object' && visual !== null;
   }
 
+  // Whether an aura's spell shows client art on the unit, so its level 1
+  // tint should give way. False while its art is loading.
+  hasAuraArt(spellId: number): boolean {
+    const visual = this.visuals.get(spellId);
+    return typeof visual === 'object' && visual !== null && Boolean(visual.kits.state?.effects.length);
+  }
+
   // The animations kits ask of each unit now; one-offs are handed out once.
   takeAnimations(): Map<UnitKey, KitAnimation> {
     const animations = new Map<UnitKey, KitAnimation>();
@@ -93,6 +103,10 @@ export class SpellVisualLayer {
       const loop = kitAnimationName(kit.anim);
       if (loop) animations.set(cast.caster, { loop, once: null });
     }
+    for (const { unit, kit } of this.states.values()) {
+      const loop = kitAnimationName(kit.anim);
+      if (loop) animations.set(unit, { loop, once: null });
+    }
     for (const [unit, once] of this.onceAnimations) {
       animations.set(unit, { loop: animations.get(unit)?.loop ?? null, once });
     }
@@ -100,7 +114,9 @@ export class SpellVisualLayer {
     return animations;
   }
 
-  update(store: CombatEffectStore | null, now: number, units: UnitInfo, camera: Camera): void {
+  // `auras` lists each unit's art auras (spell IDs), from the live stream.
+  update(store: CombatEffectStore | null, now: number, units: UnitInfo, camera: Camera,
+    auras: ReadonlyMap<UnitKey, readonly number[]> = new Map()): void {
     const castsNow = new Set(store?.casts ?? []);
     const areasNow = new Set(store?.areas ?? []);
     const seconds = this.lastUpdateAt ? Math.min(0.1, Math.max(0, (now - this.lastUpdateAt) / 1000)) : 0;
@@ -111,6 +127,7 @@ export class SpellVisualLayer {
       for (const projectile of store.projectiles) this.startMissile(projectile, now, units);
       for (const impact of store.impacts) this.startImpact(impact, now, units);
     }
+    this.syncStates(store ? auras : new Map(), now, units);
     // Casts the store has ended: held effects stop; release flashes play out.
     for (const [cast, { effects }] of this.casts) {
       if (castsNow.has(cast)) continue;
@@ -240,6 +257,32 @@ export class SpellVisualLayer {
     if (cast.release) {
       const once = kitAnimationName(kit.anim);
       if (once) this.onceAnimations.set(cast.caster, once);
+    }
+  }
+
+  // Plays each shown unit's aura art (its spells' state kits, once per kit),
+  // ending art for auras that have gone with its Death.
+  private syncStates(auras: ReadonlyMap<UnitKey, readonly number[]>, now: number, units: UnitInfo): void {
+    const wanted = new Map<string, { unit: UnitKey; kit: VisualKit }>();
+    for (const [unit, spellIds] of auras) {
+      if (!units.anchor(unit, 'feet')) continue;
+      for (const spellId of spellIds) {
+        const kit = this.visual(spellId)?.kits.state;
+        if (!kit || (!kit.effects.length && kit.anim < 0)) continue;
+        const key = `${unit}|${kit.id}`;
+        if (!wanted.has(key)) wanted.set(key, { unit, kit });
+      }
+    }
+    for (const [key, state] of this.states) {
+      if (wanted.has(key)) continue;
+      for (const effect of state.effects) effect.instance.stop(now);
+      this.states.delete(key);
+    }
+    for (const [key, { unit, kit }] of wanted) {
+      if (this.states.has(key)) continue;
+      const templates = this.kitTemplates(kit);
+      if (!templates) continue;
+      this.states.set(key, { unit, kit, effects: this.playKit(kit, templates, unit, now, true, units) });
     }
   }
 

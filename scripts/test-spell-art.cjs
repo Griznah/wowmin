@@ -164,6 +164,8 @@ test('evaluates tracks by clip time, and loops by elapsed time', () => {
   assert.deepEqual(plain(tracks.evalTrack(track, 2, clock, [7, 7])), [50, 60]);
   assert.deepEqual(plain(tracks.evalTrack({ ...track, s: true }, 2, clock, [7, 7])), [0, 10]);
   assert.deepEqual(plain(tracks.evalTrack(null, 2, clock, [7, 7])), [7, 7]);
+  // A clip without keys takes the default, not Stand's keys.
+  assert.deepEqual(plain(tracks.evalTrack(track, 2, { ...clock, clip: 'Hold' }, [7, 7])), [7, 7]);
   // A loop of 1000 ms, 1250 ms in: 250 ms into its keys.
   const loop = { g: 0, s: false, k: { global: [[0, 1000], [0, 4]] } };
   assert.deepEqual(plain(tracks.evalTrack(loop, 1, clock, [0])), [1]);

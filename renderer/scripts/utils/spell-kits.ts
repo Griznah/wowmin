@@ -16,13 +16,14 @@ export interface VisualEffect {
 }
 
 export interface VisualKit {
+  id: number;
   anim: number;
   effects: VisualEffect[];
   // Procedures the client runs for the kit: a code and four parameters.
   procs?: Array<{ code: number; params: number[] }>;
 }
 
-export type KitStage = 'precast' | 'cast' | 'channel' | 'impact' | 'targetImpact' | 'instantArea' | 'impactArea' | 'persistentArea';
+export type KitStage = 'precast' | 'cast' | 'channel' | 'impact' | 'targetImpact' | 'state' | 'instantArea' | 'impactArea' | 'persistentArea';
 
 export interface SpellVisual {
   missile: { id: number; scale: number } | null;

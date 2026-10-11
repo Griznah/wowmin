@@ -20,7 +20,9 @@ export const UNIT_MODEL_CACHE_VERSION = 5;
 // rebuilt without rebuilding every unit.
 // 2: lookups name the model procedure 9 rains (Blizzard, Rain of Fire) and
 // each kit's procedures.
-export const SPELL_ART_CACHE_VERSION = 2;
+// 3: effect clips named for what they are: Stand (start), Hold (idle),
+// Decay (end), not Birth/Death.
+export const SPELL_ART_CACHE_VERSION = 3;
 const SPELL_ART_KINDS = new Set<UnitModelRequest['kind']>(['effect', 'visual']);
 // A look that could not be built is not retried for this long.
 const FAILURE_RETRY_MS = 10 * 60 * 1000;

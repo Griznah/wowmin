@@ -1,6 +1,6 @@
 import type {
   MapPlayerPosition, StreamAppearance, StreamAppearanceUpdate, StreamBotDecision, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame,
-  StreamPath, StreamPathUpdate, StreamPlayerSample,
+  StreamPath, StreamPathUpdate, StreamPlayerSample, StreamUnitAuraUpdate,
 } from '../../../src/types/electron';
 
 // Buffers stream samples per player and interpolates between them, drawing a
@@ -301,6 +301,38 @@ export class LiveAppearanceStore {
       return null;
     }
     return entry.appearance;
+  }
+}
+
+// A unit's art auras are resent every 5 s while it has any; past this
+// without word, they are dropped.
+export const LIVE_AURA_STALE_MS = 12_000;
+
+// The auras with spell art each unit wears, by unit key ('p<guid>' or
+// 'c<guid>'), from the module's unit aura lists.
+export class LiveAuraStore {
+  private readonly auras = new Map<string, { at: number; spellIds: number[] }>();
+
+  push(update: StreamUnitAuraUpdate, receivedAt: number): void {
+    for (const unit of update.units) {
+      const key = `${unit.creature ? 'c' : 'p'}${unit.guid}`;
+      if (unit.spellIds.length) this.auras.set(key, { at: receivedAt, spellIds: unit.spellIds });
+      else this.auras.delete(key);
+    }
+  }
+
+  clear(): void {
+    this.auras.clear();
+  }
+
+  // Every unit's current art auras, dropping stale ones.
+  all(now: number): Map<string, number[]> {
+    const current = new Map<string, number[]>();
+    for (const [key, entry] of this.auras) {
+      if (now - entry.at > LIVE_AURA_STALE_MS) this.auras.delete(key);
+      else current.set(key, entry.spellIds);
+    }
+    return current;
   }
 }
 

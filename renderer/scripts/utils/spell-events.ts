@@ -270,11 +270,12 @@ export class CombatEffectStore {
     return this.arrivals.length / (RATE_WINDOW_MS / 1000);
   }
 
-  // The tint colour for a unit's strongest notable aura, or null.
-  tint(unit: UnitKey): string | null {
+  // The tint colour for a unit's strongest notable aura, or null. Auras
+  // `shownAsArt` says the client's art already shows are left out.
+  tint(unit: UnitKey, shownAsArt: (spellId: number) => boolean = () => false): string | null {
     let best: number | null = null;
     for (const aura of this.auras.values()) {
-      if (aura.target !== unit) continue;
+      if (aura.target !== unit || shownAsArt(aura.spellId)) continue;
       const rank = AURA_TINTS.findIndex(([category]) => category === aura.category);
       if (rank >= 0 && (best === null || rank < best)) best = rank;
     }

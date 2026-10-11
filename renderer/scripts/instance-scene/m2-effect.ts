@@ -373,9 +373,9 @@ export class EffectInstance {
   private readonly actions = new Map<string, AnimationAction>();
   private readonly startAt: number;
   private lastAt: number;
-  // A lasting effect plays Birth, loops Stand, and ends with Death; a
-  // one-off plays Stand once.
-  private phase: 'Birth' | 'Stand' | 'Death' = 'Stand';
+  // Stand is the start; a lasting effect then loops Hold (or Stand, if it
+  // has no Hold) and ends with Decay; a one-off plays Stand once.
+  private phase: 'Stand' | 'Hold' | 'Decay' = 'Stand';
   private phaseAt: number;
   private emitting = true;
   private stopRequested = false;
@@ -402,7 +402,7 @@ export class EffectInstance {
         this.actions.set(clip.name, action);
       }
     }
-    this.enterPhase(loop && this.clips.Birth ? 'Birth' : 'Stand', now);
+    this.enterPhase('Stand', now);
     const joints = new Map<number, Object3D>();
     this.model.traverse((object) => {
       const match = /^bone(\d+)$/.exec(object.name);
@@ -432,13 +432,19 @@ export class EffectInstance {
     return this.clips.Stand ?? Object.values(this.clips)[0] ?? 1000;
   }
 
-  private enterPhase(phase: 'Birth' | 'Stand' | 'Death', now: number): void {
+  // Whether the phase repeats: Hold always; Stand when a lasting effect has
+  // no Hold to settle into.
+  private repeats(phase: 'Stand' | 'Hold' | 'Decay'): boolean {
+    return phase === 'Hold' || (phase === 'Stand' && this.loop && !this.clips.Hold);
+  }
+
+  private enterPhase(phase: 'Stand' | 'Hold' | 'Decay', now: number): void {
     this.actions.get(this.phase)?.stop();
     this.phase = phase;
     this.phaseAt = now;
     const action = this.actions.get(phase);
     if (!action) return;
-    const repeat = phase === 'Stand' && this.loop;
+    const repeat = this.repeats(phase);
     action.reset();
     action.setLoop(repeat ? LoopRepeat : LoopOnce, repeat ? Infinity : 1);
     action.clampWhenFinished = true;
@@ -449,13 +455,13 @@ export class EffectInstance {
     return this.emitters.reduce((sum, emitter) => sum + emitter.particles.length, 0);
   }
 
-  // Ends the effect: a lasting one plays its Death first; then it stops
+  // Ends the effect: a lasting one plays its Decay first; then it stops
   // emitting and hides the model, and particles and ribbons live out.
   stop(now = this.lastAt): void {
     if (this.stopRequested) return;
     this.stopRequested = true;
-    if (this.loop && this.clips.Death && this.emitting) {
-      this.enterPhase('Death', now);
+    if (this.loop && this.clips.Decay && this.emitting) {
+      this.enterPhase('Decay', now);
       return;
     }
     this.finish();
@@ -481,13 +487,13 @@ export class EffectInstance {
     this.lastAt = now;
     const elapsed = now - this.startAt;
     const phaseLength = this.clips[this.phase] ?? this.duration;
-    if (this.phase === 'Birth' && now - this.phaseAt >= phaseLength) this.enterPhase('Stand', now);
-    if (this.phase === 'Death' && this.emitting && now - this.phaseAt >= phaseLength) this.finish();
+    if (this.phase === 'Stand' && this.loop && this.clips.Hold && now - this.phaseAt >= phaseLength) this.enterPhase('Hold', now);
+    if (this.phase === 'Decay' && this.emitting && now - this.phaseAt >= phaseLength) this.finish();
     const inPhase = now - this.phaseAt;
     const length = Math.max(1, this.clips[this.phase] ?? this.duration);
     const clock: TrackClock = {
       clip: this.phase,
-      timeMs: this.phase === 'Stand' && this.loop ? inPhase % length : Math.min(inPhase, length),
+      timeMs: this.repeats(this.phase) ? inPhase % length : Math.min(inPhase, length),
       elapsedMs: elapsed,
       loops: this.loops,
     };

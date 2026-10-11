@@ -5,7 +5,7 @@
 //
 // Tracks go into glTF extras in one compact form: { g, s, k }, where g is the
 // global sequence (loop) index or -1, s is true for stepped keys, and k maps a
-// clip name ('Stand', 'Birth', 'Death', or 'global' for a looping track) to
+// clip name ('Stand', 'Hold', 'Decay', or 'global' for a looping track) to
 // [times in ms, flat values].
 
 import path from 'node:path';
@@ -19,9 +19,10 @@ import { parseParticleEmitters, parseRibbons } from './m2-effects.mjs';
 import { encodeTexture } from './textures.mjs';
 import { keyframeTimes, writeGlb } from './unit-model.mjs';
 
-// AnimationData.dbc IDs an effect plays: once, or Birth then Stand looping
-// then Death for effects that last.
-export const EFFECT_SEQUENCES = { Stand: 0, Birth: 158, Death: 159 };
+// AnimationData.dbc IDs an effect plays: Stand once (its start); for effects
+// that last, then Hold looping (158, the idle) and Decay (159) as they end.
+// Without a Hold, a lasting effect loops Stand.
+export const EFFECT_SEQUENCES = { Stand: 0, Hold: 158, Decay: 159 };
 const M2_NO_LOOP = 0xFFFF;
 const M2_NO_INDEX = 0xFFFF;
 const M2_TRACK_INTERPOLATION_NONE = 0;

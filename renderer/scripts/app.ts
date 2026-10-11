@@ -8,7 +8,7 @@ import type { UnitModelPose } from './instance-scene/unit-models';
 import {
   CombatEffectStore, NUMBER_LIFETIME_MS, type Point3, type StrikeKind, type UnitKey, unitKey,
 } from './utils/spell-events';
-import { applyLiveSample, creaturePathKey, getUnitModelUrl, LiveAppearanceStore, LiveBotStore, LiveCreatureBuffer, LivePathStore, LivePositionBuffer, trimPathToPosition } from './utils/live-positions';
+import { applyLiveSample, creaturePathKey, getUnitModelUrl, LiveAppearanceStore, LiveAuraStore, LiveBotStore, LiveCreatureBuffer, LivePathStore, LivePositionBuffer, trimPathToPosition } from './utils/live-positions';
 import { getCreatureCombatStyle, getPlayerCombatStyle } from './utils/unit-animation';
 import { CONTINENT_BOUNDS, worldToCanvas } from './utils/map-coords';
 import { getEnglishMotd, getServerUptime } from './utils/dashboard-data';
@@ -6574,6 +6574,8 @@ const INSTANCE_BOT_CARD_INTERVAL_MS = 250;
 let instanceBotCardRenderedAt = 0;
 // How each unit looks (display, gear), for drawing client models in 3D.
 const instanceLiveAppearances = new LiveAppearanceStore();
+// Which auras with spell art each unit wears, for the client's aura art.
+const instanceLiveAuras = new LiveAuraStore();
 const INSTANCE_MODELS_STORAGE_KEY = 'wowmin.instanceModels';
 let instanceShowModels = readStoredInstanceModels();
 // Casts, auras, swings, damage, and heals from the live stream, as effects.
@@ -6646,6 +6648,7 @@ function syncInstanceLiveStream(): void {
   instanceLiveCreatures.clear();
   instanceLiveBots.clear();
   instanceLiveAppearances.clear();
+  instanceLiveAuras.clear();
   instanceCombatEffects.clear();
   instanceDebugEvents.clear();
   if (!wanted || !streamPositions) return;
@@ -6690,6 +6693,11 @@ function syncInstanceLiveStream(): void {
       if (instanceLiveStream !== stream) return;
       instanceCombatEffects.push(update, performance.now());
       noteInstanceDebug('combat', update.events.length);
+    },
+    onUnitAuras: (update) => {
+      if (instanceLiveStream !== stream) return;
+      instanceLiveAuras.push(update, performance.now());
+      noteInstanceDebug('auras', update.units.length);
     },
   });
   instanceLiveStream = stream;
@@ -6937,7 +6945,7 @@ function getInstanceUnitPoses(
   const combat = (id: UnitKey) => ({
     strike: strikes.get(id) ?? null,
     eventDriven: instanceCombatEffects.isEventDriven(id, now),
-    tint: instanceCombatEffects.tint(id),
+    tint: instanceCombatEffects.tint(id, instanceAuraShownAsArt()),
   });
   const poses: UnitModelPose[] = [];
   const playersByGuid = new Map<number, MapPlayerPosition>();
@@ -7072,6 +7080,13 @@ const isBossCreature = (creature: StreamCreatureSample, info: CreatureInfo | nul
 // Creature marker: red if hostile, yellow otherwise, green for players' pets,
 // grey when dead. Elites get a gold rim, bosses a larger skull marker, and a
 // health ring shows once a creature is hurt.
+// Which auras the 3D view shows as client art, so their tint gives way; in
+// the flat view (`drawn3d` false) there is no art and every tint shows.
+function instanceAuraShownAsArt(drawn3d: unknown = instanceView3d): (spellId: number) => boolean {
+  const sceneView = drawn3d ? getInstanceSceneView() : null;
+  return sceneView ? (spellId) => sceneView.hasAuraArt(spellId) : () => false;
+}
+
 // A glowing ring round a marker for a notable aura (crowd control, shield,
 // cooldowns); models glow themselves.
 function drawInstanceAuraHalo(ctx: CanvasRenderingContext2D, tint: string | null, point: { x: number; y: number }, radius: number): void {
@@ -7897,7 +7912,8 @@ function drawInstanceCanvas(followPass: boolean): void {
     ? sceneView.setUnits(instanceShowModels && live && instanceView3d
       ? getInstanceUnitPoses(visiblePlayers, creatures, decisions, Boolean(battleground), liveNow, strikes) : [], liveNow)
     : new Set<string>();
-  const effectsDrawn = sceneView?.setEffects(live && instanceView3d ? instanceCombatEffects : null, combatPositions, liveNow) ?? 0;
+  const effectsDrawn = sceneView?.setEffects(live && instanceView3d ? instanceCombatEffects : null, combatPositions, liveNow,
+    live ? instanceLiveAuras.all(liveNow) : undefined) ?? 0;
   const isoView = renderInstanceScene(session, loadedAsset, floor, width, height);
   const modelShown = (id: string) => Boolean(isoView) && modelIds.has(id);
   // Read after the scene, which may reset it when it reframes.
@@ -7995,7 +8011,8 @@ function drawInstanceCanvas(followPass: boolean): void {
       const model = modelShown(`c${creature.guid}`);
       // A model has its own ring on the floor, with health and combat.
       if (!model) {
-        drawInstanceAuraHalo(ctx, live ? instanceCombatEffects.tint(unitKey(creature.guid, true)) : null, point, 9 * markerScale);
+        drawInstanceAuraHalo(ctx, live ? instanceCombatEffects.tint(unitKey(creature.guid, true), instanceAuraShownAsArt(isoView)) : null,
+          point, 9 * markerScale);
         drawInstanceCreature(ctx, creature, info, point, markerScale);
       }
       const boss = isBossCreature(creature, info);
@@ -8032,7 +8049,7 @@ function drawInstanceCanvas(followPass: boolean): void {
     const markerRadius = (player.isBot ? 6 : 8) * markerScale;
     // A model has its own ring on the floor (combat and selection included).
     if (!model) {
-      drawInstanceAuraHalo(ctx, playerGuid !== null ? instanceCombatEffects.tint(unitKey(playerGuid, false)) : null, point,
+      drawInstanceAuraHalo(ctx, playerGuid !== null ? instanceCombatEffects.tint(unitKey(playerGuid, false), instanceAuraShownAsArt(isoView)) : null, point,
         markerRadius + 7 * markerScale);
       if (player.inCombat) {
         ctx.beginPath();
@@ -8294,7 +8311,7 @@ function renderInstanceDebugOverlay(now: number): void {
     `render  ${render.rate.toFixed(1)} fps · ${render.average.toFixed(1)} ms avg · ${render.max.toFixed(1)} max`,
     `scene   ${scene}`,
     `stream  ${instanceLiveStream?.status ?? 'off'} · ${frames.rate.toFixed(1)} frames/s · gap max ${Math.round(frames.max)} ms`,
-    `        per s: ${perSecond('paths')} paths · ${perSecond('creatures')} mobs · ${perSecond('bots')} bots · ${perSecond('combat')} combat events`,
+    `        per s: ${perSecond('paths')} paths · ${perSecond('creatures')} mobs · ${perSecond('bots')} bots · ${perSecond('combat')} combat events · ${perSecond('auras')} aura lists`,
     `combat  ${counts.effects} effects drawn (${counts.spellArt} client art, ${counts.particles} particles) · ${instanceCombatEffects.dropped} events dropped by the server`,
     `shown   ${counts.players} players · ${counts.mobsShown}/${counts.mobsStreamed} mobs · ${counts.paths} paths · ${counts.bots} bots · ${counts.models} models`,
     `view    zoom ${transform.zoom.toFixed(2)} · yaw ${Math.round(getInstanceViewYaw() * 180 / Math.PI)}° · pitch ${Math.round(getInstanceViewPitch() * 180 / Math.PI)}°${floor ? ` · floor ${floor.floorIndex}` : ''}`,

@@ -40,7 +40,10 @@ export function evalTrack(track: ExportedTrack | null | undefined, width: number
     const loop = clock.loops[track.g] ?? 0;
     time = loop > 0 ? clock.elapsedMs % loop : 0;
   } else {
-    keys = track.k[clock.clip] ?? track.k.Stand;
+    // No keys for this clip means the default, not another clip's keys: an
+    // effect's start (Stand) often fades in or bursts, and its idle (Hold)
+    // must not replay that.
+    keys = track.k[clock.clip];
     time = clock.timeMs;
   }
   if (!keys) return fallback;

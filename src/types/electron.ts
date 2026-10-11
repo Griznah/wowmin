@@ -347,6 +347,21 @@ export interface StreamCombatEventUpdate {
   events: StreamCombatEvent[];
 }
 
+// The auras with spell art a unit wears (spell IDs), from the module's
+// unit aura lists.
+export interface StreamUnitAuras {
+  guid: number;
+  creature: boolean;
+  spellIds: number[];
+}
+
+export interface StreamUnitAuraUpdate {
+  mapId: number;
+  instanceId: number;
+  serverTimeMs: number;
+  units: StreamUnitAuras[];
+}
+
 export interface StreamBotUpdate {
   mapId: number;
   instanceId: number;
@@ -362,6 +377,7 @@ export interface StreamListeners {
   onBots?: (update: StreamBotUpdate) => void;
   onAppearances?: (update: StreamAppearanceUpdate) => void;
   onCombatEvents?: (update: StreamCombatEventUpdate) => void;
+  onUnitAuras?: (update: StreamUnitAuraUpdate) => void;
 }
 
 // creature_template details for labelling streamed creatures.

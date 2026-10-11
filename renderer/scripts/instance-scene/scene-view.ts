@@ -217,7 +217,8 @@ export class InstanceSceneView {
 
   // Places the store's live effects for the next render; call after
   // setUnits, so hand points follow this frame's animation.
-  setEffects(store: CombatEffectStore | null, positions: ReadonlyMap<UnitKey, Point3>, now: number): number {
+  setEffects(store: CombatEffectStore | null, positions: ReadonlyMap<UnitKey, Point3>, now: number,
+    auras?: ReadonlyMap<UnitKey, readonly number[]>): number {
     if (this.lost) return 0;
     const before = this.effects.count + this.spellVisuals.count;
     const anchor = (unit: UnitKey, role: UnitAnchorRole) => this.anchor(positions, unit, role);
@@ -226,12 +227,17 @@ export class InstanceSceneView {
       scale: (unit) => this.units.scaleOf(unit) ?? 1,
       facing: (unit) => this.units.orientationOf(unit) ?? 0,
     };
-    this.spellVisuals.update(store, now, units, this.camera);
+    this.spellVisuals.update(store, now, units, this.camera, auras);
     this.effects.update(store, now, anchor, (entry) => this.spellVisuals.handles(entry));
     const count = this.effects.count + this.spellVisuals.count;
     // One more frame after the last effect ends, to clear it.
     this.effectsShown = count > 0 || before > 0;
     return count;
+  }
+
+  // Whether an aura's spell shows the client's art (so its tint gives way).
+  hasAuraArt(spellId: number): boolean {
+    return this.spellVisuals.hasAuraArt(spellId);
   }
 
   // The client's spell art playing, and its live particles, for ?debug.
