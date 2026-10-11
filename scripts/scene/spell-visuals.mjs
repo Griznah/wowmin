@@ -9,6 +9,12 @@ const SPELL_VISUAL_FIELD = 131;
 // Spell.dbc's enUS name and rank ("Rank 3", "Racial").
 const SPELL_NAME_FIELD = 136;
 const SPELL_RANK_FIELD = 153;
+// Spell.dbc's three effects and the auras they apply. A taunt forces its
+// target to attack (effect 114) or applies the taunt aura (11).
+const SPELL_EFFECT_FIELDS = [71, 72, 73];
+const SPELL_AURA_FIELDS = [95, 96, 97];
+const EFFECT_ATTACK_ME = 114;
+const AURA_MOD_TAUNT = 11;
 // SpellVisual fields naming a kit, by the stage the kit plays at.
 const VISUAL_KITS = {
   precast: 1, cast: 2, impact: 3, state: 4, stateDone: 5, channel: 6,
@@ -83,11 +89,14 @@ export class SpellVisuals {
     return { id: kitId, startAnim, anim, effects, procs };
   }
 
-  // The spell's name and rank, or null if the client has no such spell.
+  // The spell's name, rank, and whether it taunts, or null if the client has
+  // no such spell.
   info(spellId) {
     const spell = this.table('Spell').get(spellId);
     if (!spell) return null;
-    return { id: spellId, name: spell.string(SPELL_NAME_FIELD), rank: spell.string(SPELL_RANK_FIELD) };
+    const taunt = SPELL_EFFECT_FIELDS.some((field) => spell.int(field) === EFFECT_ATTACK_ME)
+      || SPELL_AURA_FIELDS.some((field) => spell.int(field) === AURA_MOD_TAUNT);
+    return { id: spellId, name: spell.string(SPELL_NAME_FIELD), rank: spell.string(SPELL_RANK_FIELD), taunt };
   }
 
   // Everything wowmin draws for a spell, or null if it has no art.

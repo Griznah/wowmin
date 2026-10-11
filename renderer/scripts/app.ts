@@ -7047,6 +7047,7 @@ function getInstanceUnitPoses(
       z: creature.z,
       orientation: creature.orientation,
       scale: appearance.scale || 1,
+      pet: creature.playerControlled,
       alive: creature.alive,
       inCombat: creature.inCombat,
       style: getCreatureCombatStyle(
@@ -8088,7 +8089,7 @@ function drawInstanceCanvas(followPass: boolean): void {
       ? getInstanceUnitPoses(visiblePlayers, creatures, decisions, Boolean(battleground), liveNow, strikes, sceneryGuids) : [], liveNow)
     : new Set<string>();
   const effectsDrawn = sceneView?.setEffects(live && instanceView3d ? instanceCombatEffects : null, combatPositions, liveNow,
-    live ? instanceLiveAuras.all(liveNow) : undefined) ?? 0;
+    live ? instanceLiveAuras.all(liveNow) : undefined, (spellId) => instanceSpellNames.isTaunt(spellId)) ?? 0;
   const bossPositions = creatures
     .filter((creature) => isBossCreature(creature, instanceCreatureInfo.get(creature.entry)))
     .map((creature): Point3 => [creature.x, creature.y, creature.z]);

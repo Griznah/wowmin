@@ -22,7 +22,8 @@ export const UNIT_MODEL_CACHE_VERSION = 5;
 // each kit's procedures.
 // 3: effect clips named for what they are: Stand (start), Hold (idle),
 // Decay (end), not Birth/Death.
-export const SPELL_ART_CACHE_VERSION = 3;
+// 4: spell lookups say whether the spell taunts.
+export const SPELL_ART_CACHE_VERSION = 4;
 const SPELL_ART_KINDS = new Set<UnitModelRequest['kind']>(['effect', 'visual', 'spell']);
 const JSON_KINDS = new Set<UnitModelRequest['kind']>(['visual', 'spell']);
 // A look that could not be built is not retried for this long.

@@ -37,6 +37,9 @@ import {
   type UnitWeapons,
 } from '../utils/unit-animation';
 
+// A pet's model scale above this is a giant's (see UnitModelPose.pet).
+const PET_OVERSIZED_DISPLAY_SCALE = 2;
+
 // One unit to draw, in server coordinates.
 export interface UnitModelPose {
   id: string;
@@ -46,6 +49,9 @@ export interface UnitModelPose {
   z: number;
   orientation: number;
   scale: number;
+  // A player's pet: a model scaled up for a giant (a tamed boss worg's 6.5)
+  // is drawn at the pet's own scale, as servers that normalise pets do.
+  pet?: boolean;
   alive: boolean;
   inCombat: boolean;
   // How it fights when in combat, or null if it just stands.
@@ -380,7 +386,9 @@ export class UnitModelLayer {
   private place(unit: UnitInstance, pose: UnitModelPose, nowMs: number, step: number): void {
     unit.root.position.set(pose.x, pose.y, pose.z);
     unit.root.rotation.z = pose.orientation;
-    unit.root.scale.setScalar(pose.scale || 1);
+    const displayScale = unit.template.scene?.children[0]?.scale.x ?? 1;
+    const oversized = pose.pet && displayScale > PET_OVERSIZED_DISPLAY_SCALE;
+    unit.root.scale.setScalar((pose.scale || 1) / (oversized ? displayScale : 1));
 
     const elapsed = (nowMs - unit.lastAt) / 1000;
     if (elapsed > 0.05) {

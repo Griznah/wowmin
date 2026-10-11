@@ -265,9 +265,10 @@ export class InstanceSceneView {
   }
 
   // Places the store's live effects for the next render; call after
-  // setUnits, so hand points follow this frame's animation.
+  // setUnits, so hand points follow this frame's animation. Area taunts
+  // (`isTaunt`) keep their floor area even when the client's art plays too.
   setEffects(store: CombatEffectStore | null, positions: ReadonlyMap<UnitKey, Point3>, now: number,
-    auras?: ReadonlyMap<UnitKey, readonly number[]>): number {
+    auras?: ReadonlyMap<UnitKey, readonly number[]>, isTaunt: (spellId: number) => boolean = () => false): number {
     if (this.lost) return 0;
     const before = this.effects.count + this.spellVisuals.count;
     const anchor = (unit: UnitKey, role: UnitAnchorRole) => this.anchor(positions, unit, role);
@@ -277,7 +278,8 @@ export class InstanceSceneView {
       facing: (unit) => this.units.orientationOf(unit) ?? 0,
     };
     this.spellVisuals.update(store, now, units, this.camera, auras);
-    this.effects.update(store, now, anchor, (entry) => this.spellVisuals.handles(entry));
+    this.effects.update(store, now, anchor,
+      (entry) => this.spellVisuals.handles(entry) && !('radius' in entry && isTaunt(entry.spellId)));
     const count = this.effects.count + this.spellVisuals.count;
     // One more frame after the last effect ends, to clear it.
     this.effectsShown = count > 0 || before > 0;

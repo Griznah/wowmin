@@ -263,3 +263,14 @@ test('sizes nameplates above their anchor, growing with a cast and a note', () =
     assert.equal(plates.plateBounds(style, plate, 2).top, plain.top * 2);
   }
 });
+
+test('groups area circles into merged shapes by colour and height', () => {
+  const { groupAreaCircles } = loadModule('../renderer/scripts/instance-scene/spell-effects.ts');
+  const circle = (color, z, x = 0) => ({ center: [x, 0, z], color, radius: 6, opacity: 1 });
+  const groups = groupAreaCircles([circle('#a', 0), circle('#a', 3, 5), circle('#b', 0), circle('#a', 30)]);
+  const summary = JSON.parse(JSON.stringify(groups.map((group) => group.map((entry) => `${entry.color}@${entry.center[2]}`).join(','))));
+  assert.deepEqual(summary.sort(), ['#a@0,#a@3', '#a@30', '#b@0']);
+  // At most 32 circles per shape.
+  const many = groupAreaCircles(Array.from({ length: 40 }, (_, index) => circle('#a', 0, index)));
+  assert.deepEqual(JSON.parse(JSON.stringify(many.map((group) => group.length))), [32, 8]);
+});
