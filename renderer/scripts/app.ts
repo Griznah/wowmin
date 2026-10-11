@@ -6992,6 +6992,7 @@ function getInstanceUnitPoses(
   battleground: boolean,
   now: number,
   strikes: ReadonlyMap<UnitKey, StrikeKind>,
+  scenery: ReadonlySet<number>,
 ): UnitModelPose[] {
   // Real attacks and aura glows from the combat events.
   const combat = (id: UnitKey) => ({
@@ -7058,6 +7059,7 @@ function getInstanceUnitPoses(
         inCombat: creature.inCombat,
         selected: false,
         healthPct: creature.healthPct,
+        hidden: scenery.has(creature.guid),
       },
     });
   }
@@ -7255,7 +7257,19 @@ function drawInstanceCreature(
   info: CreatureInfo | null | undefined,
   point: { x: number; y: number },
   scale: number,
+  scenery = false,
 ): void {
+  // Scenery is a small plain dot: no combat or health rings.
+  if (scenery) {
+    ctx.save();
+    ctx.globalAlpha = 0.6;
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, 2.5 * scale, 0, Math.PI * 2);
+    ctx.fillStyle = '#94a3b8';
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
   const boss = isBossCreature(creature, info);
   const elite = info?.rank === 1 || info?.rank === 2;
   const radius = (boss ? 7 : elite ? 4.5 : 3.5) * scale;
@@ -8040,6 +8054,11 @@ function drawInstanceCanvas(followPass: boolean): void {
           && Math.abs(player.position_z - creature.z) <= INSTANCE_MOBS_NEAR_HEIGHT);
     })
     : [];
+  // Scenery creatures: drawn without a ring, facing, path, or name.
+  const sceneryGuids = new Set(creatures.filter((creature) => {
+    const info = instanceCreatureInfo.get(creature.entry);
+    return isSceneryCreature(creature, info, isBossCreature(creature, info));
+  }).map((creature) => creature.guid));
   const decisions = new Map<string, StreamBotDecision>();
   if (instanceShowDecisions && live) {
     for (const player of visiblePlayers) {
@@ -8066,7 +8085,7 @@ function drawInstanceCanvas(followPass: boolean): void {
   const sceneView = getInstanceSceneView();
   const modelIds = sceneView
     ? sceneView.setUnits(instanceShowModels && live && instanceView3d
-      ? getInstanceUnitPoses(visiblePlayers, creatures, decisions, Boolean(battleground), liveNow, strikes) : [], liveNow)
+      ? getInstanceUnitPoses(visiblePlayers, creatures, decisions, Boolean(battleground), liveNow, strikes, sceneryGuids) : [], liveNow)
     : new Set<string>();
   const effectsDrawn = sceneView?.setEffects(live && instanceView3d ? instanceCombatEffects : null, combatPositions, liveNow,
     live ? instanceLiveAuras.all(liveNow) : undefined) ?? 0;
@@ -8161,7 +8180,8 @@ function drawInstanceCanvas(followPass: boolean): void {
       pathsDrawn += 1;
     }
     for (const creature of creatures) {
-      const path = creature.alive ? instanceLivePaths.get(creaturePathKey(creature.guid), liveNow) : null;
+      const path = creature.alive && !sceneryGuids.has(creature.guid)
+        ? instanceLivePaths.get(creaturePathKey(creature.guid), liveNow) : null;
       if (!path) continue;
       const points = trimPathToPosition(path.points, [creature.x, creature.y, creature.z]);
       drawInstancePath(ctx, { position_x: creature.x, position_y: creature.y, position_z: creature.z }, points,
@@ -8196,14 +8216,16 @@ function drawInstanceCanvas(followPass: boolean): void {
       const info = instanceCreatureInfo.get(creature.entry);
       const point = projection.worldToScreen(creature.x, creature.y, creature.z);
       const model = modelShown(`c${creature.guid}`);
+      const boss = isBossCreature(creature, info);
+      const scenery = sceneryGuids.has(creature.guid);
       // A model has its own ring on the floor, with health and combat.
       if (!model) {
-        drawInstanceAuraHalo(ctx, live ? instanceCombatEffects.tint(unitKey(creature.guid, true), instanceAuraShownAsArt(isoView)) : null,
-          point, 9 * markerScale);
-        drawInstanceCreature(ctx, creature, info, point, markerScale);
+        if (!scenery) {
+          drawInstanceAuraHalo(ctx, live ? instanceCombatEffects.tint(unitKey(creature.guid, true), instanceAuraShownAsArt(isoView)) : null,
+            point, 9 * markerScale);
+        }
+        drawInstanceCreature(ctx, creature, info, point, markerScale, scenery);
       }
-      const boss = isBossCreature(creature, info);
-      const scenery = isSceneryCreature(creature, info, boss);
       if (plateStyle) {
         if (info && creature.alive && !scenery && (boss || creature.inCombat || viewTransform.zoom >= INSTANCE_MOB_LABEL_ZOOM)) {
           const plateY = model

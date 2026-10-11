@@ -166,6 +166,7 @@ export function parseCreatureDatagram(buffer: Buffer): StreamCreatureUpdate | nu
       boss: Boolean(flags & 8),
       playerControlled: Boolean(flags & 16),
       targetIsPlayer: Boolean(flags & 32),
+      scenery: Boolean(flags & 64),
       targetGuid: buffer.readUInt32LE(offset + 28),
       wmoGroupId: buffer.readInt32LE(offset + 32),
     });

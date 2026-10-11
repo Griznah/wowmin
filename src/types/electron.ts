@@ -218,6 +218,10 @@ export interface StreamCreatureSample {
   // 0 for no target; a player's guid when targetIsPlayer, else a creature's.
   targetGuid: number;
   targetIsPlayer: boolean;
+  // Scenery by its live flags: players can't select it, or (outside a fight)
+  // can neither attack nor talk to it. The module sends no path for it.
+  // Absent from older modules.
+  scenery?: boolean;
   wmoGroupId: number;
 }
 

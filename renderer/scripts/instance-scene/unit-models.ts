@@ -77,6 +77,8 @@ export interface UnitMarkerStyle {
   selected: boolean;
   // Drawn as an arc inside the ring; null for none (players, full health).
   healthPct: number | null;
+  // Scenery gets no ring or pointer at all.
+  hidden?: boolean;
 }
 
 interface ModelTemplate {
@@ -192,6 +194,7 @@ function createMarker(radius: number): UnitMarker {
 }
 
 function updateMarker(marker: UnitMarker, style: UnitMarkerStyle, alive: boolean): void {
+  marker.group.visible = !style.hidden;
   marker.ring.material.color.set(style.color);
   marker.pointer.material.color.set(style.color);
   // A corpse faces nowhere in particular.

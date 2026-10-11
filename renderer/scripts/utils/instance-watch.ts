@@ -316,17 +316,20 @@ const CREATURE_FLAG_EXTRA_TRIGGER = 0x80;
 // pet: not specified (healing flowers and the like), totem, non-combat pet.
 const SUMMONED_OBJECT_TYPES = new Set([10, 11, 12]);
 
-// Whether a creature is scenery or a summoned object that gets no name or
-// nameplate: units players can't select (Arathi Basin's workers) or that are
-// script triggers; units that can't be attacked and offer nothing to talk
-// to, unless they're fighting; and players' summoned objects. Bosses always
-// get theirs.
+// Whether a creature is scenery or a summoned object, drawn without a name,
+// nameplate, ring, facing, or path: units players can't select (Arathi
+// Basin's workers) or that are script triggers; units that can't be
+// attacked and offer nothing to talk to, unless they're fighting; and
+// players' summoned objects. The module says so from the unit's live flags;
+// creature_template's flags cover older modules. Bosses never are.
 export function isSceneryCreature(
-  creature: Pick<StreamCreatureSample, 'inCombat' | 'playerControlled'>,
+  creature: Pick<StreamCreatureSample, 'inCombat' | 'playerControlled' | 'scenery'>,
   info: Pick<CreatureInfo, 'unitFlags' | 'flagsExtra' | 'npcFlags' | 'creatureType'> | null | undefined,
   boss: boolean,
 ): boolean {
-  if (boss || !info) return false;
+  if (boss) return false;
+  if (creature.scenery) return true;
+  if (!info) return false;
   const unitFlags = info.unitFlags ?? 0;
   if (unitFlags & UNIT_FLAG_NOT_SELECTABLE || (info.flagsExtra ?? 0) & CREATURE_FLAG_EXTRA_TRIGGER) return true;
   if (!creature.inCombat && unitFlags & (UNIT_FLAG_NON_ATTACKABLE | UNIT_FLAG_IMMUNE_TO_PC) && !info.npcFlags) return true;

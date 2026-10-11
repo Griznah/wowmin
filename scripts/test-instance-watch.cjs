@@ -202,4 +202,7 @@ test('leaves scenery and summoned objects without names or plates', () => {
   assert.equal(isSceneryCreature(idle, info({}), false), false);
   assert.equal(isSceneryCreature(idle, info({ unitFlags: 0x2000000 }), true), false);
   assert.equal(isSceneryCreature(idle, null, false), false);
+  // The module's live flag, even before creature details load.
+  assert.equal(isSceneryCreature({ ...idle, scenery: true }, null, false), true);
+  assert.equal(isSceneryCreature({ ...idle, scenery: true }, null, true), false);
 });

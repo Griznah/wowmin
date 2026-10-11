@@ -238,15 +238,15 @@ function creatureDatagram({ mapId = 601, instanceId = 7, serverTimeMs = 5000, cr
 test('parses a creature datagram and its state flags', () => {
   const parsed = parseCreatureDatagram(creatureDatagram({ creatures: [
     { guid: 900, entry: 29120, x: 550, y: 250, z: 224, orientation: 1.5, healthPct: 64, flags: 1 | 2 | 4 | 8 | 32, targetGuid: 42, wmoGroupId: 24879 },
-    { guid: 901, entry: 28684, x: 1, y: 2, z: 3, orientation: 0, healthPct: 0, flags: 16, targetGuid: 0, wmoGroupId: -1 },
+    { guid: 901, entry: 28684, x: 1, y: 2, z: 3, orientation: 0, healthPct: 0, flags: 16 | 64, targetGuid: 0, wmoGroupId: -1 },
   ] }));
   assert.equal(parsed.mapId, 601);
   assert.equal(parsed.instanceId, 7);
   assert.deepEqual(JSON.parse(JSON.stringify(parsed.creatures)), [
     { guid: 900, entry: 29120, x: 550, y: 250, z: 224, orientation: 1.5, healthPct: 64, alive: true, inCombat: true,
-      hostile: true, boss: true, playerControlled: false, targetIsPlayer: true, targetGuid: 42, wmoGroupId: 24879 },
+      hostile: true, boss: true, playerControlled: false, targetIsPlayer: true, scenery: false, targetGuid: 42, wmoGroupId: 24879 },
     { guid: 901, entry: 28684, x: 1, y: 2, z: 3, orientation: 0, healthPct: 0, alive: false, inCombat: false,
-      hostile: false, boss: false, playerControlled: true, targetIsPlayer: false, targetGuid: 0, wmoGroupId: -1 },
+      hostile: false, boss: false, playerControlled: true, targetIsPlayer: false, scenery: true, targetGuid: 0, wmoGroupId: -1 },
   ]);
   const good = creatureDatagram({ creatures: [{ guid: 1, entry: 2, x: 0, y: 0, z: 0, orientation: 0, healthPct: 1, flags: 1, targetGuid: 0, wmoGroupId: -1 }] });
   assert.equal(parseCreatureDatagram(good.subarray(0, good.length - 1)), null);
