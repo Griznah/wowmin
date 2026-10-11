@@ -6,6 +6,7 @@
 // screen whatever the zoom, as the client's do.
 
 export type PlateStyle = 'neon' | 'grey' | 'quatre';
+export type Faction = 'alliance' | 'horde';
 
 export interface Nameplate {
   name: string;
@@ -20,10 +21,15 @@ export interface Nameplate {
   // A mob attacking a player, or a player a mob is attacking.
   threat: boolean;
   selected: boolean;
-  // A cast fills up; a channel drains.
-  cast: { fraction: number; name: string; channeled: boolean } | null;
+  // A cast fills up; a channel drains. Its spell's icon sits at the cast
+  // bar's left, as TidyPlates shows it.
+  cast: { fraction: number; name: string; channeled: boolean; icon?: CanvasImageSource | null } | null;
   // A line under the plate: a bot's current action.
   note: string | null;
+  // In battlegrounds, the player's side: a crest by the name, which takes
+  // the side's colour. The client's crest when it has loaded.
+  faction?: Faction | null;
+  factionIcon?: CanvasImageSource | null;
 }
 
 interface Theme {
@@ -51,6 +57,9 @@ const CHANNEL_COLOR = '#58c85a';
 const NOTE_FONT = 'italic 10px sans-serif';
 const NOTE_COLOR = '#fcd34d';
 const DEAD_COLOR = '#94a3b8';
+// Names in the side's colour, light enough to read on the dark outline.
+export const FACTION_NAME_COLORS: Record<Faction, string> = { alliance: '#6cb4ff', horde: '#ff6a5a' };
+const CREST_SIZE = 12;
 
 // The level's colour by how it compares with the party's, as the client
 // colours it: grey far below, green below, yellow close, orange and red above.
@@ -76,7 +85,7 @@ function greyLevel(partyLevel: number): number {
 // the bottom middle of the plate), for keeping plates apart.
 export function plateBounds(style: PlateStyle, plate: Nameplate, scale: number): { left: number; right: number; top: number; bottom: number } {
   const theme = THEMES[style];
-  const half = (theme.width / 2 + 16) * scale;
+  const half = (theme.width / 2 + 20) * scale;
   return { left: -half, right: half, top: -plateHeight(theme, plate) * scale, bottom: 0 };
 }
 
@@ -97,25 +106,34 @@ export function drawNameplate(ctx: CanvasRenderingContext2D, style: PlateStyle, 
   ctx.translate(0, -plateHeight(theme, plate));
   ctx.textBaseline = 'middle';
   ctx.lineJoin = 'round';
+  const faction = plate.faction ?? null;
   if (!plate.alive) {
     ctx.font = theme.nameFont;
     ctx.textAlign = 'center';
     outlinedText(ctx, plate.name, 0, 6, DEAD_COLOR);
+    if (faction) drawFactionCrest(ctx, faction, -ctx.measureText(plate.name).width / 2 - CREST_SIZE * 0.75, 6, CREST_SIZE, plate.factionIcon);
     ctx.restore();
     return;
   }
   const left = -theme.width / 2;
+  const nameColor = faction ? FACTION_NAME_COLORS[faction] : '#ffffff';
   let top = 0;
   if (!theme.nameInside) {
     ctx.font = theme.nameFont;
     if (style === 'quatre') {
       ctx.textAlign = 'left';
-      outlinedText(ctx, plate.name.toUpperCase(), left, 6, '#ffffff');
+      const nameLeft = faction ? left + CREST_SIZE + 3 : left;
+      if (faction) drawFactionCrest(ctx, faction, left + CREST_SIZE / 2, 6, CREST_SIZE, plate.factionIcon);
+      outlinedText(ctx, plate.name.toUpperCase(), nameLeft, 6, nameColor);
     } else {
       ctx.textAlign = 'center';
-      outlinedText(ctx, plate.name, 0, 6, '#ffffff');
+      outlinedText(ctx, plate.name, 0, 6, nameColor);
+      if (faction) drawFactionCrest(ctx, faction, -ctx.measureText(plate.name).width / 2 - CREST_SIZE * 0.75, 6, CREST_SIZE, plate.factionIcon);
     }
     top += 12 + theme.gap;
+  } else if (faction) {
+    // The name is inside the bar: the crest sits just left of it.
+    drawFactionCrest(ctx, faction, left - CREST_SIZE * 0.75, top + theme.barHeight / 2, CREST_SIZE, plate.factionIcon);
   }
   if (style === 'neon') drawNeonBar(ctx, theme, plate, left, top);
   else if (style === 'grey') drawGreyBar(ctx, theme, plate, left, top);
@@ -167,7 +185,8 @@ function drawGreyBar(ctx: CanvasRenderingContext2D, theme: Theme, plate: Namepla
   ctx.strokeRect(left - 0.5, top - 0.5, width + 1, height + 1);
   ctx.font = theme.nameFont;
   ctx.textAlign = 'left';
-  outlinedText(ctx, clip(ctx, plate.name, width - 34), left + 3, top + height / 2 + 0.5, '#ffffff');
+  outlinedText(ctx, clip(ctx, plate.name, width - 34), left + 3, top + height / 2 + 0.5,
+    plate.faction ? FACTION_NAME_COLORS[plate.faction] : '#ffffff');
   ctx.textAlign = 'right';
   outlinedText(ctx, `${Math.round(plate.healthPct)}%`, left + width - 3, top + height / 2 + 0.5, '#e5e5e5');
   drawLevel(ctx, plate, left + width + 4, top + height / 2, '700 9px system-ui, sans-serif', 'left');
@@ -207,6 +226,15 @@ function drawCastBar(ctx: CanvasRenderingContext2D, style: PlateStyle, theme: Th
   ctx.strokeStyle = style === 'neon' ? 'rgba(255,255,255,0.35)' : '#000000';
   ctx.lineWidth = style === 'quatre' ? 2 : 1;
   ctx.strokeRect(left - 0.5, top - 0.5, width + 1, height + 1);
+  if (cast.icon) {
+    // A square as tall as the cast bar and its name, left of the bar.
+    const size = height < 8 ? height + 11 : height + 4;
+    const iconTop = height < 8 ? top - 1 : top - 2;
+    ctx.drawImage(cast.icon, left - size - 3, iconTop, size, size);
+    ctx.strokeStyle = '#000000';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(left - size - 3.5, iconTop - 0.5, size + 1, size + 1);
+  }
   if (!cast.name) return;
   // Thin cast bars put the spell's name under them; thick ones inside.
   if (height < 8) {
@@ -229,6 +257,52 @@ function drawLevel(ctx: CanvasRenderingContext2D, plate: Nameplate, x: number, y
   ctx.font = font;
   ctx.textAlign = align;
   outlinedText(ctx, plate.elite ? `${plate.level}+` : plate.level, x, y + 0.5, plate.levelColor);
+}
+
+// A side's crest, centred on (x, y), `size` tall: the client's PvP crest
+// (`icon`) when it has loaded, else a stand-in drawn in the side's colours
+// (the Alliance's blue heater shield with a gold rim, the Horde's red shield
+// with three spikes along its top).
+export function drawFactionCrest(ctx: CanvasRenderingContext2D, faction: Faction, x: number, y: number, size: number,
+  icon?: CanvasImageSource | null): void {
+  if (icon) {
+    const width = 'width' in icon && 'height' in icon && Number(icon.height) > 0
+      ? size * Number(icon.width) / Number(icon.height) : size;
+    ctx.drawImage(icon, x - width / 2, y - size / 2, width, size);
+    return;
+  }
+  const half = size / 2;
+  const width = size * 0.8;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.beginPath();
+  if (faction === 'alliance') {
+    ctx.moveTo(-width / 2, -half);
+    ctx.lineTo(width / 2, -half);
+    ctx.lineTo(width / 2, -half * 0.1);
+    ctx.quadraticCurveTo(width / 2, half * 0.6, 0, half);
+    ctx.quadraticCurveTo(-width / 2, half * 0.6, -width / 2, -half * 0.1);
+    ctx.closePath();
+    ctx.fillStyle = '#1f4fbf';
+    ctx.strokeStyle = '#e8c547';
+  } else {
+    ctx.moveTo(-width / 2, -half);
+    ctx.lineTo(-width / 4, -half * 0.45);
+    ctx.lineTo(0, -half * 1.05);
+    ctx.lineTo(width / 4, -half * 0.45);
+    ctx.lineTo(width / 2, -half);
+    ctx.lineTo(width / 2, -half * 0.05);
+    ctx.quadraticCurveTo(width / 2, half * 0.55, 0, half);
+    ctx.quadraticCurveTo(-width / 2, half * 0.55, -width / 2, -half * 0.05);
+    ctx.closePath();
+    ctx.fillStyle = '#b3201a';
+    ctx.strokeStyle = '#1c0605';
+  }
+  ctx.lineWidth = Math.max(1, size / 8);
+  ctx.lineJoin = 'round';
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
 }
 
 function drawSkull(ctx: CanvasRenderingContext2D, x: number, y: number, size: number): void {

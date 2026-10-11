@@ -8,7 +8,8 @@ import type { UnitModelPose } from './instance-scene/unit-models';
 import {
   CAST_GRACE_MS, CombatEffectStore, NUMBER_LIFETIME_MS, type Point3, type StrikeKind, type UnitKey, unitKey,
 } from './utils/spell-events';
-import { drawNameplate, levelColor, type Nameplate, plateBounds, type PlateStyle } from './instance-scene/nameplates';
+import { drawFactionCrest, drawNameplate, FACTION_NAME_COLORS, type Faction, levelColor, type Nameplate, plateBounds, type PlateStyle } from './instance-scene/nameplates';
+import { ClientIcons } from './utils/client-icons';
 import { SpellNames } from './utils/spell-names';
 import { applyLiveSample, creaturePathKey, getUnitModelUrl, LiveAppearanceStore, LiveAuraStore, LiveBotStore, LiveCreatureBuffer, LivePathStore, LivePositionBuffer, trimPathToPosition } from './utils/live-positions';
 import { getCreatureCombatStyle, getPlayerCombatStyle } from './utils/unit-animation';
@@ -6579,6 +6580,8 @@ const INSTANCE_PLATE_HOSTILE_COLOR = '#d42a1e';
 const INSTANCE_PLATE_NEUTRAL_COLOR = '#e8c62a';
 const INSTANCE_PLATE_FRIENDLY_COLOR = '#3fbf3f';
 const instanceSpellNames = new SpellNames(() => renderInstanceCanvas());
+// Spell icons for cast bars and the sides' crests, from the client.
+const instanceClientIcons = new ClientIcons(() => renderInstanceCanvas());
 // creature_template details by entry; null while loading or when unknown.
 const instanceCreatureInfo = new Map<number, CreatureInfo | null>();
 let instanceCreatureInfoQueue = new Set<number>();
@@ -8137,7 +8140,10 @@ function drawInstanceCanvas(followPass: boolean): void {
   }
 
   // An 'action' label is a bot's current action, under its name.
-  const pendingLabels: { name: string; x: number; y: number; priority: number; action?: boolean }[] = [];
+  // A player's label in a battleground carries their side (crest, colour).
+  const pendingLabels: { name: string; x: number; y: number; priority: number; action?: boolean; faction?: Faction | null }[] = [];
+  const factionOf = (player: MapPlayerPosition): Faction | null => !battleground ? null
+    : player.teamId === 1 ? 'alliance' : player.teamId === 0 ? 'horde' : null;
   const markerScale = getCanvasPlayerIconScale(viewTransform.zoom);
   // In 3D, nameplates take the labels' place; (x, y) is over the unit's head.
   const plateStyle = isoView && instancePlatesMode !== 'labels' ? instancePlatesMode : null;
@@ -8156,6 +8162,7 @@ function drawInstanceCanvas(followPass: boolean): void {
       fraction: length > 0 ? Math.max(0, Math.min(1, (liveNow - cast.startAt) / length)) : 1,
       name: instanceSpellNames.get(cast.spellId),
       channeled: cast.channeled,
+      icon: instanceClientIcons.get(`spell-${cast.spellId}`),
     };
   };
   // Players a shown mob is attacking.
@@ -8343,6 +8350,8 @@ function drawInstanceCanvas(followPass: boolean): void {
           selected: player.name === selectedInstancePlayerName,
           cast: playerGuid !== null ? castOf(unitKey(playerGuid, false)) : null,
           note: getCurrentBotAction(decisions.get(player.name)) ?? null,
+          faction: factionOf(player),
+          factionIcon: factionOf(player) ? instanceClientIcons.get(`faction-${factionOf(player)}`) : null,
         },
         x: point.x,
         y: model ? top - 2 : point.y - markerRadius - 4,
@@ -8356,6 +8365,7 @@ function drawInstanceCanvas(followPass: boolean): void {
         x: point.x + markerRadius + 4,
         y: labelY,
         priority: (!player.isBot ? 2 : 0) + (player.inCombat ? 1 : 0),
+        faction: factionOf(player),
       });
       const action = getCurrentBotAction(decisions.get(player.name));
       if (action) {
@@ -8375,14 +8385,19 @@ function drawInstanceCanvas(followPass: boolean): void {
   const occupiedLabels: { left: number; right: number; top: number; bottom: number }[] = [];
   for (const label of pendingLabels.sort((left, right) => right.priority - left.priority)) {
     ctx.font = label.action ? 'italic 10px sans-serif' : '11px sans-serif';
-    ctx.fillStyle = label.action ? '#fcd34d' : '#e5edf7';
-    const labelWidth = ctx.measureText(label.name).width;
+    ctx.fillStyle = label.action ? '#fcd34d' : label.faction ? FACTION_NAME_COLORS[label.faction] : '#e5edf7';
+    // Room for the side's crest before the name.
+    const crest = label.faction ? 12 : 0;
+    const labelWidth = ctx.measureText(label.name).width + crest;
     const rect = { left: label.x - 2, right: label.x + labelWidth + 2, top: label.y - 11, bottom: label.y + 3 };
     const overlaps = occupiedLabels.some((used) =>
       rect.left < used.right && rect.right > used.left && rect.top < used.bottom && rect.bottom > used.top);
     if (overlaps) continue;
     occupiedLabels.push(rect);
-    ctx.fillText(label.name, label.x, label.y);
+    if (label.faction) {
+      drawFactionCrest(ctx, label.faction, label.x + 4.5, label.y - 4, 11, instanceClientIcons.get(`faction-${label.faction}`));
+    }
+    ctx.fillText(label.name, label.x + crest, label.y);
   }
 
   if (instanceShowNumbers && live) {

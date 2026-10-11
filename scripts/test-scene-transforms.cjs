@@ -483,3 +483,20 @@ test('takes the box the buildings in the play area fill', async () => {
   assert.deepEqual(buildingReach(groups, area, [[450, 5, 0]]), { minX: 0, maxX: 510, minY: 0, maxY: 10, minZ: -100, maxZ: 300 });
   assert.deepEqual(buildingReach([], [], [[1, 2, 3]]), { minX: 1, maxX: 1, minY: 2, maxY: 2, minZ: 3, maxZ: 3 });
 });
+
+test('crops an icon to its visible pixels', async () => {
+  const { cropToVisible } = await load('icons.mjs');
+  const width = 4;
+  const rgba = new Uint8Array(width * 3 * 4);
+  // Two opaque pixels: (1, 0) and (2, 1).
+  rgba[(0 * width + 1) * 4 + 3] = 255;
+  rgba[(1 * width + 2) * 4 + 3] = 200;
+  rgba[(1 * width + 2) * 4] = 9;
+  const cropped = cropToVisible({ width, height: 3, rgba });
+  assert.equal(cropped.width, 2);
+  assert.equal(cropped.height, 2);
+  assert.equal(cropped.rgba[3], 255);
+  assert.equal(cropped.rgba[(1 * 2 + 1) * 4], 9);
+  // Nothing visible keeps the whole image.
+  assert.equal(cropToVisible({ width: 2, height: 2, rgba: new Uint8Array(16) }).width, 2);
+});
