@@ -7,6 +7,9 @@ import { Map as WowMap } from '@wowserhq/format';
 import { findChunk, readChunks, readCString, readFloats } from './chunks.mjs';
 
 const WDT_FLAG_WMO_ONLY = 0x1;
+// The client's placement space puts the map's centre here; the server's world
+// coordinates put it at 0.
+const MAP_CENTRE = 32 * (1600 / 3);
 const MODF_ENTRY_SIZE = 64;
 const MDDF_ENTRY_SIZE = 36;
 
@@ -47,6 +50,11 @@ export function readWdt(buffer) {
   const placements = findChunk(chunks, 'MODF');
   if (header.readUInt32LE(0) & WDT_FLAG_WMO_ONLY && names && placements?.length >= MODF_ENTRY_SIZE) {
     wmo = readModfEntry(placements, 0, () => readCString(names, 0));
+    // A building-only map's building is placed without the map-centre
+    // offset that tile placements carry: its WDT position is (0, 0, 0) and
+    // the server's coordinates are the building's own (The Nexus, Blackrock
+    // Depths, and the Outland dungeons all line up with their map floors).
+    wmo.position = [wmo.position[0] - MAP_CENTRE, wmo.position[1] - MAP_CENTRE, wmo.position[2]];
   }
   return { wmoOnly: Boolean(wmo), tiles, wmo };
 }

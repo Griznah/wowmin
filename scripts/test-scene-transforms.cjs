@@ -35,7 +35,7 @@ test('converts placement space to server world coordinates (Azjol-Nerub WMO)', a
   near(rotation[3], 0, 'quaternion w');
 });
 
-test('reads WDT tiles and only treats MODF as the map object on WMO-only maps', async () => {
+test('reads WDT tiles and only treats MODF as the map object on WMO-only maps, placed without the map-centre offset', async () => {
   const { readWdt } = await load('placement.mjs');
   const main = Buffer.alloc(64 * 64 * 8);
   main.writeUInt32LE(1, (30 * 64 + 29) * 8);
@@ -49,11 +49,14 @@ test('reads WDT tiles and only treats MODF as the map object on WMO-only maps', 
   const wmoOnly = readWdt(Buffer.concat([
     chunk('MPHD', wmoHeader), chunk('MAIN', Buffer.alloc(64 * 64 * 8)),
     chunk('MWMO', Buffer.from('World\\wmo\\Dungeon\\Test.wmo\0', 'latin1')),
-    chunk('MODF', modfEntry({ uniqueId: 9, position: [17066.666, 10, 17066.666], doodadSet: 2 })),
+    chunk('MODF', modfEntry({ uniqueId: 9, position: [5, 10, 7], doodadSet: 2 })),
   ]));
   assert.equal(wmoOnly.wmoOnly, true);
   assert.equal(wmoOnly.wmo.name, 'World\\wmo\\Dungeon\\Test.wmo');
   assert.equal(wmoOnly.wmo.doodadSet, 2);
+  // Placement (x, y up, z) becomes world (-z, -x, y), with no 17066.67 offset.
+  near(wmoOnly.wmo.position[0], -7, 'x');
+  near(wmoOnly.wmo.position[1], -5, 'y');
   near(wmoOnly.wmo.position[2], 10, 'z');
 });
 
