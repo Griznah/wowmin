@@ -36,10 +36,17 @@ yarn-error.log*
 # Optional: lock files (remove if you want to track them)
 # package-lock.json
 
-# Assets
+# Game data extracted from a WoW client. Blizzard owns it, so it is never
+# committed: each install extracts its own (npm run extract:maps) or builds it
+# on demand (unit models, from WOWMIN_CLIENT_DATA).
 assets/instances/
-assets/maps
+assets/maps/*
+!assets/maps/README.txt
 assets/player-icons/
+assets/models/
+*.blp
+*.mpq
+*.MPQ
 
 # Service deploy
 deploy/wowmin.service
@@ -54,4 +61,3 @@ graphify-out/
 
 # Web service runtime data (recorded sessions)
 .wowmin-data/
-assets/models/
