@@ -874,13 +874,19 @@ async function refreshDashboard(): Promise<void> {
     if (info.success) parseServerInfo(info.message);
     if ($uptimeValue) $uptimeValue.textContent = info.success ? getServerUptime(info.message) || '--' : '--';
 
-    try {
-      const counts = await window.wowminAPI.map.getOnlineCounts();
-      if ($playersCount) $playersCount.textContent = String(counts.players);
-      if ($botsCount) $botsCount.textContent = String(counts.bots);
-      if ($totalCount) $totalCount.textContent = String(counts.total);
-    } catch {
-      // The map connection may not be ready yet; the console list is available with SOAP alone.
+    let countsLoaded = false;
+    if (state.mapDbConnected) {
+      try {
+        const counts = await window.wowminAPI.map.getOnlineCounts();
+        if ($playersCount) $playersCount.textContent = String(counts.players);
+        if ($botsCount) $botsCount.textContent = String(counts.bots);
+        if ($totalCount) $totalCount.textContent = String(counts.total);
+        countsLoaded = true;
+      } catch {
+        // Fall through to SOAP when the optional characters database is unavailable.
+      }
+    }
+    if (!countsLoaded) {
       const online = await exec('account onlinelist');
       if (online.success) {
         const players = parseOnlineList(online.message);
@@ -1190,10 +1196,16 @@ async function refreshPlayers(): Promise<void> {
 
   playersRefreshInFlight = true;
   try {
-    try {
-      state.allPlayers = playersFromDatabase(await window.wowminAPI.players.getOnline());
-    } catch (error) {
-      if (!state.connected) throw error;
+    if (state.mapDbConnected) {
+      try {
+        state.allPlayers = playersFromDatabase(await window.wowminAPI.players.getOnline());
+      } catch (error) {
+        if (!state.connected) throw error;
+        const result = await exec('account onlinelist');
+        if (!result.success) throw new Error(result.message);
+        state.allPlayers = parseOnlineList(result.message);
+      }
+    } else {
       const result = await exec('account onlinelist');
       if (!result.success) throw new Error(result.message);
       state.allPlayers = parseOnlineList(result.message);
@@ -5786,7 +5798,7 @@ async function disconnectMapDb(): Promise<void> {
 // ── Refresh ────────────────────────────────────────────────────────────────
 let mapRefreshInFlight = false;
 async function refreshMapPositions(): Promise<void> {
-  if (!state.mapDbConnected || mapRefreshInFlight) return;
+  if ((!state.mapDbConnected && !state.connected) || mapRefreshInFlight) return;
   mapRefreshInFlight = true;
   try {
     try {

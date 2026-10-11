@@ -25,10 +25,12 @@ and session recording built on the separate `mod-wowmin-telemetry` module.
 
 ### Changed
 
+- Managed-mode SOAP and database connections are now owned by the Node service instead of individual browsers. Independent services start non-fatally, retry with bounded backoff, expose non-secret status, support per-database host/credential overrides, and cannot be disconnected by another browser session.
 - WoWMin is now a web-only Node.js service; Electron entrypoints, packaging, desktop update checks, and platform installers were removed.
 
 ### Fixed
 
+- Expected database fallback probes no longer flood server logs while SOAP or telemetry keeps the UI functional; genuine API failures now identify their channel and suppress identical repeats.
 - Battleground Session History and replay now interpret the core `PvPTeamId` winner correctly, retain authoritative final state after participants leave, and classify Eye of the Storm resource gains as score objectives rather than flag captures.
 - Session History now loads persisted local records at application startup and remains available while disconnected from SOAP, the worldserver, and realm databases.
 - New Session History files now use familiar dungeon, raid, and battleground abbreviations in names such as `WSG-3-Oct08-26.json` and `Ramps(H)-22-Oct08-26.json`; collision suffixes preserve every run, and existing numeric filenames remain readable.

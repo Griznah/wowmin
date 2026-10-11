@@ -1,4 +1,5 @@
 import type {
+  BackendConnectionStatus,
   CharacterInventoryResult,
   ConnectionProfile,
   DbConfig,
@@ -29,6 +30,7 @@ export interface BootstrapConfig {
   managed: boolean;
   localLogs: boolean;
   dungeonClearUrl: string;
+  connections: BackendConnectionStatus;
 }
 
 export interface WowminAPI {
@@ -43,6 +45,7 @@ export interface WowminAPI {
   };
   app: {
     getBootstrap(): Promise<BootstrapConfig>;
+    getConnectionStatus(): Promise<BackendConnectionStatus>;
     openExternal(url: string): Promise<SoapResult>;
     getEntityMediaPreview(request: EntityMediaPreviewRequest): Promise<EntityMediaPreviewResult>;
   };
