@@ -51,6 +51,9 @@ export const UNIT_ANIMATIONS = {
   ChannelCastOmni: 125,
   // A rider's seated pose.
   Mount: 91,
+  // A flying mount in the air: moving, and staying in place.
+  Fly: 135,
+  Hover: 193,
 };
 
 const asBytes = (buffer) => new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);

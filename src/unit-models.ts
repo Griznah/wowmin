@@ -15,7 +15,8 @@ const BUILD_TIMEOUT_MS = 60000;
 // 4: animations spell kits name (channelling, hit reactions, other casts).
 // 5: a breath point (the mouth), for breath effects.
 // 6: a mount's saddle point and riders' seated (Mount) animation.
-export const UNIT_MODEL_CACHE_VERSION = 6;
+// 7: flying mounts' Fly and Hover animations.
+export const UNIT_MODEL_CACHE_VERSION = 7;
 // Spell art (effect models and spell lookups) changes more often than unit
 // models, so it has its own version and folder, art-v<version>/, and can be
 // rebuilt without rebuilding every unit.

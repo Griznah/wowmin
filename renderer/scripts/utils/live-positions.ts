@@ -1,6 +1,6 @@
 import type {
   MapPlayerPosition, StreamAppearance, StreamAppearanceUpdate, StreamBotDecision, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame,
-  StreamPath, StreamPathUpdate, StreamPlayerSample, StreamUnitAuraUpdate,
+  StreamPassenger, StreamPassengerUpdate, StreamPath, StreamPathUpdate, StreamPlayerSample, StreamUnitAuraUpdate,
 } from '../../../src/types/electron';
 
 // Buffers stream samples per player and interpolates between them, drawing a
@@ -163,6 +163,7 @@ export function applyLiveSample(player: MapPlayerPosition, sample: StreamPlayerS
     stunned: (sample.stateFlags & 8) !== 0,
     spiritForm: (sample.stateFlags & 16) !== 0,
     flagCarrier: (sample.stateFlags & 32) !== 0,
+    flying: (sample.stateFlags & 64) !== 0,
   };
 }
 
@@ -333,6 +334,43 @@ export class LiveAuraStore {
       else current.set(key, entry.spellIds);
     }
     return current;
+  }
+}
+
+// Passenger lists come with every snapshot while anyone rides a vehicle;
+// past this without word, a player is on foot.
+export const LIVE_PASSENGER_STALE_MS = 2500;
+
+// Which vehicle and seat each player rides, by player guid.
+export class LivePassengerStore {
+  private readonly passengers = new Map<number, { at: number; passenger: StreamPassenger }>();
+
+  push(update: StreamPassengerUpdate, receivedAt: number): void {
+    for (const passenger of update.passengers) this.passengers.set(passenger.guid, { at: receivedAt, passenger });
+  }
+
+  clear(): void {
+    this.passengers.clear();
+  }
+
+  get(guid: number, now: number): StreamPassenger | null {
+    const entry = this.passengers.get(guid);
+    if (!entry) return null;
+    if (now - entry.at > LIVE_PASSENGER_STALE_MS) {
+      this.passengers.delete(guid);
+      return null;
+    }
+    return entry.passenger;
+  }
+
+  // Guids of creatures players are riding.
+  vehicles(now: number): Set<number> {
+    const vehicles = new Set<number>();
+    for (const guid of [...this.passengers.keys()]) {
+      const passenger = this.get(guid, now);
+      if (passenger?.vehicleCreature) vehicles.add(passenger.vehicleGuid);
+    }
+    return vehicles;
   }
 }
 

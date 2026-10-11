@@ -2,7 +2,7 @@ import * as dgram from 'dgram';
 
 import type {
   StreamAppearance, StreamAppearanceUpdate, StreamAuraCategory, StreamBotDecision, StreamCombatEvent, StreamCombatEventKind,
-  StreamCombatEventUpdate, StreamUnitAuras, StreamUnitAuraUpdate, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame, StreamListeners,
+  StreamCombatEventUpdate, StreamPassenger, StreamPassengerUpdate, StreamUnitAuras, StreamUnitAuraUpdate, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame, StreamListeners,
   StreamPath, StreamPathUpdate, StreamPlayerSample, StreamStatus,
 } from './types/electron';
 
@@ -28,6 +28,8 @@ const BOT_MAGIC = 'WMB1';
 const APPEARANCE_MAGIC = 'WMA1';
 const COMBAT_MAGIC = 'WME1';
 const UNIT_AURA_MAGIC = 'WMU1';
+const PASSENGER_MAGIC = 'WMV1';
+const PASSENGER_SIZE = 12;
 const VERSION = 1;
 const HEADER_SIZE = 28;
 const PLAYER_SIZE = 30;
@@ -328,6 +330,25 @@ export function parseUnitAuraDatagram(buffer: Buffer): StreamUnitAuraUpdate | nu
   return { mapId: header.mapId, instanceId: header.instanceId, serverTimeMs: header.serverTimeMs, units };
 }
 
+export function parsePassengerDatagram(buffer: Buffer): StreamPassengerUpdate | null {
+  const header = readEntryHeader(buffer, PASSENGER_MAGIC);
+  if (!header || buffer.length < PATH_HEADER_SIZE + header.count * PASSENGER_SIZE) return null;
+  const passengers: StreamPassenger[] = [];
+  for (let index = 0; index < header.count; index += 1) {
+    const offset = PATH_HEADER_SIZE + index * PASSENGER_SIZE;
+    const flags = buffer.readUInt8(offset + 8);
+    passengers.push({
+      guid: buffer.readUInt32LE(offset),
+      vehicleGuid: buffer.readUInt32LE(offset + 4),
+      vehicleCreature: Boolean(flags & 1),
+      hidden: Boolean(flags & 2),
+      driver: Boolean(flags & 4),
+      seat: buffer.readInt8(offset + 9),
+    });
+  }
+  return { mapId: header.mapId, instanceId: header.instanceId, serverTimeMs: header.serverTimeMs, passengers };
+}
+
 type CommandRunner = (command: string) => Promise<{ success: boolean; message: string }>;
 
 interface WatchedSession {
@@ -444,6 +465,10 @@ export class TelemetryStream {
       this.receiveCombatEvents(message);
       return;
     }
+    if (magic === PASSENGER_MAGIC) {
+      this.receivePassengers(message);
+      return;
+    }
     if (magic === UNIT_AURA_MAGIC) {
       this.receiveUnitAuras(message);
       return;
@@ -538,6 +563,14 @@ export class TelemetryStream {
     const session = this.sessions.get(`${update.mapId}:${update.instanceId}`);
     if (!session) return;
     for (const listener of session.listeners) listener.onCombatEvents?.(update);
+  }
+
+  private receivePassengers(message: Buffer): void {
+    const update = parsePassengerDatagram(message);
+    if (!update?.passengers.length) return;
+    const session = this.sessions.get(`${update.mapId}:${update.instanceId}`);
+    if (!session) return;
+    for (const listener of session.listeners) listener.onPassengers?.(update);
   }
 
   private receiveUnitAuras(message: Buffer): void {

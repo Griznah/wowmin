@@ -11,7 +11,7 @@ import {
 import { drawFactionCrest, drawNameplate, FACTION_NAME_COLORS, type Faction, levelColor, type Nameplate, plateBounds, type PlateStyle } from './instance-scene/nameplates';
 import { ClientIcons } from './utils/client-icons';
 import { SpellNames } from './utils/spell-names';
-import { applyLiveSample, creaturePathKey, getMountModelUrl, getUnitModelUrl, LiveAppearanceStore, LiveAuraStore, LiveBotStore, LiveCreatureBuffer, LivePathStore, LivePositionBuffer, trimPathToPosition } from './utils/live-positions';
+import { applyLiveSample, creaturePathKey, getMountModelUrl, getUnitModelUrl, LiveAppearanceStore, LiveAuraStore, LivePassengerStore, LiveBotStore, LiveCreatureBuffer, LivePathStore, LivePositionBuffer, trimPathToPosition } from './utils/live-positions';
 import { getCreatureCombatStyle, getPlayerCombatStyle } from './utils/unit-animation';
 import { CONTINENT_BOUNDS, worldToCanvas } from './utils/map-coords';
 import { getEnglishMotd, getServerUptime } from './utils/dashboard-data';
@@ -6602,6 +6602,8 @@ let instanceBotCardRenderedAt = 0;
 const instanceLiveAppearances = new LiveAppearanceStore();
 // Which auras with spell art each unit wears, for the client's aura art.
 const instanceLiveAuras = new LiveAuraStore();
+// Which vehicle and seat each player rides.
+const instanceLivePassengers = new LivePassengerStore();
 const INSTANCE_MODELS_STORAGE_KEY = 'wowmin.instanceModels';
 let instanceShowModels = readStoredInstanceModels();
 // Casts, auras, swings, damage, and heals from the live stream, as effects.
@@ -6683,6 +6685,7 @@ function syncInstanceLiveStream(): void {
   instanceLiveBots.clear();
   instanceLiveAppearances.clear();
   instanceLiveAuras.clear();
+  instanceLivePassengers.clear();
   instanceCombatEffects.clear();
   instanceDebugEvents.clear();
   if (!wanted || !streamPositions) return;
@@ -6732,6 +6735,10 @@ function syncInstanceLiveStream(): void {
       if (instanceLiveStream !== stream) return;
       instanceLiveAuras.push(update, performance.now());
       noteInstanceDebug('auras', update.units.length);
+    },
+    onPassengers: (update) => {
+      if (instanceLiveStream !== stream) return;
+      instanceLivePassengers.push(update, performance.now());
     },
   });
   instanceLiveStream = stream;
@@ -7011,7 +7018,9 @@ function getInstanceUnitPoses(
     playersByGuid.set(guid, player);
     const appearance = instanceLiveAppearances.get(false, guid, now);
     const url = getUnitModelUrl(appearance);
-    if (!appearance || !url) continue;
+    // A passenger the client hides isn't drawn: the vehicle stands for them.
+    const passenger = instanceLivePassengers.get(guid, now);
+    if (!appearance || !url || passenger?.hidden) continue;
     poses.push({
       id: `p${guid}`,
       url,
@@ -7028,16 +7037,23 @@ function getInstanceUnitPoses(
       }),
       weapons: appearance,
       sheathState: appearance.sheathState,
-      mountUrl: getMountModelUrl(appearance, Boolean(player.mounted)),
+      // In a vehicle's open seat: seated where the server puts them, the
+      // vehicle wearing the ring.
+      mountUrl: passenger ? null : getMountModelUrl(appearance, Boolean(player.mounted)),
+      riding: passenger ? true : undefined,
+      flying: Boolean(player.flying),
       ...combat(`p${guid}`),
       marker: {
         color: player.alive ? getInstancePlayerColor(player, battleground) : '#475569',
         inCombat: player.inCombat,
         selected: player.name === selectedInstancePlayerName,
         healthPct: null,
+        hidden: Boolean(passenger),
       },
     });
   }
+  // Vehicles players ride aren't pets, whatever their size.
+  const vehicles = instanceLivePassengers.vehicles(now);
   for (const creature of creatures) {
     const appearance = instanceLiveAppearances.get(true, creature.guid, now);
     const url = getUnitModelUrl(appearance);
@@ -7051,7 +7067,7 @@ function getInstanceUnitPoses(
       z: creature.z,
       orientation: creature.orientation,
       scale: appearance.scale || 1,
-      pet: creature.playerControlled,
+      pet: creature.playerControlled && !vehicles.has(creature.guid),
       alive: creature.alive,
       inCombat: creature.inCombat,
       style: getCreatureCombatStyle(
@@ -8288,9 +8304,15 @@ function drawInstanceCanvas(followPass: boolean): void {
     const playerGuid = live ? instanceLivePositions.guidOf(player.name) : null;
     const model = playerGuid !== null && modelShown(`p${playerGuid}`);
     // With a model, labels and the click target sit over its head.
-    // A rider sits higher: its model's own overhead point.
-    const riderTop = model && player.mounted && sceneView && playerGuid !== null
-      ? sceneView.anchor(combatPositions, unitKey(playerGuid, false), 'overhead') : null;
+    // A rider sits higher: its model's own overhead point. A passenger the
+    // client hides is drawn as its vehicle: no marker of its own, and its
+    // name over the vehicle.
+    const passenger = playerGuid !== null ? instanceLivePassengers.get(playerGuid, liveNow) : null;
+    const hiddenPassenger = Boolean(passenger?.hidden);
+    const riderTop = !sceneView || playerGuid === null ? null
+      : hiddenPassenger && passenger
+        ? sceneView.anchor(combatPositions, unitKey(passenger.vehicleGuid, passenger.vehicleCreature), 'overhead')
+        : model && (player.mounted || passenger) ? sceneView.anchor(combatPositions, unitKey(playerGuid, false), 'overhead') : null;
     const top = riderTop
       ? projection.worldToScreen(riderTop[0], riderTop[1], riderTop[2]).y
       : model
@@ -8299,7 +8321,7 @@ function drawInstanceCanvas(followPass: boolean): void {
     const color = getInstancePlayerColor(player, Boolean(battleground));
     const markerRadius = (player.isBot ? 6 : 8) * markerScale;
     // A model has its own ring on the floor (combat and selection included).
-    if (!model) {
+    if (!model && !hiddenPassenger) {
       drawInstanceAuraHalo(ctx, playerGuid !== null ? instanceCombatEffects.tint(unitKey(playerGuid, false), instanceAuraShownAsArt(isoView)) : null, point,
         markerRadius + 7 * markerScale);
       if (player.inCombat) {
@@ -8318,7 +8340,7 @@ function drawInstanceCanvas(followPass: boolean): void {
     // State icons (combat swords and the like) are for the flat map; the 3D
     // view shows combat on the ring and the models.
     if (!isoView) drawCanvasStateIcon(ctx, player, point.x + markerRadius * 0.7, point.y - markerRadius - 6 * markerScale, markerScale);
-    if (!model && player.name === selectedInstancePlayerName) {
+    if (!model && !hiddenPassenger && player.name === selectedInstancePlayerName) {
       ctx.beginPath();
       ctx.arc(point.x, point.y, markerRadius + 4, 0, Math.PI * 2);
       ctx.strokeStyle = '#fbbf24';
@@ -8330,7 +8352,7 @@ function drawInstanceCanvas(followPass: boolean): void {
       : { name: player.name, x: point.x, y: point.y, radius: markerRadius + 6 });
 
     // A model shows which way it faces.
-    if (!model) {
+    if (!model && !hiddenPassenger) {
       const headingLength = 13 * markerScale;
       ctx.beginPath();
       ctx.moveTo(point.x, point.y);
@@ -8360,12 +8382,12 @@ function drawInstanceCanvas(followPass: boolean): void {
           factionIcon: factionOf(player) ? instanceClientIcons.get(`faction-${factionOf(player)}`) : null,
         },
         x: point.x,
-        y: model ? top - 2 : point.y - markerRadius - 4,
+        y: model || riderTop ? top - 2 : point.y - markerRadius - 4,
         priority: (player.name === selectedInstancePlayerName ? 4 : 0) + (!player.isBot ? 2 : 0) + (player.inCombat ? 1 : 0),
         keep: true,
       });
     } else if (visiblePlayers.length <= 60) {
-      const labelY = model ? top - 1 : point.y - markerRadius - 1;
+      const labelY = model || riderTop ? top - 1 : point.y - markerRadius - 1;
       pendingLabels.push({
         name: player.name,
         x: point.x + markerRadius + 4,

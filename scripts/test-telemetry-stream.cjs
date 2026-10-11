@@ -19,7 +19,7 @@ function loadModule(relativePath) {
 }
 
 const {
-  parseBotDatagram, parseCombatEventDatagram, parseCreatureDatagram, parsePathDatagram, parseStreamDatagram, parseUnitAuraDatagram,
+  parseBotDatagram, parseCombatEventDatagram, parseCreatureDatagram, parsePassengerDatagram, parsePathDatagram, parseStreamDatagram, parseUnitAuraDatagram,
 } = loadModule('../src/telemetry-stream.ts');
 const {
   LIVE_AURA_STALE_MS, LIVE_BOT_STALE_MS, LIVE_CREATURE_STALE_MS, LIVE_PATH_STALE_MS, LIVE_RENDER_DELAY_MS, LiveAuraStore, LiveBotStore,
@@ -126,7 +126,7 @@ test('overlays live fields on the polled player record and keeps the rest', () =
   const { applyLiveSample } = loadModule('../renderer/scripts/utils/live-positions.ts');
   const polled = { name: 'Tankard', class: 1, level: 80, position_x: 0, position_y: 0, position_z: 0, orientation: 0,
     alive: true, inCombat: false, healthPct: 100, wmoGroupId: 1, mounted: false };
-  const live = applyLiveSample(polled, { ...tankard, alive: false, inCombat: true, waitingForResurrect: true, stateFlags: 2 | 32 });
+  const live = applyLiveSample(polled, { ...tankard, alive: false, inCombat: true, waitingForResurrect: true, stateFlags: 2 | 32 | 64 });
   assert.equal(live.class, 1);
   assert.equal(live.level, 80);
   near(live.position_x, 529.5, 'x');
@@ -135,6 +135,7 @@ test('overlays live fields on the polled player record and keeps the rest', () =
   assert.equal(live.inCombat, true);
   assert.equal(live.mounted, true);
   assert.equal(live.flagCarrier, true);
+  assert.equal(live.flying, true);
   assert.equal(live.stunned, false);
   assert.equal(live.wmoGroupId, 25050);
 });
@@ -461,4 +462,45 @@ test('looks up streamed players and creatures by guid', () => {
   creatures.push({ creatures: [{ guid: 9, entry: 1, x: 0, y: 0, z: 0, orientation: 0, alive: true }] }, 1000);
   assert.equal(creatures.latest(9).entry, 1);
   assert.equal(creatures.latest(10), null);
+});
+
+// Builds a datagram as BuildPassengerDatagrams in WowMinTelemetry.cpp does.
+function passengerDatagram(passengers) {
+  const header = Buffer.alloc(24);
+  header.write('WMV1', 0, 'latin1');
+  header.writeUInt8(1, 4);
+  header.writeUInt32LE(603, 8);
+  header.writeUInt32LE(9, 12);
+  header.writeUInt32LE(5000, 16);
+  header.writeUInt16LE(passengers.length, 20);
+  return Buffer.concat([header, ...passengers.map((passenger) => {
+    const entry = Buffer.alloc(12);
+    entry.writeUInt32LE(passenger.guid, 0);
+    entry.writeUInt32LE(passenger.vehicle, 4);
+    entry.writeUInt8(passenger.flags, 8);
+    entry.writeInt8(passenger.seat, 9);
+    return entry;
+  })]);
+}
+
+test('parses vehicle passengers and forgets them when they stop coming', () => {
+  const parsed = parsePassengerDatagram(passengerDatagram([
+    { guid: 1, vehicle: 900, flags: 1 | 2 | 4, seat: 0 },
+    { guid: 2, vehicle: 3, flags: 0, seat: 1 },
+  ]));
+  assert.equal(parsed.mapId, 603);
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.passengers)), [
+    { guid: 1, vehicleGuid: 900, vehicleCreature: true, hidden: true, driver: true, seat: 0 },
+    { guid: 2, vehicleGuid: 3, vehicleCreature: false, hidden: false, driver: false, seat: 1 },
+  ]);
+  const good = passengerDatagram([{ guid: 1, vehicle: 900, flags: 1, seat: 0 }]);
+  assert.equal(parsePassengerDatagram(good.subarray(0, good.length - 1)), null);
+
+  const { LivePassengerStore, LIVE_PASSENGER_STALE_MS } = loadModule('../renderer/scripts/utils/live-positions.ts');
+  const store = new LivePassengerStore();
+  store.push(parsed, 1000);
+  assert.equal(store.get(1, 1500).hidden, true);
+  // Only creature vehicles are vehicles to draw.
+  assert.deepEqual([...store.vehicles(1500)], [900]);
+  assert.equal(store.get(1, 1000 + LIVE_PASSENGER_STALE_MS + 1), null);
 });

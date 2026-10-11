@@ -90,6 +90,7 @@ export interface MapPlayerPosition {
   stunned?: boolean;
   spiritForm?: boolean;
   flagCarrier?: boolean;
+  flying?: boolean;
 }
 
 export interface MapBattlegroundWorldState {
@@ -366,6 +367,27 @@ export interface StreamUnitAuraUpdate {
   units: StreamUnitAuras[];
 }
 
+// A player riding a vehicle (Ulduar's demolishers, a mammoth's passenger
+// seat), from the module's passenger lists.
+export interface StreamPassenger {
+  guid: number;
+  vehicleGuid: number;
+  // The vehicle is a creature (else a player, such as a mammoth's rider).
+  vehicleCreature: boolean;
+  // The seat hides its passenger (the client doesn't draw them).
+  hidden: boolean;
+  // The seat drives the vehicle.
+  driver: boolean;
+  seat: number;
+}
+
+export interface StreamPassengerUpdate {
+  mapId: number;
+  instanceId: number;
+  serverTimeMs: number;
+  passengers: StreamPassenger[];
+}
+
 export interface StreamBotUpdate {
   mapId: number;
   instanceId: number;
@@ -382,6 +404,7 @@ export interface StreamListeners {
   onAppearances?: (update: StreamAppearanceUpdate) => void;
   onCombatEvents?: (update: StreamCombatEventUpdate) => void;
   onUnitAuras?: (update: StreamUnitAuraUpdate) => void;
+  onPassengers?: (update: StreamPassengerUpdate) => void;
 }
 
 // creature_template details for labelling streamed creatures.
@@ -458,6 +481,7 @@ export interface SessionRoutePoint {
   stunned?: boolean;
   spiritForm?: boolean;
   flagCarrier?: boolean;
+  flying?: boolean;
   waitingForResurrect?: boolean;
 }
 

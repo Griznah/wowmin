@@ -74,8 +74,11 @@ export interface UnitModelPose {
   // A mounted player's mount model: the mount moves and wears the ring, and
   // the rider sits on its saddle. On foot until the mount's model is ready.
   mountUrl?: string | null;
-  // Set by the layer for a rider: seated, the saddle placing it.
+  // Seated: set by the layer for a rider on a mount, or for a passenger in a
+  // vehicle's open seat.
   riding?: boolean;
+  // In the air: a flying mount flies (or hovers when still).
+  flying?: boolean;
 }
 
 // The id a rider's mount is drawn under.
@@ -148,6 +151,10 @@ interface UnitInstance {
 const CROSSFADE_SECONDS = 0.2;
 // A rider's seated pose (AnimationData 91).
 const RIDING_CLIP = 'Mount';
+// A flying mount in the air, moving faster than this, else hovering.
+const FLY_CLIP = 'Fly';
+const HOVER_CLIP = 'Hover';
+const FLY_MOVING_SPEED = 1;
 const NO_WEAPONS: UnitWeapons = { mainHandType: 0, mainHandSubclass: 0, offHandType: 0, rangedSubclass: 0 };
 const SPEED_SMOOTHING = 0.25;
 // The longest step the mixers advance in one frame, so a stalled tab doesn't
@@ -452,9 +459,11 @@ export class UnitModelLayer {
     // A rider sits still in the saddle; the mount does the moving.
     const riding = Boolean(pose.riding) && clips.has(RIDING_CLIP);
     const stance = riding ? 'stand' : chooseUnitStance({ alive: pose.alive, speed: unit.speed, inCombat: pose.inCombat, style: pose.style });
+    const flight = !riding && pose.flying && pose.alive && clips.has(FLY_CLIP)
+      ? (unit.speed > FLY_MOVING_SPEED || !clips.has(HOVER_CLIP) ? FLY_CLIP : HOVER_CLIP) : null;
     const chosen = riding
       ? { loop: RIDING_CLIP, strike: null }
-      : getStanceClips(stance, pose.weapons, new Set(clips.keys()));
+      : flight ? { loop: flight, strike: null } : getStanceClips(stance, pose.weapons, new Set(clips.keys()));
     // Standing or fighting, a cast or channel holds the pose its kit names.
     const still = stance !== 'walk' && stance !== 'run' && stance !== 'dead';
     const kitLoop = still && !riding && pose.kitLoop && clips.has(pose.kitLoop) ? pose.kitLoop : null;
