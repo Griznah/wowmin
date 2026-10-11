@@ -14,6 +14,21 @@ export interface DbConnectionState {
   error: string | null;
 }
 
+export type ManagedServiceName = 'soap' | 'worldDatabase' | 'mapDatabase' | 'economyDatabase';
+export type ManagedServicePhase = 'disconnected' | 'connecting' | 'connected' | 'degraded';
+
+export interface ManagedServiceStatus {
+  phase: ManagedServicePhase;
+  error: string | null;
+  retryAt: number | null;
+}
+
+export interface BackendConnectionStatus {
+  managed: boolean;
+  updatedAt: number;
+  services: Record<ManagedServiceName, ManagedServiceStatus>;
+}
+
 export interface FieldInfo {
   name: string;
   type: string;

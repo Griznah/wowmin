@@ -80,6 +80,21 @@ export class DatabaseService {
     }
   }
 
+  async checkConnection(): Promise<boolean> {
+    if (!this.pool || !this._connected) return false;
+    let connection: mysql.PoolConnection | null = null;
+    try {
+      connection = await this.pool.getConnection();
+      await connection.ping();
+      connection.release();
+      return true;
+    } catch {
+      connection?.release();
+      await this.disconnect().catch(() => undefined);
+      return false;
+    }
+  }
+
   /**
    * Test the database connection
    */

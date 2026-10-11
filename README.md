@@ -278,11 +278,13 @@ expects `/etc/wowmin.env` to define the variables above and stores profiles in
 [`deploy/wowmin.env.example`](deploy/wowmin.env.example).
 
 For server-managed connections, set all three of `WOWMIN_SOAP_USERNAME`,
-`WOWMIN_SOAP_PASSWORD`, and `WOWMIN_DB_PASSWORD` in the environment. The browser
-then auto-connects SOAP, world DB, characters map DB and economy DB after HTTP
-login, hides the corresponding credential forms, disables saved profiles in
-web mode, and reads logs locally rather than requiring SSH credentials. The
-remaining settings are:
+`WOWMIN_SOAP_PASSWORD`, and `WOWMIN_DB_PASSWORD` in the environment. The Node
+service then owns the shared SOAP, world DB, characters map DB, and economy DB
+connections; browsers only consume their status and cannot disconnect them for
+other users. Unavailable services do not prevent startup, retry with bounded
+backoff, and are health-checked so runtime outages can recover. Credential forms remain hidden, saved profiles are disabled in managed
+mode, and logs are read locally rather than through browser-supplied SSH
+credentials. The remaining settings are:
 
 ```ini
 WOWMIN_SOAP_HOST=127.0.0.1
@@ -292,6 +294,14 @@ WOWMIN_DB_PORT=3306
 WOWMIN_DB_USERNAME=acore
 WOWMIN_WORLD_DB=acore_world
 WOWMIN_CHARACTERS_DB=acore_characters
+WOWMIN_ECONOMY_DB=acore_characters
+# Optional per-service host/port/username/password overrides:
+# WOWMIN_WORLD_DB_HOST / _PORT / _USERNAME / _PASSWORD
+# WOWMIN_CHARACTERS_DB_HOST / _PORT / _USERNAME / _PASSWORD
+# WOWMIN_ECONOMY_DB_HOST / _PORT / _USERNAME / _PASSWORD
+WOWMIN_CONNECTION_RETRY_INITIAL_MS=5000
+WOWMIN_CONNECTION_RETRY_MAX_MS=60000
+WOWMIN_CONNECTION_HEALTH_MS=30000
 WOWMIN_WORLD_CONFIG=/path/to/azerothcore/env/dist/etc/worldserver.conf
 WOWMIN_LOG_DIR=/path/to/azerothcore/env/dist/bin
 # Optional override; default is http(s)://<current-browser-host>:8790/
@@ -313,6 +323,13 @@ Completed session records use readable names such as `WSG-3-Oct08-26.json` and a
 under `$WOWMIN_DATA_DIR/sessions/`; only the explicit **Purge all** button in the
 Session history tab deletes them. Abandoned checkpoints from crashes are
 removed automatically at startup.
+
+Each per-service database setting falls back to the shared `WOWMIN_DB_*`
+value, preserving existing single-host installations while supporting split
+hosts and credentials. During an outage, SOAP and database-backed features
+degrade independently; Live Map retains the latest telemetry snapshot and the
+Dashboard/Players views use SOAP rather than repeatedly probing a known-offline
+characters database.
 
 Keep `/etc/wowmin.env` mode `0600` and restart the service after edits.
 
@@ -687,8 +704,9 @@ npm test          # runs all scripts/test-*.cjs with node:test
 npm run typecheck # tsc --noEmit over the whole project
 ```
 
-Coverage includes the telemetry protocol parser (versions 1–7, rejection of
-truncated/unknown snapshots), command building, session grouping and
+Coverage includes the managed connection lifecycle (serialized startup,
+degraded services, retry/recovery, and shutdown), telemetry protocol parser
+(versions 1–7, rejection of truncated/unknown snapshots), command building, session grouping and
 battleground decoding, map projection math (continents, calibrated
 battlegrounds, minimap tiles, dungeon floors, pan/zoom/fit), the session
 recorder (persistence, deduplication, checkpoint purge, explicit history

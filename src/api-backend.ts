@@ -4,7 +4,8 @@ import packageJson from '../package.json';
 import { SoapClient } from './soap-client';
 import { ConfigStore } from './config-store';
 import { getDbService, DatabaseService } from './database/db-service';
-import { SoapConfig, SoapResult, ConnectionProfile, DbConfig, DbConnectionState, QueryResult, FieldInfo, EntityMediaPreviewRequest, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, LogMonitorFileTailResult, MapPlayerPosition, MapPlayerSnapshot, MapOnlineCounts, OnlinePlayerRow, MapBotWaypointRequest, MapBotWaypoint, CharacterInventoryResult, CharacterInventoryItemRow, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow, SessionIndexEntry, SessionRecord } from './types/api';
+import { SoapConfig, SoapResult, ConnectionProfile, DbConfig, DbConnectionState, QueryResult, FieldInfo, EntityMediaPreviewRequest, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, LogMonitorFileTailResult, MapPlayerPosition, MapPlayerSnapshot, MapOnlineCounts, OnlinePlayerRow, MapBotWaypointRequest, MapBotWaypoint, CharacterInventoryResult, CharacterInventoryItemRow, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow, SessionIndexEntry, SessionRecord, BackendConnectionStatus, ManagedServiceName } from './types/api';
+import { ManagedConnectionLifecycle } from './managed-connection-lifecycle';
 import { inspectRemoteLogs, readRemoteLogTail } from './log-monitor-service';
 import { buildLiveMapTelemetryCommand, parseLiveMapTelemetrySnapshot } from './live-map-telemetry';
 import { SessionRecorder } from './session-recorder';
@@ -28,9 +29,20 @@ const sessionRecorder = new SessionRecorder({
   completionGraceMs: Number(process.env.WOWMIN_SESSION_COMPLETION_GRACE_MS) || 15000,
 });
 let telemetryPollTimer: ReturnType<typeof setInterval> | null = null;
+let managedConnections: ManagedConnectionLifecycle | null = null;
 let telemetryPollInFlight: Promise<MapPlayerSnapshot | null> | null = null;
 let latestTelemetrySnapshot: MapPlayerSnapshot | null = null;
 const telemetryPollIntervalMs = Math.max(500, Number(process.env.WOWMIN_TELEMETRY_POLL_MS) || 1000);
+
+export interface ManagedBackendConfig {
+  soap: SoapConfig;
+  worldDatabase: DbConfig;
+  mapDatabase: DbConfig;
+  economyDatabase: DbConfig;
+  initialRetryMs?: number;
+  maximumRetryMs?: number;
+  healthCheckMs?: number;
+}
 
 function getGithubRepoSlug(): string {
   const metadataSources = [packageJson.homepage, (packageJson as { repository?: string | { url?: string } }).repository]
@@ -229,7 +241,7 @@ function filterTelemetrySnapshot(
   };
 }
 
-apiRouter.handle('soap:connect', async (_event, config: SoapConfig): Promise<SoapResult> => {
+async function connectSoap(config: SoapConfig): Promise<SoapResult> {
   try {
     soapClient = new SoapClient({
       host: config.host,
@@ -248,6 +260,18 @@ apiRouter.handle('soap:connect', async (_event, config: SoapConfig): Promise<Soa
     const errorMessage = err instanceof Error ? err.message : String(err);
     return { success: false, message: errorMessage };
   }
+}
+
+function managedServiceResult(service: ManagedServiceName): SoapResult {
+  const status = managedConnections?.snapshot().services[service];
+  return status?.phase === 'connected'
+    ? { success: true, message: `${service} is managed by the server.` }
+    : { success: false, message: status?.error || `${service} is connecting.` };
+}
+
+apiRouter.handle('soap:connect', async (_event, config: SoapConfig): Promise<SoapResult> => {
+  if (managedConnections) return managedServiceResult('soap');
+  return connectSoap(config);
 });
 
 apiRouter.handle('soap:command', async (_event, command: string): Promise<SoapResult> => {
@@ -264,6 +288,7 @@ apiRouter.handle('soap:command', async (_event, command: string): Promise<SoapRe
 });
 
 apiRouter.handle('soap:disconnect', async (): Promise<SoapResult> => {
+  if (managedConnections) return { success: true, message: 'SOAP is managed by the server.' };
   stopTelemetryPolling();
   soapClient = null;
   return { success: true, message: 'Disconnected.' };
@@ -293,6 +318,8 @@ apiRouter.handle('app:openExternal', async (_event, url: string): Promise<SoapRe
 apiRouter.handle('app:getEntityMediaPreview', async (_event, request: EntityMediaPreviewRequest): Promise<EntityMediaPreviewResult> => {
   return getEntityMediaPreview(request);
 });
+
+apiRouter.handle('app:getConnectionStatus', (): BackendConnectionStatus => getBackendConnectionStatus());
 
 // ── Profile API handlers ──────────────────────────────────────
 
@@ -331,6 +358,10 @@ apiRouter.handle('config:setActiveProfile', (_event, id: string): { success: boo
 // ── Database API handlers ──────────────────────────────────────
 
 apiRouter.handle('db:connect', async (_event, config: DbConfig): Promise<DbConnectionState> => {
+  if (managedConnections) {
+    const status = managedConnections.snapshot().services.worldDatabase;
+    return { connected: status.phase === 'connected', database: dbService.config?.database ?? null, error: status.error };
+  }
   try {
     const result = await dbService.connect(config);
     if (result.success) {
@@ -344,7 +375,7 @@ apiRouter.handle('db:connect', async (_event, config: DbConfig): Promise<DbConne
 });
 
 apiRouter.handle('db:disconnect', async (): Promise<void> => {
-  await dbService.disconnect();
+  if (!managedConnections) await dbService.disconnect();
 });
 
 apiRouter.handle('db:testConnection', async (_event, config: DbConfig): Promise<boolean> => {
@@ -535,6 +566,10 @@ function mapInventorySqlRow(raw: Record<string, unknown>): CharacterInventoryIte
 }
 
 apiRouter.handle('map:connect', async (_event, config: DbConfig): Promise<DbConnectionState> => {
+  if (managedConnections) {
+    const status = managedConnections.snapshot().services.mapDatabase;
+    return { connected: status.phase === 'connected', database: mapDbService.config?.database ?? null, error: status.error };
+  }
   try {
     const result = await mapDbService.connect(config);
     if (result.success) {
@@ -550,7 +585,7 @@ apiRouter.handle('map:connect', async (_event, config: DbConfig): Promise<DbConn
 });
 
 apiRouter.handle('map:disconnect', async (): Promise<void> => {
-  await mapDbService.disconnect();
+  if (!managedConnections) await mapDbService.disconnect();
 });
 
 // ── Economy API handlers ─────────────────────────────────────
@@ -581,6 +616,10 @@ function buildEconomySearchFilter(searchTerm: string): { whereClause: string; pa
 }
 
 apiRouter.handle('economy:connect', async (_event, config: DbConfig): Promise<DbConnectionState> => {
+  if (managedConnections) {
+    const status = managedConnections.snapshot().services.economyDatabase;
+    return { connected: status.phase === 'connected', database: economyDbService.config?.database ?? null, error: status.error };
+  }
   try {
     const result = await economyDbService.connect(config);
     if (result.success) {
@@ -594,7 +633,7 @@ apiRouter.handle('economy:connect', async (_event, config: DbConfig): Promise<Db
 });
 
 apiRouter.handle('economy:disconnect', async (): Promise<void> => {
-  await economyDbService.disconnect();
+  if (!managedConnections) await economyDbService.disconnect();
 });
 
 apiRouter.handle('economy:getOverview', async (): Promise<EconomyOverview> => {
@@ -1037,6 +1076,7 @@ apiRouter.handle('map:getPlayerPositions', async (_event, mapId?: number, instan
       ? latestTelemetrySnapshot
       : await pollWorldTelemetry();
     if (freshSnapshot) return filterTelemetrySnapshot(freshSnapshot, mapId, instanceId);
+    if (latestTelemetrySnapshot) return filterTelemetrySnapshot(latestTelemetrySnapshot, mapId, instanceId);
   }
 
   const filters: string[] = [];
@@ -1150,6 +1190,92 @@ apiRouter.handle('map:getBotWaypoint', async (_event, request: MapBotWaypointReq
     return null;
   }
 });
+
+function unmanagedServiceStatus(connected: boolean): BackendConnectionStatus['services']['soap'] {
+  return { phase: connected ? 'connected' : 'disconnected', error: null, retryAt: null };
+}
+
+export function getBackendConnectionStatus(): BackendConnectionStatus {
+  if (managedConnections) return managedConnections.snapshot();
+  return {
+    managed: false,
+    updatedAt: Date.now(),
+    services: {
+      soap: unmanagedServiceStatus(Boolean(soapClient)),
+      worldDatabase: unmanagedServiceStatus(dbService.connected),
+      mapDatabase: unmanagedServiceStatus(mapDbService.connected),
+      economyDatabase: unmanagedServiceStatus(economyDbService.connected),
+    },
+  };
+}
+
+export function initializeManagedConnections(config: ManagedBackendConfig): Promise<BackendConnectionStatus> {
+  if (managedConnections) return managedConnections.ensureConnected();
+
+  const labels: Record<ManagedServiceName, string> = {
+    soap: 'SOAP',
+    worldDatabase: 'world database',
+    mapDatabase: 'characters database',
+    economyDatabase: 'economy database',
+  };
+  managedConnections = new ManagedConnectionLifecycle({
+    soap: {
+      connected: () => Boolean(soapClient),
+      check: async () => Boolean(soapClient && (await soapClient.testConnection()).success),
+      connect: () => connectSoap(config.soap),
+      disconnect: async () => {
+        stopTelemetryPolling();
+        soapClient = null;
+      },
+    },
+    worldDatabase: {
+      connected: () => dbService.connected,
+      check: () => dbService.checkConnection(),
+      connect: () => dbService.connect(config.worldDatabase),
+      disconnect: () => dbService.disconnect(),
+    },
+    mapDatabase: {
+      connected: () => mapDbService.connected,
+      check: () => mapDbService.checkConnection(),
+      connect: async () => {
+        const result = await mapDbService.connect(config.mapDatabase);
+        if (result.success) {
+          mapAuthDatabaseName = deriveAuthDatabaseName(config.mapDatabase.database);
+          mapPlayerbotsDatabaseName = derivePlayerbotsDatabaseName(config.mapDatabase.database);
+        }
+        return result;
+      },
+      disconnect: () => mapDbService.disconnect(),
+    },
+    economyDatabase: {
+      connected: () => economyDbService.connected,
+      check: () => economyDbService.checkConnection(),
+      connect: () => economyDbService.connect(config.economyDatabase),
+      disconnect: () => economyDbService.disconnect(),
+    },
+  }, {
+    initialRetryMs: config.initialRetryMs,
+    maximumRetryMs: config.maximumRetryMs,
+    healthCheckMs: config.healthCheckMs,
+    onTransition: (service, previous, status) => {
+      const detail = status.error ? `: ${status.error}` : '';
+      console.log(`Managed ${labels[service]} ${previous} -> ${status.phase}${detail}`);
+    },
+  });
+  return managedConnections.start();
+}
+
+export async function shutdownApiBackend(): Promise<void> {
+  if (managedConnections) {
+    const lifecycle = managedConnections;
+    await lifecycle.stop();
+    if (managedConnections === lifecycle) managedConnections = null;
+    return;
+  }
+  stopTelemetryPolling();
+  soapClient = null;
+  await Promise.allSettled([dbService.disconnect(), mapDbService.disconnect(), economyDbService.disconnect()]);
+}
 
 export function initializeApiBackend(dataDir = process.env.WOWMIN_DATA_DIR || DEFAULT_DATA_DIR): void {
   if (!configStore) {

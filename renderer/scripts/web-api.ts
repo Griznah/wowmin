@@ -1,6 +1,5 @@
 import type { BootstrapConfig, WowminAPI } from './types/wowmin-api';
 
-let mapConnection: Promise<unknown> | null = null;
 let bootstrapPromise: Promise<BootstrapConfig> | null = null;
 
 async function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
@@ -48,6 +47,7 @@ const wowminAPI: WowminAPI = {
   },
   app: {
     getBootstrap,
+    getConnectionStatus: () => invoke('app:getConnectionStatus'),
     openExternal: (url) => openBrowserLink('app:openExternal', url),
     getEntityMediaPreview: (request) => invoke('app:getEntityMediaPreview', request),
   },
@@ -67,10 +67,7 @@ const wowminAPI: WowminAPI = {
     getOnline: () => invoke('players:getOnline'),
   },
   map: {
-    connect: (config) => {
-      mapConnection = invoke('map:connect', config);
-      return mapConnection as ReturnType<WowminAPI['map']['connect']>;
-    },
+    connect: (config) => invoke('map:connect', config),
     disconnect: () => invoke('map:disconnect'),
     getPlayerPositions: (mapId, instanceId) => invoke('map:getPlayerPositions', mapId, instanceId),
     getOnlineCounts: () => invoke('map:getOnlineCounts'),
@@ -113,9 +110,30 @@ window.addEventListener('DOMContentLoaded', async () => {
     const soapPassword = document.getElementById('password') as HTMLInputElement | null;
     if (soapUser) soapUser.value = 'managed';
     if (soapPassword) soapPassword.value = 'managed';
-    for (const id of ['map-db-connect-btn', 'db-connect-btn', 'economy-db-connect-btn', 'log-scan-btn']) {
-      document.getElementById(id)?.click();
-    }
+
+    const attached = new Set<string>();
+    const attachConnectedServices = (connections: BootstrapConfig['connections']): void => {
+      const buttons: Array<[keyof BootstrapConfig['connections']['services'], string]> = [
+        ['soap', 'btn-connect'],
+        ['worldDatabase', 'db-connect-btn'],
+        ['mapDatabase', 'map-db-connect-btn'],
+        ['economyDatabase', 'economy-db-connect-btn'],
+      ];
+      for (const [service, buttonId] of buttons) {
+        if (connections.services[service].phase !== 'connected' || attached.has(service)) continue;
+        attached.add(service);
+        document.getElementById(buttonId)?.click();
+      }
+    };
+
+    attachConnectedServices(bootstrap.connections);
+    setInterval(() => {
+      void wowminAPI.app.getConnectionStatus()
+        .then(attachConnectedServices)
+        .catch(() => undefined);
+    }, 5000);
+
+    document.getElementById('log-scan-btn')?.click();
     for (const id of ['auto-refresh-players', 'map-auto-refresh', 'auto-refresh-tickets', 'log-follow-enabled']) {
       const toggle = document.getElementById(id) as HTMLInputElement | null;
       if (toggle) {
@@ -125,8 +143,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
     const logInterval = document.getElementById('log-refresh-interval') as HTMLSelectElement | null;
     if (logInterval) logInterval.value = '2';
-    if (mapConnection) await mapConnection.catch(() => undefined);
-    document.getElementById('btn-connect')?.click();
   } catch (error) {
     console.error('Unable to initialize managed connections:', error);
   }
