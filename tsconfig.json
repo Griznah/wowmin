@@ -22,7 +22,8 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"],
-      "@renderer/*": ["renderer/*"]
+      "@renderer/*": ["renderer/*"],
+      "meshoptimizer/decoder": ["node_modules/meshoptimizer/meshopt_decoder.d.ts"]
     },
     "typeRoots": ["./node_modules/@types", "./src/types"]
   },

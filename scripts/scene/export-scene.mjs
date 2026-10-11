@@ -8,6 +8,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { Document, NodeIO, TextureInfo } from '@gltf-transform/core';
+import { EXTMeshoptCompression } from '@gltf-transform/extensions';
+import { MeshoptEncoder } from 'meshoptimizer';
 
 import { loadM2, M2_MATERIAL_FLAG_TWO_SIDED, M2_TEXTURE_FLAG_WRAP_S, M2_TEXTURE_FLAG_WRAP_T } from './m2.mjs';
 import { findChunk, readChunks } from './chunks.mjs';
@@ -63,6 +65,27 @@ export function transformBoundingBox([minX, minY, minZ, maxX, maxY, maxZ], { pos
     }
   }
   return bounds;
+}
+
+// The scene as GLB with its geometry meshopt-compressed (EXT_meshopt_compression,
+// which three.js decodes). Filter mode: lossless, except normals are stored
+// as 8-bit octahedral vectors. Textures are already compressed images.
+async function writeCompressed(document) {
+  await MeshoptEncoder.ready;
+  // The encoder takes whole triangles only; a few client meshes end in a
+  // partial one (Ruins of Ahn'Qiraj), which draws nothing anyway.
+  for (const mesh of document.getRoot().listMeshes()) {
+    for (const primitive of mesh.listPrimitives()) {
+      const indices = primitive.getIndices();
+      const count = indices?.getCount() ?? 0;
+      if (indices && count % 3) indices.setArray(indices.getArray().slice(0, count - (count % 3)));
+    }
+  }
+  document.createExtension(EXTMeshoptCompression).setRequired(true)
+    .setEncoderOptions({ method: EXTMeshoptCompression.EncoderMethod.FILTER });
+  return new NodeIO().registerExtensions([EXTMeshoptCompression])
+    .registerDependencies({ 'meshopt.encoder': MeshoptEncoder })
+    .writeBinary(document);
 }
 
 // The box the buildings in the play area (`area`, a list of boxes; empty
@@ -490,7 +513,7 @@ export async function exportMapScene({
   if (!groups.length && !doodadCount && !terrain.tiles) throw new Error(`${internalName} produced no drawable geometry.`);
 
   const file = `${mapId}.glb`;
-  const glb = await new NodeIO().writeBinary(document);
+  const glb = await writeCompressed(document);
   fs.writeFileSync(path.join(outputDir, file), glb);
 
   // Scenes with only loose doodads have no group bounds; pad their positions.

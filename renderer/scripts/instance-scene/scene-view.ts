@@ -26,6 +26,7 @@ import {
   type WebGLProgramParametersWithUniforms,
 } from 'three';
 import { type GLTF, GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 
 import { type FadeSettings, type FadeVolume, type IsoView, MAX_FADE_VOLUMES } from '../utils/map-projection';
 import type { CombatEffectStore, Point3, UnitKey } from '../utils/spell-events';
@@ -172,7 +173,8 @@ export class InstanceSceneView {
     wowReachMin: { value: new Vector3(-NO_REACH, -NO_REACH, -NO_REACH) },
     wowReachMax: { value: new Vector3(NO_REACH, NO_REACH, NO_REACH) },
   };
-  private readonly loader = new GLTFLoader();
+  // Scenes are meshopt-compressed (scripts/scene/export-scene.mjs).
+  private readonly loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
   private readonly roots = new Map<string, Object3D>();
   // World bounds of each mesh, so wholly faded meshes are not drawn.
   private readonly meshBounds = new Map<Object3D, MeshBounds[]>();
