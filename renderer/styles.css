@@ -3930,6 +3930,7 @@ tbody tr:hover { background: var(--tint-accent-05); }
 .instance-view-controls .btn[aria-pressed="true"],
 #instance-follow-btn[aria-pressed="true"],
 #instance-paths-btn[aria-pressed="true"],
+#instance-trails-btn[aria-pressed="true"],
 #instance-decisions-btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 #instance-models-btn[aria-pressed="true"],
 #instance-numbers-btn[aria-pressed="true"],

@@ -1,6 +1,6 @@
 import type {
   MapPlayerPosition, StreamAppearance, StreamAppearanceUpdate, StreamBotDecision, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame,
-  StreamPassenger, StreamPassengerUpdate, StreamPath, StreamPathUpdate, StreamPlayerSample, StreamUnitAuraUpdate,
+  StreamGameObject, StreamGameObjectUpdate, StreamPassenger, StreamPassengerUpdate, StreamPath, StreamPathUpdate, StreamPlayerSample, StreamUnitAuraUpdate,
 } from '../../../src/types/electron';
 
 // Buffers stream samples per player and interpolates between them, drawing a
@@ -332,6 +332,35 @@ export class LiveAuraStore {
     for (const [key, entry] of this.auras) {
       if (now - entry.at > LIVE_AURA_STALE_MS) this.auras.delete(key);
       else current.set(key, entry.spellIds);
+    }
+    return current;
+  }
+}
+
+// Game objects are re-sent every 10 s; past this without word, one is gone.
+export const LIVE_GAMEOBJECT_STALE_MS = 35_000;
+
+// The spawned game objects with models, by guid; despawned ones are dropped
+// as the module says they've gone.
+export class LiveGameObjectStore {
+  private readonly objects = new Map<number, { at: number; object: StreamGameObject }>();
+
+  push(update: StreamGameObjectUpdate, receivedAt: number): void {
+    for (const object of update.objects) {
+      if (object.gone) this.objects.delete(object.guid);
+      else this.objects.set(object.guid, { at: receivedAt, object });
+    }
+  }
+
+  clear(): void {
+    this.objects.clear();
+  }
+
+  all(now: number): StreamGameObject[] {
+    const current: StreamGameObject[] = [];
+    for (const [guid, entry] of this.objects) {
+      if (now - entry.at > LIVE_GAMEOBJECT_STALE_MS) this.objects.delete(guid);
+      else current.push(entry.object);
     }
     return current;
   }

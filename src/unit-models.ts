@@ -26,7 +26,7 @@ export const UNIT_MODEL_CACHE_VERSION = 7;
 // Decay (end), not Birth/Death.
 // 4: spell lookups say whether the spell taunts.
 export const SPELL_ART_CACHE_VERSION = 4;
-const SPELL_ART_KINDS = new Set<UnitModelRequest['kind']>(['effect', 'visual', 'spell', 'icon']);
+const SPELL_ART_KINDS = new Set<UnitModelRequest['kind']>(['effect', 'visual', 'spell', 'icon', 'gameobject']);
 const EXTENSIONS: Partial<Record<UnitModelRequest['kind'], string>> = { visual: 'json', spell: 'json', icon: 'png' };
 // A look that could not be built is not retried for this long.
 const FAILURE_RETRY_MS = 10 * 60 * 1000;
@@ -39,8 +39,8 @@ interface PendingBuild {
 export interface UnitModelRequest {
   // 'effect' is a SpellVisualEffectName model; 'visual' a spell's art (JSON);
   // 'spell' a spell's name (JSON); 'icon' a client icon (PNG): a spell's, or
-  // a side's PvP crest.
-  kind: 'creature' | 'character' | 'effect' | 'visual' | 'spell' | 'icon';
+  // a side's PvP crest; 'gameobject' a game object display's model (GLB).
+  kind: 'creature' | 'character' | 'effect' | 'visual' | 'spell' | 'icon' | 'gameobject';
   key: string;
   params: Record<string, unknown>;
 }
@@ -62,6 +62,8 @@ export function parseUnitModelPath(urlPath: string): UnitModelRequest | null {
   if (visual) return { kind: 'visual', key: visual[1], params: { spellId: Number(visual[1]) } };
   const spell = urlPath.match(/^\/assets\/models\/spell\/(\d{1,7})\.json$/);
   if (spell) return { kind: 'spell', key: spell[1], params: { spellId: Number(spell[1]) } };
+  const gameObject = urlPath.match(/^\/assets\/models\/gameobject\/(\d{1,7})\.glb$/);
+  if (gameObject) return { kind: 'gameobject', key: gameObject[1], params: { displayId: Number(gameObject[1]) } };
   const icon = urlPath.match(/^\/assets\/models\/icon\/(faction-(alliance|horde)|spell-(\d{1,7}))\.png$/);
   if (icon) {
     return { kind: 'icon', key: icon[1], params: icon[2] ? { faction: icon[2] } : { spellId: Number(icon[3]) } };

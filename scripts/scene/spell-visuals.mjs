@@ -38,6 +38,8 @@ const KIT_PROC_PARAMS = [21, 25, 29, 33];
 // models the client has for them (creature Rain of Fire spells name the fire
 // model directly). By SpellVisual ID: Blizzard, Rain of Fire.
 export const FALLING_EFFECTS = { 9490: 398, 10379: 448 };
+// GameObjectDisplayInfo: the model file.
+const GAMEOBJECT_MODEL_FIELD = 1;
 // SpellVisualEffectName: name, file, area effect size, scale.
 const EFFECT_FILE = 2;
 const EFFECT_AREA_SIZE = 3;
@@ -55,6 +57,16 @@ export class SpellVisuals {
       this.tables.set(name, buffer ? readDbc(buffer).byId() : new Map());
     }
     return this.tables.get(name);
+  }
+
+  // The model file for a game object display (GameObjectDisplayInfo), or null
+  // if it has none to draw: building (WMO) objects, which the effect
+  // converter can't build, and the invisible marker models of traps.
+  gameObjectModel(displayId) {
+    const file = this.table('GameObjectDisplayInfo').get(displayId)?.string(GAMEOBJECT_MODEL_FIELD);
+    if (!file || /\.wmo$/i.test(file) || /invisible/i.test(file)) return null;
+    const modelName = file.replace(/\.md[xl]$/i, '.m2');
+    return this.readFile(modelName) ? modelName : null;
   }
 
   // The model file for an effect, or null if it isn't in the client.

@@ -2,7 +2,7 @@ import * as dgram from 'dgram';
 
 import type {
   StreamAppearance, StreamAppearanceUpdate, StreamAuraCategory, StreamBotDecision, StreamCombatEvent, StreamCombatEventKind,
-  StreamCombatEventUpdate, StreamPassenger, StreamPassengerUpdate, StreamUnitAuras, StreamUnitAuraUpdate, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame, StreamListeners,
+  StreamCombatEventUpdate, StreamGameObject, StreamGameObjectUpdate, StreamPassenger, StreamPassengerUpdate, StreamUnitAuras, StreamUnitAuraUpdate, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame, StreamListeners,
   StreamPath, StreamPathUpdate, StreamPlayerSample, StreamStatus,
 } from './types/electron';
 
@@ -29,6 +29,8 @@ const APPEARANCE_MAGIC = 'WMA1';
 const COMBAT_MAGIC = 'WME1';
 const UNIT_AURA_MAGIC = 'WMU1';
 const PASSENGER_MAGIC = 'WMV1';
+const GAMEOBJECT_MAGIC = 'WMG1';
+const GAMEOBJECT_SIZE = 48;
 const PASSENGER_SIZE = 12;
 const VERSION = 1;
 const HEADER_SIZE = 28;
@@ -349,6 +351,30 @@ export function parsePassengerDatagram(buffer: Buffer): StreamPassengerUpdate | 
   return { mapId: header.mapId, instanceId: header.instanceId, serverTimeMs: header.serverTimeMs, passengers };
 }
 
+export function parseGameObjectDatagram(buffer: Buffer): StreamGameObjectUpdate | null {
+  const header = readEntryHeader(buffer, GAMEOBJECT_MAGIC);
+  if (!header || buffer.length < PATH_HEADER_SIZE + header.count * GAMEOBJECT_SIZE) return null;
+  const objects: StreamGameObject[] = [];
+  for (let index = 0; index < header.count; index += 1) {
+    const offset = PATH_HEADER_SIZE + index * GAMEOBJECT_SIZE;
+    const float = (at: number) => buffer.readFloatLE(offset + at);
+    objects.push({
+      guid: buffer.readUInt32LE(offset),
+      entry: buffer.readUInt32LE(offset + 4),
+      displayId: buffer.readUInt32LE(offset + 8),
+      x: float(12),
+      y: float(16),
+      z: float(20),
+      rotation: [float(24), float(28), float(32), float(36)],
+      scale: buffer.readUInt16LE(offset + 40) / 1000,
+      type: buffer.readUInt8(offset + 42),
+      state: buffer.readUInt8(offset + 43),
+      gone: Boolean(buffer.readUInt8(offset + 44) & 1),
+    });
+  }
+  return { mapId: header.mapId, instanceId: header.instanceId, serverTimeMs: header.serverTimeMs, objects };
+}
+
 type CommandRunner = (command: string) => Promise<{ success: boolean; message: string }>;
 
 interface WatchedSession {
@@ -469,6 +495,10 @@ export class TelemetryStream {
       this.receivePassengers(message);
       return;
     }
+    if (magic === GAMEOBJECT_MAGIC) {
+      this.receiveGameObjects(message);
+      return;
+    }
     if (magic === UNIT_AURA_MAGIC) {
       this.receiveUnitAuras(message);
       return;
@@ -563,6 +593,14 @@ export class TelemetryStream {
     const session = this.sessions.get(`${update.mapId}:${update.instanceId}`);
     if (!session) return;
     for (const listener of session.listeners) listener.onCombatEvents?.(update);
+  }
+
+  private receiveGameObjects(message: Buffer): void {
+    const update = parseGameObjectDatagram(message);
+    if (!update?.objects.length) return;
+    const session = this.sessions.get(`${update.mapId}:${update.instanceId}`);
+    if (!session) return;
+    for (const listener of session.listeners) listener.onGameObjects?.(update);
   }
 
   private receivePassengers(message: Buffer): void {

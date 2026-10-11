@@ -388,6 +388,33 @@ export interface StreamPassengerUpdate {
   passengers: StreamPassenger[];
 }
 
+// A spawned game object with a model (a battleground banner or flag, a
+// door, a chest), from the module's game object lists.
+export interface StreamGameObject {
+  guid: number;
+  entry: number;
+  displayId: number;
+  x: number;
+  y: number;
+  z: number;
+  // A quaternion (x, y, z, w).
+  rotation: [number, number, number, number];
+  scale: number;
+  // GameobjectTypes (0 a door, 10 a goober, 24 a flag stand...).
+  type: number;
+  // GOState: 0 active (a door open), 1 ready, 2 alternative.
+  state: number;
+  // Despawned: forget it.
+  gone: boolean;
+}
+
+export interface StreamGameObjectUpdate {
+  mapId: number;
+  instanceId: number;
+  serverTimeMs: number;
+  objects: StreamGameObject[];
+}
+
 export interface StreamBotUpdate {
   mapId: number;
   instanceId: number;
@@ -405,6 +432,7 @@ export interface StreamListeners {
   onCombatEvents?: (update: StreamCombatEventUpdate) => void;
   onUnitAuras?: (update: StreamUnitAuraUpdate) => void;
   onPassengers?: (update: StreamPassengerUpdate) => void;
+  onGameObjects?: (update: StreamGameObjectUpdate) => void;
 }
 
 // creature_template details for labelling streamed creatures.

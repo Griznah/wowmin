@@ -35,6 +35,7 @@ import type { CombatEffectStore, Point3, UnitKey } from '../utils/spell-events';
 import { applyIsoCamera } from './iso-camera';
 import { SpellEffectLayer, type UnitAnchorRole } from './spell-effects';
 import { buildLayerArray, BYTE_SHADING_SCALE, createTerrainMaterial, prepareAlphaAtlas } from './terrain-material';
+import { GameObjectLayer, type GameObjectPose } from './game-objects';
 import { SpellVisualLayer, type UnitInfo } from './spell-visual-layer';
 import { type UnitModelPose, UnitModelLayer } from './unit-models';
 
@@ -190,6 +191,7 @@ export class InstanceSceneView {
   private readonly effects = new SpellEffectLayer();
   // The client's own spell art, where a spell has it.
   private readonly spellVisuals: SpellVisualLayer;
+  private readonly gameObjects: GameObjectLayer;
   private effectsShown = false;
   // Liquid materials and their animation frames, by scene URL.
   private readonly liquids = new Map<string, Array<{ material: MeshBasicMaterial; frames: Texture[] }>>();
@@ -214,6 +216,11 @@ export class InstanceSceneView {
       this.onChange();
     });
     this.scene.add(this.spellVisuals.group);
+    this.gameObjects = new GameObjectLayer(() => {
+      this.lastFrameKey = '';
+      this.onChange();
+    });
+    this.scene.add(this.gameObjects.group);
     this.scene.add(new AmbientLight(0xffffff, 2.2));
     const sun = new DirectionalLight(0xffffff, 1.6);
     sun.position.set(0.4, 1, 0.6);
@@ -284,6 +291,19 @@ export class InstanceSceneView {
     // One more frame after the last effect ends, to clear it.
     this.effectsShown = count > 0 || before > 0;
     return count;
+  }
+
+  // Places the game objects for the next render, leaving out those the
+  // last frame's fade or reach cut hides; returns how many are drawn.
+  setGameObjects(poses: GameObjectPose[], now: number): number {
+    if (this.lost) return 0;
+    const fade = this.lastFade;
+    const reach = fade?.fade.reach;
+    const shown = poses.filter(({ position: [x, y, z] }) => !fade || (
+      (!reach || (x >= reach.minX && x <= reach.maxX && y >= reach.minY && y <= reach.maxY && z >= reach.minZ && z <= reach.maxZ))
+      && getSceneFade([x, y, z], fade.volumes, fade.fade) >= 0.5));
+    this.gameObjects.update(shown, now, this.camera);
+    return this.gameObjects.count;
   }
 
   // Whether an aura's spell shows the client's art (so its tint gives way).
@@ -374,7 +394,8 @@ export class InstanceSceneView {
     ].join('|');
     // Animated models, live effects, and liquids need every frame.
     const liquids = this.liquids.get(url);
-    if (frameKey === this.lastFrameKey && !this.units.count && !this.effectsShown && !liquids?.length) return true;
+    if (frameKey === this.lastFrameKey && !this.units.count && !this.effectsShown && !liquids?.length
+      && !this.gameObjects.count) return true;
     if (liquids) {
       for (const liquid of liquids) {
         liquid.material.map = liquid.frames[Math.floor(performance.now() / (1000 / LIQUID_FPS)) % liquid.frames.length];

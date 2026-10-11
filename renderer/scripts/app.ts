@@ -5,13 +5,14 @@ import { type ActiveInstanceSession, type DungeonMapFloor, type InstanceCoordina
 import { clampIsoPitch, createFlatProjection, createIsoView, DEFAULT_ISO_YAW, type FadeSettings, getFadeVolumes, getHeightBand, getIsoPanForCenter, getNextQuarterTurn, ISO_PITCH, type IsoView, type MapProjection, resolveMinimapTileProjection, type SceneBox } from './utils/map-projection';
 import { InstanceSceneView } from './instance-scene/scene-view';
 import type { UnitModelPose } from './instance-scene/unit-models';
+import type { GameObjectPose } from './instance-scene/game-objects';
 import {
   CAST_GRACE_MS, CombatEffectStore, NUMBER_LIFETIME_MS, type Point3, type StrikeKind, type UnitKey, unitKey,
 } from './utils/spell-events';
 import { drawFactionCrest, drawNameplate, FACTION_NAME_COLORS, type Faction, levelColor, type Nameplate, plateBounds, type PlateStyle } from './instance-scene/nameplates';
 import { ClientIcons } from './utils/client-icons';
 import { SpellNames } from './utils/spell-names';
-import { applyLiveSample, creaturePathKey, getMountModelUrl, getUnitModelUrl, LiveAppearanceStore, LiveAuraStore, LivePassengerStore, LiveBotStore, LiveCreatureBuffer, LivePathStore, LivePositionBuffer, trimPathToPosition } from './utils/live-positions';
+import { applyLiveSample, creaturePathKey, getMountModelUrl, getUnitModelUrl, LiveAppearanceStore, LiveAuraStore, LiveGameObjectStore, LivePassengerStore, LiveBotStore, LiveCreatureBuffer, LivePathStore, LivePositionBuffer, trimPathToPosition } from './utils/live-positions';
 import { getCreatureCombatStyle, getPlayerCombatStyle } from './utils/unit-animation';
 import { CONTINENT_BOUNDS, worldToCanvas } from './utils/map-coords';
 import { getEnglishMotd, getServerUptime } from './utils/dashboard-data';
@@ -6479,6 +6480,7 @@ const $instanceFadesBtn = $<HTMLButtonElement>('instance-fades-btn');
 const $instanceHorizontalFadeValue = $<HTMLOutputElement>('instance-horizontal-fade-value');
 const $instanceFollowBtn = $<HTMLButtonElement>('instance-follow-btn');
 const $instancePathsBtn = $<HTMLButtonElement>('instance-paths-btn');
+const $instanceTrailsBtn = $<HTMLButtonElement>('instance-trails-btn');
 const $instanceMobsMode = $<HTMLSelectElement>('instance-mobs-mode');
 const $instancePlatesMode = $<HTMLSelectElement>('instance-plates-mode');
 const $instanceDecisionsBtn = $<HTMLButtonElement>('instance-decisions-btn');
@@ -6575,6 +6577,8 @@ const INSTANCE_PLATES_STORAGE_KEY = 'wowmin.instancePlates';
 let instancePlatesMode = readStoredInstancePlatesMode();
 // Plates are drawn at this size with the icon size setting at its default.
 const INSTANCE_PLATE_BASE_ICON_SCALE = 1.25;
+// Players' pets get plates this much smaller.
+const INSTANCE_PET_PLATE_SIZE = 0.75;
 // Mob plates: hostile, neutral, and a player's pet or guardian.
 const INSTANCE_PLATE_HOSTILE_COLOR = '#d42a1e';
 const INSTANCE_PLATE_NEUTRAL_COLOR = '#e8c62a';
@@ -6588,6 +6592,9 @@ let instanceCreatureInfoQueue = new Set<number>();
 let instanceCreatureInfoTimer: ReturnType<typeof setTimeout> | null = null;
 const INSTANCE_PATHS_STORAGE_KEY = 'wowmin.instancePaths';
 let instanceShowPaths = readStoredInstancePaths();
+// The faded line of where each player has been.
+const INSTANCE_TRAILS_STORAGE_KEY = 'wowmin.instanceTrails';
+let instanceShowTrails = readStoredInstanceTrails();
 // What each bot is deciding (mod-playerbots), keyed by name.
 const instanceLiveBots = new LiveBotStore();
 const INSTANCE_DECISIONS_STORAGE_KEY = 'wowmin.instanceDecisions';
@@ -6604,6 +6611,11 @@ const instanceLiveAppearances = new LiveAppearanceStore();
 const instanceLiveAuras = new LiveAuraStore();
 // Which vehicle and seat each player rides.
 const instanceLivePassengers = new LivePassengerStore();
+// Spawned game objects with models (battleground banners and flags, doors).
+const instanceLiveGameObjects = new LiveGameObjectStore();
+// GameobjectTypes door, and GOState active: an open door, drawn as gone.
+const GAMEOBJECT_TYPE_DOOR = 0;
+const GO_STATE_ACTIVE = 0;
 const INSTANCE_MODELS_STORAGE_KEY = 'wowmin.instanceModels';
 let instanceShowModels = readStoredInstanceModels();
 // Casts, auras, swings, damage, and heals from the live stream, as effects.
@@ -6686,6 +6698,7 @@ function syncInstanceLiveStream(): void {
   instanceLiveAppearances.clear();
   instanceLiveAuras.clear();
   instanceLivePassengers.clear();
+  instanceLiveGameObjects.clear();
   instanceCombatEffects.clear();
   instanceDebugEvents.clear();
   if (!wanted || !streamPositions) return;
@@ -6739,6 +6752,11 @@ function syncInstanceLiveStream(): void {
     onPassengers: (update) => {
       if (instanceLiveStream !== stream) return;
       instanceLivePassengers.push(update, performance.now());
+    },
+    onGameObjects: (update) => {
+      if (instanceLiveStream !== stream) return;
+      instanceLiveGameObjects.push(update, performance.now());
+      noteInstanceDebug('gameobjects', update.objects.length);
     },
   });
   instanceLiveStream = stream;
@@ -6909,6 +6927,25 @@ function readStoredInstancePaths(): boolean {
   } catch {
     return true;
   }
+}
+
+function readStoredInstanceTrails(): boolean {
+  try {
+    return window.localStorage.getItem(INSTANCE_TRAILS_STORAGE_KEY) !== 'false';
+  } catch {
+    return true;
+  }
+}
+
+function setInstanceShowTrails(enabled: boolean): void {
+  instanceShowTrails = enabled;
+  $instanceTrailsBtn?.setAttribute('aria-pressed', String(enabled));
+  try {
+    window.localStorage.setItem(INSTANCE_TRAILS_STORAGE_KEY, String(enabled));
+  } catch {
+    // Preference is per-session only when storage is unavailable.
+  }
+  renderInstanceCanvas();
 }
 
 function setInstanceShowPaths(enabled: boolean): void {
@@ -7087,6 +7124,20 @@ function getInstanceUnitPoses(
   return poses;
 }
 
+// The streamed game objects to draw: an open door goes (it has swung or slid
+// out of the way); the rest stand where the server put them, turned about Z.
+function getInstanceGameObjectPoses(now: number): GameObjectPose[] {
+  return instanceLiveGameObjects.all(now)
+    .filter((object) => !(object.type === GAMEOBJECT_TYPE_DOOR && object.state === GO_STATE_ACTIVE))
+    .map((object) => ({
+      guid: object.guid,
+      displayId: object.displayId,
+      position: [object.x, object.y, object.z] as Point3,
+      yaw: 2 * Math.atan2(object.rotation[2], object.rotation[3]),
+      scale: object.scale || 1,
+    }));
+}
+
 function readStoredInstanceDecisions(): boolean {
   try {
     return window.localStorage.getItem(INSTANCE_DECISIONS_STORAGE_KEY) !== 'false';
@@ -7246,14 +7297,14 @@ const INSTANCE_PLATE_MOB_NUDGES = 2;
 function drawInstancePlates(
   ctx: CanvasRenderingContext2D,
   style: PlateStyle,
-  plates: { plate: Nameplate; x: number; y: number; priority: number; keep: boolean }[],
+  plates: { plate: Nameplate; x: number; y: number; priority: number; keep: boolean; size?: number }[],
   scale: number,
 ): void {
   const ordered = [...plates].sort((left, right) => Number(right.keep) - Number(left.keep) || right.priority - left.priority);
   const placed: { left: number; right: number; top: number; bottom: number }[] = [];
   const shown: typeof plates = [];
   for (const entry of ordered) {
-    const bounds = plateBounds(style, entry.plate, scale);
+    const bounds = plateBounds(style, entry.plate, scale * (entry.size ?? 1));
     const rectAt = (y: number) => ({ left: entry.x + bounds.left, right: entry.x + bounds.right, top: y + bounds.top, bottom: y + bounds.bottom });
     const overlap = (y: number) => {
       const rect = rectAt(y);
@@ -7269,7 +7320,7 @@ function drawInstancePlates(
     placed.push(rectAt(entry.y));
     shown.push(entry);
   }
-  for (const entry of shown.reverse()) drawNameplate(ctx, style, entry.plate, entry.x, entry.y, scale);
+  for (const entry of shown.reverse()) drawNameplate(ctx, style, entry.plate, entry.x, entry.y, scale * (entry.size ?? 1));
 }
 
 function drawInstanceCreature(
@@ -8110,6 +8161,7 @@ function drawInstanceCanvas(followPass: boolean): void {
     : new Set<string>();
   const effectsDrawn = sceneView?.setEffects(live && instanceView3d ? instanceCombatEffects : null, combatPositions, liveNow,
     live ? instanceLiveAuras.all(liveNow) : undefined, (spellId) => instanceSpellNames.isTaunt(spellId)) ?? 0;
+  sceneView?.setGameObjects(live && instanceView3d ? getInstanceGameObjectPoses(liveNow) : [], liveNow);
   const bossPositions = creatures
     .filter((creature) => isBossCreature(creature, instanceCreatureInfo.get(creature.entry)))
     .map((creature): Point3 => [creature.x, creature.y, creature.z]);
@@ -8164,7 +8216,8 @@ function drawInstanceCanvas(followPass: boolean): void {
   const markerScale = getCanvasPlayerIconScale(viewTransform.zoom);
   // In 3D, nameplates take the labels' place; (x, y) is over the unit's head.
   const plateStyle = isoView && instancePlatesMode !== 'labels' ? instancePlatesMode : null;
-  const pendingPlates: { plate: Nameplate; x: number; y: number; priority: number; keep: boolean }[] = [];
+  // `size` scales a plate (players' pets get smaller ones).
+  const pendingPlates: { plate: Nameplate; x: number; y: number; priority: number; keep: boolean; size?: number }[] = [];
   const partyLevel = Math.max(1, ...visiblePlayers.map((player) => player.level || 1));
   const activeCasts = new Map<UnitKey, { spellId: number; startAt: number; endAt: number; channeled: boolean }>();
   if (plateStyle && live) {
@@ -8276,6 +8329,7 @@ function drawInstanceCanvas(followPass: boolean): void {
             y: plateY,
             priority: boss ? 1 : creature.inCombat ? 0 : -1,
             keep: boss || creature.inCombat,
+            size: creature.playerControlled ? INSTANCE_PET_PLATE_SIZE : 1,
           });
         }
       } else if (info && creature.alive && !scenery && (boss || viewTransform.zoom >= INSTANCE_MOB_LABEL_ZOOM)) {
@@ -8289,7 +8343,7 @@ function drawInstanceCanvas(followPass: boolean): void {
   for (const player of visiblePlayers) {
     const trail = (instanceTrails.get(player.name) ?? []).filter((point) =>
       !floor || getParticipantDungeonFloor(point, asset?.metadata.floors ?? [])?.id === floor.id);
-    if (trail.length > 1) {
+    if (instanceShowTrails && trail.length > 1) {
       ctx.beginPath();
       trail.forEach((point, index) => {
         const projected = project(point);
@@ -8899,6 +8953,8 @@ $instanceFollowBtn?.addEventListener('click', () => setInstanceFollowSelected(!i
 $instancePathsBtn?.setAttribute('aria-pressed', String(instanceShowPaths));
 if ($instancePathsBtn && !window.electronAPI.map.streamPositions) $instancePathsBtn.disabled = true;
 $instancePathsBtn?.addEventListener('click', () => setInstanceShowPaths(!instanceShowPaths));
+$instanceTrailsBtn?.setAttribute('aria-pressed', String(instanceShowTrails));
+$instanceTrailsBtn?.addEventListener('click', () => setInstanceShowTrails(!instanceShowTrails));
 $instanceDecisionsBtn?.setAttribute('aria-pressed', String(instanceShowDecisions));
 if ($instanceDecisionsBtn && !window.electronAPI.map.streamPositions) $instanceDecisionsBtn.disabled = true;
 $instanceDecisionsBtn?.addEventListener('click', () => setInstanceShowDecisions(!instanceShowDecisions));

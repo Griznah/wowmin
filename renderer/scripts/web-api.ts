@@ -77,6 +77,7 @@ if (!window.electronAPI) {
         source.addEventListener('combat', (event) => listeners.onCombatEvents?.(data(event)));
         source.addEventListener('auras', (event) => listeners.onUnitAuras?.(data(event)));
         source.addEventListener('passengers', (event) => listeners.onPassengers?.(data(event)));
+        source.addEventListener('gameobjects', (event) => listeners.onGameObjects?.(data(event)));
         // EventSource reconnects by itself; report the gap meanwhile.
         source.addEventListener('error', () => listeners.onStatus('starting'));
         return () => source.close();

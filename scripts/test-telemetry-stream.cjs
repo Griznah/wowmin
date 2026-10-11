@@ -19,7 +19,7 @@ function loadModule(relativePath) {
 }
 
 const {
-  parseBotDatagram, parseCombatEventDatagram, parseCreatureDatagram, parsePassengerDatagram, parsePathDatagram, parseStreamDatagram, parseUnitAuraDatagram,
+  parseBotDatagram, parseCombatEventDatagram, parseCreatureDatagram, parseGameObjectDatagram, parsePassengerDatagram, parsePathDatagram, parseStreamDatagram, parseUnitAuraDatagram,
 } = loadModule('../src/telemetry-stream.ts');
 const {
   LIVE_AURA_STALE_MS, LIVE_BOT_STALE_MS, LIVE_CREATURE_STALE_MS, LIVE_PATH_STALE_MS, LIVE_RENDER_DELAY_MS, LiveAuraStore, LiveBotStore,
@@ -503,4 +503,49 @@ test('parses vehicle passengers and forgets them when they stop coming', () => {
   // Only creature vehicles are vehicles to draw.
   assert.deepEqual([...store.vehicles(1500)], [900]);
   assert.equal(store.get(1, 1000 + LIVE_PASSENGER_STALE_MS + 1), null);
+});
+
+// Builds a datagram as BuildGameObjectDatagrams in WowMinTelemetry.cpp does.
+function gameObjectDatagram(objects) {
+  const header = Buffer.alloc(24);
+  header.write('WMG1', 0, 'latin1');
+  header.writeUInt8(1, 4);
+  header.writeUInt32LE(529, 8);
+  header.writeUInt32LE(7, 12);
+  header.writeUInt32LE(5000, 16);
+  header.writeUInt16LE(objects.length, 20);
+  return Buffer.concat([header, ...objects.map((object) => {
+    const entry = Buffer.alloc(48);
+    entry.writeUInt32LE(object.guid, 0);
+    entry.writeUInt32LE(object.entry, 4);
+    entry.writeUInt32LE(object.display, 8);
+    [object.x, object.y, object.z, ...object.rotation].forEach((value, index) => entry.writeFloatLE(value, 12 + index * 4));
+    entry.writeUInt16LE(object.scale * 1000, 40);
+    entry.writeUInt8(object.type, 42);
+    entry.writeUInt8(object.state, 43);
+    entry.writeUInt8(object.gone ? 1 : 0, 44);
+    return entry;
+  })]);
+}
+
+test('parses game objects and forgets despawned ones', () => {
+  const banner = { guid: 50, entry: 180058, display: 6251, x: 1166.5, y: 1200.5, z: -56.5, rotation: [0, 0, 0.5, 0.75], scale: 1, type: 1, state: 1 };
+  const parsed = parseGameObjectDatagram(gameObjectDatagram([banner, { ...banner, guid: 51, display: 6271, type: 0, state: 0 }]));
+  assert.equal(parsed.mapId, 529);
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.objects[0])), {
+    guid: 50, entry: 180058, displayId: 6251, x: 1166.5, y: 1200.5, z: -56.5, rotation: [0, 0, 0.5, 0.75], scale: 1,
+    type: 1, state: 1, gone: false,
+  });
+  assert.equal(parsed.objects[1].state, 0);
+  const good = gameObjectDatagram([banner]);
+  assert.equal(parseGameObjectDatagram(good.subarray(0, good.length - 1)), null);
+
+  const { LiveGameObjectStore, LIVE_GAMEOBJECT_STALE_MS } = loadModule('../renderer/scripts/utils/live-positions.ts');
+  const store = new LiveGameObjectStore();
+  store.push(parsed, 1000);
+  assert.equal(store.all(1500).length, 2);
+  // The node changes hands: the Alliance banner despawns.
+  store.push(parseGameObjectDatagram(gameObjectDatagram([{ ...banner, gone: true }])), 2000);
+  assert.deepEqual(JSON.parse(JSON.stringify(store.all(2500).map((object) => object.guid))), [51]);
+  assert.equal(store.all(1000 + LIVE_GAMEOBJECT_STALE_MS + 1).length, 0);
 });

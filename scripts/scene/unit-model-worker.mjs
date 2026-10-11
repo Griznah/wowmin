@@ -39,6 +39,10 @@ async function build(kind, params) {
     return spell ? Buffer.from(JSON.stringify(spell)) : null;
   }
   if (kind === 'icon') return buildIconPng(data().readFile, params, visuals());
+  if (kind === 'gameobject') {
+    const modelName = visuals().gameObjectModel(Number(params.displayId));
+    return modelName ? buildEffectGlb(data().readFile, modelName) : null;
+  }
   if (kind === 'effect') {
     const modelName = visuals().effectModel(Number(params.effectId));
     return modelName ? buildEffectGlb(data().readFile, modelName) : null;
