@@ -3,6 +3,59 @@ const { test } = require('node:test');
 const { pathToFileURL } = require('node:url');
 const path = require('node:path');
 const extractor = import(pathToFileURL(path.join(__dirname, 'extract-map-assets.mjs')).href);
+const npmOptionNames = [
+  'source', 'output', 'map', 'map_dir', 'workspace', 'quality', 'all_instances', 'keep_workspace',
+];
+
+function withNpmConfig(config, callback) {
+  const previous = new Map();
+  for (const name of npmOptionNames) {
+    const key = `npm_config_${name}`;
+    previous.set(key, process.env[key]);
+    delete process.env[key];
+  }
+  for (const [name, value] of Object.entries(config)) process.env[`npm_config_${name}`] = value;
+  try {
+    return callback();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+test('parses extractor options passed after the npm argument separator', async () => {
+  const { parseArgs } = await extractor;
+  const options = withNpmConfig({}, () => parseArgs([
+    '--source', '/tmp/wow-client', '--all-instances', '--quality', '100',
+  ]));
+  assert.equal(options.source, path.resolve('/tmp/wow-client'));
+  assert.equal(options.allInstances, true);
+  assert.equal(options.quality, 100);
+  assert.equal(options.output, path.resolve('assets/instances'));
+});
+
+test('parses equals-style npm config options and raw boolean true', async () => {
+  const { parseArgs } = await extractor;
+  const options = withNpmConfig({
+    source: '/tmp/wow-client', all_instances: 'true', quality: '100', keep_workspace: 'true',
+  }, () => parseArgs([]));
+  assert.equal(options.source, path.resolve('/tmp/wow-client'));
+  assert.equal(options.allInstances, true);
+  assert.equal(options.keepWorkspace, true);
+  assert.equal(options.quality, 100);
+  assert.equal(options.output, path.resolve('assets/instances'));
+});
+
+test('rejects spaced npm shorthand before positional values are misread', async () => {
+  const { parseArgs } = await extractor;
+  assert.throws(
+    () => withNpmConfig({ source: 'true', all_instances: 'true', quality: 'true' },
+      () => parseArgs(['/tmp/wow-client', '100'])),
+    /npm consumed --source, --quality without their values.*standalone --/,
+  );
+});
 
 test('resolves client artwork aliases missing from WorldMapArea', async () => {
   const { getClientMapDirectoryAliases } = await extractor;

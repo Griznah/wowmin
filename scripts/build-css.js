@@ -19,6 +19,7 @@ build().catch((error) => {
 });
 
 if (process.argv.includes('--watch')) {
+  /** @type {NodeJS.Timeout | undefined} */
   let timer;
   for (const directory of ['renderer/styles', 'renderer/scripts']) {
     watch(path.join(__dirname, '..', directory), { recursive: true }, () => {

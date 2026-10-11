@@ -1,4 +1,4 @@
-/** @type {import('tailwindcss').Config} */
+/** @type {import('tailwindcss', { with: { 'resolution-mode': 'import' } }).Config} */
 module.exports = {
   content: [
     "./renderer/**/*.html",

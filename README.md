@@ -167,7 +167,8 @@ accessed from a browser.
 
 | Requirement | Notes |
 |---|---|
-| **Node.js** ≥ 18 | https://nodejs.org |
+| **Node.js** ≥ 20 | Required by Tailwind CSS v4's native build tooling; https://nodejs.org |
+| **Modern browser** | Chrome/Edge 111+, Firefox 128+, or Safari 16.4+ (the Tailwind CSS v4 compatibility baseline) |
 | **AzerothCore worldserver** | SOAP must be enabled (see below) |
 | **MySQL/MariaDB** | For database editing features |
 | **`mod-wowmin-telemetry`** | Optional but strongly recommended for live map/instance telemetry (see below) |
@@ -443,7 +444,7 @@ when Test Deck is not available from the browser at the default
 5. **Click a dot** or a row in the sidebar to select a player — a panel appears with their details and quick action buttons (Info, Freeze, Unfreeze, Summon, Kick, Ban). Actions are sent via the active SOAP connection. Selecting a player does not move the camera, pan, or zoom.
 6. Use the mouse wheel or **double-click** to zoom into the map; drag to pan while zoomed, or click the zoom percentage control to reset to `100%`.
 7. Optionally place map image files (`0.jpg`, `1.jpg`, `530.jpg`, `571.jpg`) in `assets/maps/` for visual map backgrounds (see `assets/maps/README.txt`). The app preserves the image aspect ratio automatically.
-8. To generate those from a WoW 3.3.5a client, run `npm run extract:maps -- --source /path/to/WoW` (or the npm shorthand `npm run extract:maps --source /path/to/WoW`) or point it at an extracted `World/Minimaps` folder.
+8. To generate those from a WoW 3.3.5a client, run `npm run extract:maps -- --source /path/to/WoW` or point it at an extracted `World/Minimaps` folder. The standalone `--` tells npm to forward the remaining arguments unchanged.
 9. Optionally extract race/gender portraits, class icons, and player-state icons with `npm run extract:icons -- --source /path/to/WoW`. If skipped, WoWMin uses emoji fallbacks.
 
 ### Instance / Battleground Watch
@@ -542,8 +543,8 @@ You can now generate the live-map backgrounds directly from WoW minimap tiles:
 # From a WoW 3.3.5a client root (the extractor now reads WoW MPQs directly; external tools are only a fallback)
 npm run extract:maps -- --source "/path/to/WoW 3.3.5a"
 
-# npm shorthand also works
-npm run extract:maps --source "/path/to/WoW 3.3.5a"
+# Without the separator, npm value options require equals syntax
+npm run extract:maps --source="/path/to/WoW 3.3.5a"
 
 # Or from an already extracted World/Minimaps directory
 npm run extract:maps -- --source "/path/to/World/Minimaps"
@@ -583,10 +584,10 @@ The same extractor produces the artwork used by the Instance Watch tab:
 
 ```bash
 # One map
-npm run extract:maps --source "/path/to/WoW" --map 489
+npm run extract:maps -- --source "/path/to/WoW" --map 489
 
 # Every instance, raid, battleground, and arena (recommended once)
-npm run extract:maps --source "/path/to/WoW" --all-instances
+npm run extract:maps -- --source "/path/to/WoW" --all-instances
 ```
 
 #### Classic/TBC dungeon artwork with WDM patches

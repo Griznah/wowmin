@@ -86,20 +86,27 @@ const DEFAULTS = {
   keepWorkspace: false,
 };
 
+const NPM_VALUE_OPTIONS = ['source', 'output', 'map', 'map_dir', 'workspace', 'quality'];
+
 function readNpmConfigValue(name) {
   const value = process.env[`npm_config_${name}`];
-  if (value === undefined || value === '' || value === 'true') {
-    return undefined;
-  }
-  return value;
+  return value === undefined || value === '' || value === 'true' ? undefined : value;
 }
 
 function readNpmConfigBoolean(name) {
-  const value = readNpmConfigValue(name);
-  if (value === undefined) {
-    return undefined;
-  }
+  const value = process.env[`npm_config_${name}`];
+  if (value === undefined || value === '') return undefined;
   return !['false', '0', 'no', 'off'].includes(value.toLowerCase());
+}
+
+function assertNpmValueOptionsHaveValues() {
+  const missingValues = NPM_VALUE_OPTIONS.filter((name) => process.env[`npm_config_${name}`] === 'true');
+  if (missingValues.length === 0) return;
+  const flags = missingValues.map((name) => `--${name.replaceAll('_', '-')}`).join(', ');
+  throw new Error(
+    `npm consumed ${flags} without their values. Put a standalone -- before extractor arguments ` +
+    '(recommended), or use npm config syntax such as --source=/path --quality=100.'
+  );
 }
 
 function printUsage() {
@@ -108,7 +115,7 @@ function printUsage() {
 Usage:
   npm run extract:maps -- --source /path/to/WoW
   npm run extract:maps -- --source /path/to/World/Minimaps
-  npm run extract:maps --source /path/to/WoW
+  npm run extract:maps --source=/path/to/WoW --all-instances
 
 Options:
   --source, -s        WoW client root, Data dir, or extracted World/Minimaps dir
@@ -123,7 +130,8 @@ Options:
 
 Notes:
   - A plain positional path is also accepted as the source for npm convenience.
-  - npm config-style flags also work, e.g. npm run extract:maps --source /path --output ./maps.
+  - Without the standalone -- separator, value options must use equals syntax, e.g.
+    npm run extract:maps --source=/path --output=./maps.
   - If --source already contains World/Minimaps, the script stitches tiles directly.
   - With --map or --all-instances, targets are resolved from DBFilesClient/Map.dbc.
     For an already-extracted minimap tree, also pass --map-dir when Map.dbc is unavailable.
@@ -132,7 +140,8 @@ Notes:
 `);
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
+  assertNpmValueOptionsHaveValues();
   const npmOutput = readNpmConfigValue('output');
   const npmMaps = readNpmConfigValue('map');
   const options = {
