@@ -441,3 +441,24 @@ test('shows weapons in hand or sheathed by sheath state', () => {
   assert.equal(isItemShown('ranged', 'drawn', 2), true);
   assert.equal(isItemShown('ranged', 'drawn', 1), false);
 });
+
+test('keeps spell art in its own versioned folder and clears only stale cache folders', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const { UnitModels, UNIT_MODEL_CACHE_VERSION, SPELL_ART_CACHE_VERSION } = loadModule('../src/unit-models.ts');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wowmin-models-'));
+  const unit = `v${UNIT_MODEL_CACHE_VERSION}`;
+  const art = `art-v${SPELL_ART_CACHE_VERSION}`;
+  for (const folder of ['creature', `v${UNIT_MODEL_CACHE_VERSION - 1}`, `${unit}/character`, `${unit}/visual`, `${unit}/effect`,
+    `art-v${SPELL_ART_CACHE_VERSION - 1}`, `${art}/visual`, 'unrelated']) {
+    fs.mkdirSync(path.join(root, folder), { recursive: true });
+  }
+  const models = new UnitModels(root, '/nonexistent-worker.mjs');
+  const left = (folder) => fs.existsSync(path.join(root, folder));
+  assert.deepEqual(['creature', `v${UNIT_MODEL_CACHE_VERSION - 1}`, `${unit}/visual`, `${unit}/effect`, `art-v${SPELL_ART_CACHE_VERSION - 1}`].filter(left), []);
+  assert.ok(left(`${unit}/character`) && left(`${art}/visual`) && left('unrelated'));
+  assert.equal(models.pathFor({ kind: 'visual', key: '10', params: {} }), path.join(root, art, 'visual', '10.json'));
+  assert.equal(models.pathFor({ kind: 'effect', key: '398', params: {} }), path.join(root, art, 'effect', '398.glb'));
+  assert.equal(models.pathFor({ kind: 'creature', key: '892', params: {} }), path.join(root, unit, 'creature', '892.glb'));
+  fs.rmSync(root, { recursive: true, force: true });
+});

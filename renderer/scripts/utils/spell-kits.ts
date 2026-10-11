@@ -68,6 +68,12 @@ export function castKit(visual: SpellVisual, cast: Pick<CastGlow, 'release' | 'c
 // the number a second (5 for Blizzard and Rain of Fire).
 const RAIN_PROCEDURE = 9;
 const DEFAULT_RAIN_RATE = 5;
+// Ground art drawn at the models' own size looked a little too large next to
+// the client (the user's eye on Consecration, Flamestrike, Death and Decay,
+// and Blizzard), so area-kit models are scaled by this, and falling models
+// land within this share of the spell's radius.
+export const AREA_ART_SCALE = 0.75;
+export const RAIN_SPREAD = AREA_ART_SCALE;
 
 // How many falling models a second the spell's area rains, or 0 for none.
 export function rainRate(visual: SpellVisual): number {

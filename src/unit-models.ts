@@ -14,6 +14,13 @@ const BUILD_TIMEOUT_MS = 60000;
 // 3: a head point; spell effect models and spell art lookups.
 // 4: animations spell kits name (channelling, hit reactions, other casts).
 export const UNIT_MODEL_CACHE_VERSION = 4;
+// Spell art (effect models and spell lookups) changes more often than unit
+// models, so it has its own version and folder, art-v<version>/, and can be
+// rebuilt without rebuilding every unit.
+// 2: lookups name the model procedure 9 rains (Blizzard, Rain of Fire) and
+// each kit's procedures.
+export const SPELL_ART_CACHE_VERSION = 2;
+const SPELL_ART_KINDS = new Set<UnitModelRequest['kind']>(['effect', 'visual']);
 // A look that could not be built is not retried for this long.
 const FAILURE_RETRY_MS = 10 * 60 * 1000;
 
@@ -66,11 +73,13 @@ export class UnitModels {
 
   pathFor(request: UnitModelRequest): string {
     const extension = request.kind === 'visual' ? 'json' : 'glb';
-    return path.join(this.cacheRoot, `v${UNIT_MODEL_CACHE_VERSION}`, request.kind, `${request.key}.${extension}`);
+    const folder = SPELL_ART_KINDS.has(request.kind) ? `art-v${SPELL_ART_CACHE_VERSION}` : `v${UNIT_MODEL_CACHE_VERSION}`;
+    return path.join(this.cacheRoot, folder, request.kind, `${request.key}.${extension}`);
   }
 
-  // Only folders this cache made: older versions, and the unversioned
-  // creature/ and character/ from before versioning.
+  // Only folders this cache made: older versions, the unversioned creature/
+  // and character/ from before versioning, and spell art kept with the unit
+  // models before it had its own version.
   private removeOldVersions(): void {
     let entries: string[];
     try {
@@ -78,14 +87,15 @@ export class UnitModels {
     } catch {
       return;
     }
-    for (const entry of entries) {
-      const old = entry === 'creature' || entry === 'character'
-        || (/^v\d+$/.test(entry) && entry !== `v${UNIT_MODEL_CACHE_VERSION}`);
-      if (!old) continue;
+    const old = entries.filter((entry) => entry === 'creature' || entry === 'character'
+      || (/^v\d+$/.test(entry) && entry !== `v${UNIT_MODEL_CACHE_VERSION}`)
+      || (/^art-v\d+$/.test(entry) && entry !== `art-v${SPELL_ART_CACHE_VERSION}`));
+    for (const kind of SPELL_ART_KINDS) old.push(path.join(`v${UNIT_MODEL_CACHE_VERSION}`, kind));
+    for (const entry of old) {
       try {
         fs.rmSync(path.join(this.cacheRoot, entry), { recursive: true, force: true });
       } catch (error) {
-        console.warn(`Could not remove old unit models in ${entry}: ${error instanceof Error ? error.message : error}`);
+        console.warn(`Could not remove old cached models in ${entry}: ${error instanceof Error ? error.message : error}`);
       }
     }
   }

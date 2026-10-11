@@ -4,7 +4,7 @@ import type { AreaEffect, AreaRing, Beam, CastGlow, CombatEffectStore, Impact, P
 import { EffectInstance, type EffectPlacement, type EffectTemplate, getEffectView, loadEffectTemplate } from './m2-effect';
 import type { UnitAnchorRole } from './spell-effects';
 import {
-  castKit, kitAnimationName, pointInDisc, rainRate, slotAnchor, type SpellVisual, type VisualKit,
+  AREA_ART_SCALE, castKit, kitAnimationName, pointInDisc, RAIN_SPREAD, rainRate, slotAnchor, type SpellVisual, type VisualKit,
 } from '../utils/spell-kits';
 
 // Plays the client's own spell art (level 2) for the combat effect store's
@@ -129,7 +129,7 @@ export class SpellVisualLayer {
       if (!rain) continue;
       rain.carry += rain.rate * seconds;
       for (; rain.carry >= 1; rain.carry -= 1) {
-        const position = pointInDisc(rain.center, area.radius, Math.random(), Math.random());
+        const position = pointInDisc(rain.center, area.radius * RAIN_SPREAD, Math.random(), Math.random());
         const drop = this.play(rain.template, now, false, () => ({ position, yaw: rain.yaw, scale: rain.scale }), null);
         drop.stopAt = now + drop.instance.duration;
       }
@@ -261,7 +261,7 @@ export class SpellVisualLayer {
     const center = area.point ?? units.anchor(area.caster, 'feet');
     if (!center) return;
     const yaw = units.facing(area.caster);
-    const placeAt = (scale: number) => () => ({ position: center, yaw, scale });
+    const placeAt = (scale: number) => () => ({ position: center, yaw, scale: scale * AREA_ART_SCALE });
     once.forEach((kit, index) => kit.effects.forEach((effect, slot) => {
       const template = kitTemplates[index]![slot];
       if (!template) return;
