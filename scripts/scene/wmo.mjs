@@ -6,6 +6,7 @@
 import { MapObj, MapObjGroup } from '@wowserhq/format';
 
 import { findChunk, readChunks, readCString, readFloats } from './chunks.mjs';
+import { readWmoLiquid } from './liquids.mjs';
 import { toM2Path } from './placement.mjs';
 
 export const WMO_GROUP_FLAG_VERTEX_COLORS = 0x4;
@@ -137,6 +138,7 @@ export function loadWmo(rootName, readFile) {
         ? fixVertexColors(rawColors, batches, header.transBatchCount)
         : rawColors,
       indices: group.indices ?? new Uint16Array(0),
+      liquid: readWmoLiquid(buffer),
       batches: vertexCount ? batches.map((batch) => ({
         indexStart: batch.indexStart,
         indexCount: batch.indexCount,
@@ -145,5 +147,5 @@ export function loadWmo(rootName, readFile) {
     };
   });
 
-  return { materials, groups, ...readDoodadDefinitions(rootChunks) };
+  return { materials, groups, rootFlags: root.flags, ...readDoodadDefinitions(rootChunks) };
 }

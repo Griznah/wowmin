@@ -875,7 +875,9 @@ function tryExtractMinimapsWithStormlib(
       });
     }
 
-    if (resolvedTargets.length === 0) return null;
+    // Targeted maps with no artwork at all still get their 3D scenes.
+    const targeted = requestedMapIds.length > 0 || allInstances;
+    if (resolvedTargets.length === 0 && !targeted) return null;
     if (extractedCount > 0) console.log(`• Extracted ${extractedCount} minimap tile(s) directly from MPQ archives`);
     const resolvedIds = new Set(resolvedTargets.map((target) => target.mapId));
     const missingTargets = targets.filter((target) => !resolvedIds.has(target.mapId));
@@ -1326,7 +1328,8 @@ async function exportScenes(options, summaries, missingTargets) {
         fs.writeFileSync(metadataPath, `${JSON.stringify({ ...metadata, schemaVersion: 3, scene }, null, 2)}\n`);
         console.log(`  ✓ Wrote ${scene.file} (${(stats.bytes / 1048576).toFixed(1)} MB; ${stats.wmoCount} WMO, `
           + `${stats.groupCount} groups, ${stats.doodadCount} doodads, ${stats.modelCount} models, ${stats.textureCount} textures`
-          + `${stats.terrainTiles ? `, terrain ${stats.terrainTiles} tiles / ${stats.terrainChunks} chunks` : ''})`);
+          + `${stats.terrainTiles ? `, terrain ${stats.terrainTiles} tiles / ${stats.terrainChunks} chunks` : ''}`
+          + `${stats.liquidCount ? `, ${stats.liquidCount} liquids` : ''})`);
         for (const skipped of stats.skippedWmos) console.warn(`  ! Skipped WMO ${skipped}`);
         if (stats.missing.length) {
           console.warn(`  ! ${stats.missing.length} referenced file(s) not found in the client, e.g. ${stats.missing.slice(0, 3).join(', ')}`);
@@ -1458,7 +1461,7 @@ async function main() {
     console.log(`  ✓ Wrote ${path.basename(summary.outputPath)} (${summary.width}×${summary.height}, ${summary.tileCount} tiles)`);
   }
 
-  if (summaries.length === 0) {
+  if (summaries.length === 0 && !(options.scenes && missingTargets.length > 0)) {
     throw new Error('No maps were produced. Check the resolved minimap folder names and tile naming format.');
   }
 

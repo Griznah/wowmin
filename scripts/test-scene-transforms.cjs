@@ -303,3 +303,148 @@ test('reads MCSH shadows a bit per texel, least significant first', async () => 
   noFlag.writeUInt32LE(header.length + mcsh.length, 4);
   assert.equal(readShadows(noFlag)[0], null);
 });
+
+test('reads a WMO group liquid grid and builds triangles for its wet tiles only', async () => {
+  const { readWmoLiquid, liquidSurface, LIQUID_UNIT } = await load('liquids.mjs');
+  const header = Buffer.alloc(0x44);
+  header.writeUInt32LE(15, 0x34);
+  const mliq = Buffer.alloc(0x1E + 6 * 8 + 2);
+  [3, 2, 2, 1].forEach((value, index) => mliq.writeUInt32LE(value, index * 4));
+  [10, 20, 5].forEach((value, index) => mliq.writeFloatLE(value, 0x10 + index * 4));
+  for (let vertex = 0; vertex < 6; vertex += 1) mliq.writeFloatLE(100 + vertex, 0x1E + vertex * 8 + 4);
+  mliq.writeUInt8(0x46, 0x1E + 48);
+  mliq.writeUInt8(0x0F, 0x1E + 49);
+  const group = Buffer.concat([chunk('MVER', Buffer.alloc(4)), chunk('MOGP', Buffer.concat([header, chunk('MLIQ', mliq)]))]);
+  const liquid = readWmoLiquid(group);
+  assert.equal(liquid.groupLiquid, 15);
+  assert.deepEqual([liquid.xVerts, liquid.yVerts, liquid.xTiles, liquid.yTiles], [3, 2, 2, 1]);
+  assert.deepEqual([...liquid.heights], [100, 101, 102, 103, 104, 105]);
+  const surface = liquidSurface(liquid);
+  assert.equal(surface.indices.length, 6);
+  near(surface.positions[3], 10 + LIQUID_UNIT, 'second vertex x');
+  near(surface.positions[5], 101, 'second vertex height');
+  near(surface.positions[7], 20 + LIQUID_UNIT, 'third vertex y');
+  assert.equal(readWmoLiquid(Buffer.concat([chunk('MVER', Buffer.alloc(4)), chunk('MOGP', header)])), null);
+});
+
+test('resolves WMO liquid types: DBC ids, old kinds, green lava from its tiles, and interior water', async () => {
+  const { wmoLiquidType } = await load('liquids.mjs');
+  const INTERIOR = 0x2000;
+  const OCEAN = 0x80000;
+  // Slave Pens: the root says groupLiquid is a LiquidType ID (5, slow water).
+  assert.equal(wmoLiquidType(5, 0x4, INTERIOR), 17);
+  assert.equal(wmoLiquidType(5, 0x4, 0), 13);
+  assert.equal(wmoLiquidType(21, 0x4, 0), 21);
+  // Old WMOs: the kind in the low two bits, or the tiles' for green lava
+  // (Molten Core's tiles say 6, magma).
+  assert.equal(wmoLiquidType(15, 0, INTERIOR, 6), 19);
+  assert.equal(wmoLiquidType(15, 0, 0, 4), 13);
+  assert.equal(wmoLiquidType(3, 0, 0), 20);
+  assert.equal(wmoLiquidType(0, 0, OCEAN), 14);
+  assert.equal(wmoLiquidType(20, 0, 0), 21);
+});
+
+test("takes water and ocean colours from the map's light at noon, else the default light", async () => {
+  const { mapLiquidColours } = await load('liquids.mjs');
+  const record = (fields) => ({ uint: (field) => fields[field] ?? 0, float: (field) => fields[field] ?? 0 });
+  const lights = {
+    *records() {
+      yield record([1, 0, 0, 0, 0, 0, 0, 2]);
+      yield record([7, 547, 0, 0, 0, 0, 0, 3]);
+    },
+  };
+  // A band keyed at midnight and 1440 (noon) with two colours.
+  const band = (midnight, noon) => {
+    const fields = new Array(34).fill(0);
+    fields[1] = 2;
+    fields[3] = 1440;
+    fields[18] = midnight;
+    fields[19] = noon;
+    return record(fields);
+  };
+  const bands = new Map([
+    [3 * 18 - 17 + 14, band(0, 0xFF0000)],
+    [3 * 18 - 17 + 15, band(0, 0x000000)],
+    [3 * 18 - 17 + 16, band(0, 0x00FF00)],
+    [3 * 18 - 17 + 17, band(0, 0x0000FF)],
+    [2 * 18 - 17 + 16, band(0, 0x202020)],
+    [2 * 18 - 17 + 17, band(0, 0x202020)],
+  ]);
+  const own = mapLiquidColours(lights, bands, 547);
+  assert.deepEqual(own.ocean, [0.5, 0, 0]);
+  assert.deepEqual(own.water, [0, 0.5, 0.5]);
+  const fallback = mapLiquidColours(lights, bands, 409);
+  fallback.water.forEach((value) => near(value, 0x20 / 255, 'default water'));
+  assert.equal(fallback.ocean, null);
+});
+
+// An MCNK at `position` with flat ground at `ground` and an optional MCLQ.
+function mcnkWithLiquid({ position, ground, flags = 0, mclq = null }) {
+  const header = Buffer.alloc(128);
+  header.writeUInt32LE(flags, 0x00);
+  position.forEach((value, index) => header.writeFloatLE(value, 0x68 + index * 4));
+  const mcvt = Buffer.alloc(145 * 4);
+  for (let index = 0; index < 145; index += 1) mcvt.writeFloatLE(ground - position[2], index * 4);
+  // Offsets count from the MCNK's own header (8 bytes before its data) to
+  // each sub-chunk's header.
+  header.writeUInt32LE(128 + 8, 0x14);
+  const parts = [header, chunk('MCVT', mcvt)];
+  if (mclq) {
+    header.writeUInt32LE(128 + 8 + mcvt.length + 8, 0x60);
+    header.writeUInt32LE(mclq.length + 8, 0x64);
+    parts.push(chunk('MCLQ', mclq));
+  }
+  return chunk('MCNK', Buffer.concat(parts));
+}
+
+test('reads MCLQ chunk liquids as grids running south and east, dropping tiles under the ground', async () => {
+  const { adtLiquidSurfaces, LIQUID_UNIT } = await load('liquids.mjs');
+  const layer = Buffer.alloc(8 + 81 * 8 + 64 + 4 + 80);
+  for (let vertex = 0; vertex < 81; vertex += 1) layer.writeFloatLE(10, 8 + vertex * 8 + 4);
+  const tiles = 8 + 81 * 8;
+  layer.fill(0x0F, tiles, tiles + 64);
+  layer[tiles] = 0x44;
+  layer[tiles + 9] = 0x41;
+  // Ocean (0x08) at height 10 over ground at 5: two wet tiles, two triangles each.
+  const wet = adtLiquidSurfaces(Buffer.concat([chunk('MVER', Buffer.alloc(4)), mcnkWithLiquid({ position: [100, 200, 5], ground: 5, flags: 0x08, mclq: layer })]));
+  assert.deepEqual([...wet.keys()], [2]);
+  const surface = wet.get(2);
+  assert.equal(surface.indices.length, 12);
+  assert.deepEqual([...surface.positions.slice(0, 3)], [100, 200, 10]);
+  near(surface.positions[4], 200 - LIQUID_UNIT, 'east along -Y');
+  // Tile (1, 1) shares a corner with tile (0, 0); its next corner is one
+  // row south (-X) and two columns east (-Y).
+  assert.equal(surface.positions.length, 7 * 3);
+  near(surface.positions[12], 100 - LIQUID_UNIT, 'second tile x');
+  near(surface.positions[13], 200 - 2 * LIQUID_UNIT, 'second tile y');
+  // The same sea under ground at 50 is hidden.
+  const buried = adtLiquidSurfaces(Buffer.concat([mcnkWithLiquid({ position: [100, 200, 50], ground: 50, flags: 0x08, mclq: layer })]));
+  assert.equal(buried.size, 0);
+});
+
+test('reads MH2O layers: their part of the chunk, exists mask, and flat depth-only surfaces', async () => {
+  const { adtLiquidSurfaces, LIQUID_UNIT } = await load('liquids.mjs');
+  const mh2o = Buffer.alloc(256 * 12 + 24 + 1 + 3 * 3 * 4);
+  mh2o.writeUInt32LE(256 * 12, 0);
+  mh2o.writeUInt32LE(1, 4);
+  const layer = 256 * 12;
+  mh2o.writeUInt16LE(5, layer);
+  mh2o.writeUInt16LE(0, layer + 2);
+  mh2o.writeFloatLE(7, layer + 4);
+  [3, 1, 2, 2].forEach((value, index) => { mh2o[layer + 12 + index] = value; });
+  mh2o.writeUInt32LE(layer + 24, layer + 16);
+  mh2o[layer + 24] = 0b1001;
+  mh2o.writeUInt32LE(layer + 25, layer + 20);
+  for (let vertex = 0; vertex < 9; vertex += 1) mh2o.writeFloatLE(8 + vertex, layer + 25 + vertex * 4);
+  const adt = Buffer.concat([chunk('MH2O', mh2o), mcnkWithLiquid({ position: [100, 200, 0], ground: 0 })]);
+  const surface = adtLiquidSurfaces(adt).get(5);
+  assert.equal(surface.indices.length, 12);
+  // First tile: column 3, row 1 of the chunk, height from the first vertex.
+  near(surface.positions[0], 100 - LIQUID_UNIT, 'row 1');
+  near(surface.positions[1], 200 - 3 * LIQUID_UNIT, 'column 3');
+  near(surface.positions[2], 8, 'height');
+  // Depth only: flat at the layer's minimum height.
+  mh2o.writeUInt16LE(2, layer + 2);
+  const flat = adtLiquidSurfaces(Buffer.concat([chunk('MH2O', mh2o), mcnkWithLiquid({ position: [100, 200, 0], ground: 0 })])).get(5);
+  assert.ok([...flat.positions].filter((_, index) => index % 3 === 2).every((z) => z === 7));
+});

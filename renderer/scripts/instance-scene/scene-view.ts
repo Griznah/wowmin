@@ -19,6 +19,7 @@ import {
   OrthographicCamera,
   Scene,
   Sphere,
+  SRGBColorSpace,
   type Texture,
   Vector3,
   WebGLRenderer,
@@ -40,6 +41,27 @@ interface TerrainTextures {
   layers: DataArrayTexture;
   alphas: Map<string, Texture>;
 }
+
+interface LiquidExtras {
+  id: number;
+  kind: 'water' | 'ocean' | 'magma' | 'slime';
+  frames: string[];
+  // Water and ocean: the map's colour for them (sRGB, 0-1).
+  color?: [number, number, number];
+}
+
+// Liquid textures animate at this many frames a second; water is see-through.
+const LIQUID_FPS = 15;
+const WATER_OPACITY = 0.7;
+// Water without a colour from its map: a dull blue-green.
+const WATER_COLOR: [number, number, number] = [0.2, 0.3, 0.3];
+// Water textures are dark ripples, mostly alpha: laid over the water's colour.
+const WATER_FRAGMENT = `
+#ifdef USE_MAP
+  vec4 ripples = texture2D(map, vMapUv);
+  diffuseColor.rgb = mix(diffuseColor.rgb, ripples.rgb, ripples.a);
+#endif
+`;
 
 // WMO interiors carry baked lighting in their vertex colours, which the client
 // brightens; props have no baked light and are drawn slightly dimmed to sit in
@@ -158,6 +180,8 @@ export class InstanceSceneView {
   // The client's own spell art, where a spell has it.
   private readonly spellVisuals: SpellVisualLayer;
   private effectsShown = false;
+  // Liquid materials and their animation frames, by scene URL.
+  private readonly liquids = new Map<string, Array<{ material: MeshBasicMaterial; frames: Texture[] }>>();
   // What the canvas currently shows, to skip redrawing an unchanged frame.
   private lastFrameKey = '';
 
@@ -266,9 +290,23 @@ export class InstanceSceneView {
     this.loader.load(url, async (gltf) => {
       const root = gltf.scene;
       const terrain = await this.terrainTextures(gltf);
+      const frames = await this.liquidFrames(gltf);
+      const liquids: Array<{ material: MeshBasicMaterial; frames: Texture[] }> = [];
       root.traverse((object) => {
-        if (object instanceof Mesh) object.material = this.convertMaterial(object, terrain);
+        if (!(object instanceof Mesh)) return;
+        const liquid = (object.material as Material).userData?.wowLiquid as LiquidExtras | undefined;
+        if (liquid) {
+          const material = this.liquidMaterial(liquid, frames);
+          if (material) {
+            object.material = material.material;
+            object.renderOrder = 1;
+            liquids.push(material);
+            return;
+          }
+        }
+        object.material = this.convertMaterial(object, terrain);
       });
+      if (liquids.length) this.liquids.set(url, liquids);
       root.updateMatrixWorld(true);
       const bounds: MeshBounds[] = [];
       const fitted = new WeakSet<BufferGeometry>();
@@ -318,8 +356,14 @@ export class InstanceSceneView {
       ...active.flatMap((volume) => [volume.minX, volume.maxX, volume.minY, volume.maxY, volume.minZ, volume.maxZ]
         .map((value) => Math.round(value))),
     ].join('|');
-    // Animated models and live effects need every frame.
-    if (frameKey === this.lastFrameKey && !this.units.count && !this.effectsShown) return true;
+    // Animated models, live effects, and liquids need every frame.
+    const liquids = this.liquids.get(url);
+    if (frameKey === this.lastFrameKey && !this.units.count && !this.effectsShown && !liquids?.length) return true;
+    if (liquids) {
+      for (const liquid of liquids) {
+        liquid.material.map = liquid.frames[Math.floor(performance.now() / (1000 / LIQUID_FPS)) % liquid.frames.length];
+      }
+    }
     this.lastFrameKey = frameKey;
     if (this.shown !== root) {
       if (this.shown) this.scene.remove(this.shown);
@@ -357,6 +401,39 @@ export class InstanceSceneView {
     shader.fragmentShader = FADE_FRAGMENT_DECLARATIONS + shader.fragmentShader
       .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>\n${FADE_FRAGMENT}`);
   };
+
+  // Every texture in the scene by its material's name, for liquid frames.
+  private async liquidFrames(gltf: GLTF): Promise<Map<string, Texture>> {
+    const frames = new Map<string, Texture>();
+    const materials = (await gltf.parser.getDependencies('material')) as MeshStandardMaterial[];
+    for (const material of materials) {
+      if (/^liquid-frame-\d+$/.test(material.name) && material.map) frames.set(material.name, material.map);
+    }
+    return frames;
+  }
+
+  // A liquid's material: its first frame, unlit; water and ocean see-through
+  // in their map's colour, magma and slime solid (they glow).
+  private liquidMaterial(liquid: LiquidExtras, frames: Map<string, Texture>):
+    { material: MeshBasicMaterial; frames: Texture[] } | null {
+    const textures = liquid.frames.map((name) => frames.get(name)).filter((texture): texture is Texture => Boolean(texture));
+    if (!textures.length) return null;
+    const see = liquid.kind === 'water' || liquid.kind === 'ocean';
+    const material = new MeshBasicMaterial({
+      map: textures[0], side: DoubleSide, transparent: see, opacity: see ? WATER_OPACITY : 1, depthWrite: !see,
+    });
+    if (see) {
+      material.color.setRGB(...(liquid.color ?? WATER_COLOR), SRGBColorSpace);
+      material.onBeforeCompile = (shader) => {
+        this.injectPartyFade(shader);
+        shader.fragmentShader = shader.fragmentShader.replace('#include <map_fragment>', WATER_FRAGMENT);
+      };
+      material.customProgramCacheKey = () => 'wow-water';
+    } else {
+      material.onBeforeCompile = this.injectPartyFade;
+    }
+    return { material, frames: textures };
+  }
 
   // The map's ground textures as one array, and each tile's alpha atlas by
   // name; null for a scene without terrain.

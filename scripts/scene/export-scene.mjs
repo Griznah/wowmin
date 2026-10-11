@@ -14,7 +14,9 @@ import { findChunk, readChunks } from './chunks.mjs';
 import { dedupeByUniqueId, readAdtPlacements, readWdt } from './placement.mjs';
 import { PNG } from 'pngjs';
 
-import { ATLAS_SIZE, buildTerrainTile, playArea, WDT_FLAG_BIG_ALPHA } from './terrain.mjs';
+import { ATLAS_SIZE, buildTerrainTile, chunkInArea, playArea, WDT_FLAG_BIG_ALPHA } from './terrain.mjs';
+import { readDbc } from './dbc.mjs';
+import { adtLiquidSurfaces, firstTileType, liquidSurface, liquidTypeInfo, mapLiquidColours, wmoLiquidType } from './liquids.mjs';
 import { encodeTexture } from './textures.mjs';
 import {
   loadWmo,
@@ -31,6 +33,7 @@ const DUNGEON_MAP_CHUNK_NO_MIN_Z = -9999;
 // Ground textures are tileable and small; the renderer resamples them into
 // one texture array.
 const TERRAIN_TEXTURE_MAX = 256;
+const LIQUID_TEXTURE_MAX = 128;
 
 const WMO_BLEND = ['opaque', 'alphaKey', 'alpha', 'add', 'mod', 'mod2x'];
 const M2_BLEND = ['opaque', 'alphaKey', 'alpha', 'add', 'add', 'mod', 'mod2x'];
@@ -102,7 +105,8 @@ function bgraToRgba(colors) {
 }
 
 class SceneBuilder {
-  constructor({ readFile, textureMax }) {
+  constructor({ mapId, readFile, textureMax }) {
+    this.mapId = mapId;
     this.readFile = readFile;
     this.textureMax = textureMax;
     this.document = new Document();
@@ -110,6 +114,57 @@ class SceneBuilder {
     this.textures = new Map();
     this.models = new Map();
     this.missing = new Set();
+  }
+
+  // A liquid type's material, named liquid-<id>, with its animation frames
+  // as materials liquid-frame-<n>, shared by types with the same texture
+  // (extras list them, and water's colour); null if unknown.
+  liquidMaterial(typeId) {
+    this.liquidMaterials ??= new Map();
+    if (this.liquidMaterials.has(typeId)) return this.liquidMaterials.get(typeId);
+    this.liquidTypes ??= (() => {
+      const buffer = this.readFile('DBFilesClient\\LiquidType.dbc');
+      return buffer ? readDbc(buffer).byId() : new Map();
+    })();
+    const info = liquidTypeInfo(this.liquidTypes, typeId, this.readFile);
+    let material = null;
+    if (info?.frames.length) {
+      this.liquidFrames ??= new Map();
+      const frames = info.frames.flatMap((name) => {
+        const key = name.toLowerCase();
+        if (!this.liquidFrames.has(key)) {
+          let frameName = null;
+          try {
+            const encoded = encodeTexture(this.readFile(name), LIQUID_TEXTURE_MAX);
+            const image = this.document.createTexture(path.win32.basename(name)).setImage(encoded.data).setMimeType(encoded.mimeType);
+            frameName = `liquid-frame-${this.liquidFrames.size}`;
+            this.document.createMaterial(frameName).setBaseColorTexture(image);
+          } catch {
+            // An unreadable frame is skipped.
+          }
+          this.liquidFrames.set(key, frameName);
+        }
+        const frameName = this.liquidFrames.get(key);
+        return frameName ? [frameName] : [];
+      });
+      if (frames.length) {
+        const color = info.kind === 'water' || info.kind === 'ocean' ? this.liquidColours()?.[info.kind] : null;
+        material = this.document.createMaterial(`liquid-${typeId}`).setDoubleSided(true)
+          .setExtras({ wowLiquid: { id: typeId, kind: info.kind, frames, ...(color && { color }) } });
+      }
+    }
+    this.liquidMaterials.set(typeId, material);
+    return material;
+  }
+
+  // The map's water and ocean colours, from its light; null if unknown.
+  liquidColours() {
+    if (this.waterColours === undefined) {
+      const lights = this.readFile('DBFilesClient\\Light.dbc');
+      const bands = this.readFile('DBFilesClient\\LightIntBand.dbc');
+      this.waterColours = lights && bands ? mapLiquidColours(readDbc(lights), readDbc(bands).byId(), this.mapId) : null;
+    }
+    return this.waterColours;
   }
 
   accessor(type, array, normalized = false) {
@@ -247,7 +302,7 @@ export async function exportMapScene({
   }
   if (!wmoPlacements.length && !doodadPlacements.length) throw new Error(`${internalName} places no buildings or doodads.`);
 
-  const builder = new SceneBuilder({ readFile, textureMax });
+  const builder = new SceneBuilder({ mapId, readFile, textureMax });
   const { document } = builder;
   const root = document.createNode('wow-world').setRotation(Z_UP_TO_Y_UP);
   document.createScene(`map-${mapId}`).addChild(root);
@@ -255,6 +310,7 @@ export async function exportMapScene({
   const groups = [];
   const skippedWmos = [];
   let doodadCount = 0;
+  let liquidCount = 0;
   for (const placement of wmoPlacements) {
     let wmo;
     try {
@@ -280,6 +336,23 @@ export async function exportMapScene({
       wmoNode.addChild(document.createNode(`group-${group.index}`)
         .setMesh(meshes[index])
         .setExtras({ kind: 'wmoGroup', wmoGroupId: group.groupId, exterior, minZ: bounds.minZ, maxZ: bounds.maxZ }));
+    });
+
+    // Each group's liquid, in the group's space under the building.
+    wmo.groups.forEach((group) => {
+      if (!group.liquid) return;
+      const surface = liquidSurface(group.liquid);
+      const typeId = wmoLiquidType(group.liquid.groupLiquid, wmo.rootFlags, group.flags, firstTileType(group.liquid));
+      const material = surface && builder.liquidMaterial(typeId);
+      if (!material) return;
+      const mesh = document.createMesh(`liquid-${group.groupId}`).addPrimitive(document.createPrimitive()
+        .setAttribute('POSITION', builder.accessor('VEC3', surface.positions))
+        .setAttribute('TEXCOORD_0', builder.accessor('VEC2', surface.uvs))
+        .setIndices(builder.accessor('SCALAR', surface.indices))
+        .setMaterial(material));
+      wmoNode.addChild(document.createNode(`liquid-${group.index}`).setMesh(mesh)
+        .setExtras({ kind: 'liquid', wmoGroupId: group.groupId }));
+      liquidCount += 1;
     });
 
     for (const doodadIndex of selectDoodadIndices(wmo.sets, placement.doodadSet)) {
@@ -340,6 +413,22 @@ export async function exportMapScene({
     for (const { x, y } of wdt.tiles) {
       const adt = readFile(`${mapPath}_${x}_${y}.adt`);
       if (!adt) continue;
+      // The tile's liquids, one mesh per liquid type.
+      try {
+        for (const [typeId, surface] of adtLiquidSurfaces(adt, { inArea: (position) => chunkInArea(position, area) })) {
+          const liquidMaterial = builder.liquidMaterial(typeId);
+          if (!liquidMaterial) continue;
+          const liquidMesh = document.createMesh(`liquid-${x}-${y}-${typeId}`).addPrimitive(document.createPrimitive()
+            .setAttribute('POSITION', accessor('VEC3', surface.positions))
+            .setAttribute('TEXCOORD_0', accessor('VEC2', surface.uvs))
+            .setIndices(accessor('SCALAR', surface.indices))
+            .setMaterial(liquidMaterial));
+          root.addChild(document.createNode(`liquid-${x}-${y}-${typeId}`).setMesh(liquidMesh).setExtras({ kind: 'liquid', tile: [x, y] }));
+          liquidCount += 1;
+        }
+      } catch (error) {
+        console.warn(`  ! Liquids in tile ${x},${y} unreadable: ${error instanceof Error ? error.message : error}`);
+      }
       let tile;
       try {
         tile = buildTerrainTile(adt, { bigAlpha, area, textureIndex });
@@ -401,6 +490,7 @@ export async function exportMapScene({
       ...(terrain.tiles ? { terrain: { tiles: terrain.tiles, chunks: terrain.chunks, bounds: terrain.bounds } } : {}),
     },
     stats: {
+      liquidCount,
       terrainTiles: terrain.tiles,
       terrainChunks: terrain.chunks,
       bytes: glb.byteLength,
