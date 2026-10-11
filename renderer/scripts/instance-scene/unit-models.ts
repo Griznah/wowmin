@@ -71,10 +71,18 @@ export interface UnitModelPose {
   // model lacks them).
   kitLoop?: string | null;
   kitOnce?: string | null;
+  // A mounted player's mount model: the mount moves and wears the ring, and
+  // the rider sits on its saddle. On foot until the mount's model is ready.
+  mountUrl?: string | null;
+  // Set by the layer for a rider: seated, the saddle placing it.
+  riding?: boolean;
 }
 
+// The id a rider's mount is drawn under.
+export const mountUnitId = (riderId: string): string => `${riderId}#mount`;
+
 // Effect points the converter exports on the skeleton.
-export type UnitPointRole = 'handRight' | 'handLeft' | 'chest' | 'head' | 'breath' | 'overhead';
+export type UnitPointRole = 'handRight' | 'handLeft' | 'chest' | 'head' | 'breath' | 'overhead' | 'mount';
 
 // The ring on the floor under a model, with a pointer the way it faces.
 export interface UnitMarkerStyle {
@@ -138,6 +146,9 @@ interface UnitInstance {
 }
 
 const CROSSFADE_SECONDS = 0.2;
+// A rider's seated pose (AnimationData 91).
+const RIDING_CLIP = 'Mount';
+const NO_WEAPONS: UnitWeapons = { mainHandType: 0, mainHandSubclass: 0, offHandType: 0, rangedSubclass: 0 };
 const SPEED_SMOOTHING = 0.25;
 // The longest step the mixers advance in one frame, so a stalled tab doesn't
 // jump animations.
@@ -277,21 +288,51 @@ export class UnitModelLayer {
     const step = this.lastUpdateAt ? Math.min(MAX_STEP_SECONDS, Math.max(0, (nowMs - this.lastUpdateAt) / 1000)) : 0;
     this.lastUpdateAt = nowMs;
     const shown = new Set<string>();
+    this.group.updateWorldMatrix(true, false);
     for (const pose of poses) {
       const template = this.template(pose.url);
       if (template.state !== 'ready') continue;
-      let unit = this.units.get(pose.id);
-      if (unit && unit.url !== pose.url) {
-        this.remove(pose.id);
-        unit = undefined;
-      }
-      if (!unit) unit = this.create(pose, template, nowMs);
-      this.place(unit, pose, nowMs, step);
+      const seated = this.placeMount(pose, nowMs, step, shown);
+      const unit = this.unitFor(seated ?? pose, template, nowMs);
+      this.place(unit, seated ?? pose, nowMs, step);
       shown.add(pose.id);
     }
     for (const id of [...this.units.keys()]) if (!shown.has(id)) this.remove(id);
     this.group.updateMatrixWorld(true);
     return shown;
+  }
+
+  private unitFor(pose: UnitModelPose, template: ModelTemplate, nowMs: number): UnitInstance {
+    let unit = this.units.get(pose.id);
+    if (unit && unit.url !== pose.url) {
+      this.remove(pose.id);
+      unit = undefined;
+    }
+    return unit ?? this.create(pose, template, nowMs);
+  }
+
+  // Draws a mounted pose's mount where the unit is, and returns the rider's
+  // pose on its saddle; null to draw the unit on foot (not mounted, or the
+  // mount's model isn't ready or has no saddle).
+  private placeMount(pose: UnitModelPose, nowMs: number, step: number, shown: Set<string>): UnitModelPose | null {
+    if (!pose.mountUrl) return null;
+    const template = this.template(pose.mountUrl);
+    if (template.state !== 'ready') return null;
+    const mountPose: UnitModelPose = {
+      ...pose, id: mountUnitId(pose.id), url: pose.mountUrl, scale: 1, pet: false, mountUrl: null,
+      style: null, weapons: NO_WEAPONS, sheathState: 0, strike: null, eventDriven: true, tint: null, kitLoop: null, kitOnce: null,
+    };
+    const mount = this.unitFor(mountPose, template, nowMs);
+    this.place(mount, mountPose, nowMs, step);
+    shown.add(mountPose.id);
+    const saddle = mount.points.get('mount');
+    if (!saddle) return null;
+    mount.root.updateWorldMatrix(false, true);
+    const position = this.group.worldToLocal(saddle.getWorldPosition(new Vector3()));
+    return {
+      ...pose, x: position.x, y: position.y, z: position.z, orientation: mount.root.rotation.z, riding: true,
+      marker: { ...pose.marker, hidden: true },
+    };
   }
 
   private template(url: string): ModelTemplate {
@@ -408,11 +449,15 @@ export class UnitModelLayer {
     }
 
     const clips = unit.template.clips!;
-    const stance = chooseUnitStance({ alive: pose.alive, speed: unit.speed, inCombat: pose.inCombat, style: pose.style });
-    const chosen = getStanceClips(stance, pose.weapons, new Set(clips.keys()));
+    // A rider sits still in the saddle; the mount does the moving.
+    const riding = Boolean(pose.riding) && clips.has(RIDING_CLIP);
+    const stance = riding ? 'stand' : chooseUnitStance({ alive: pose.alive, speed: unit.speed, inCombat: pose.inCombat, style: pose.style });
+    const chosen = riding
+      ? { loop: RIDING_CLIP, strike: null }
+      : getStanceClips(stance, pose.weapons, new Set(clips.keys()));
     // Standing or fighting, a cast or channel holds the pose its kit names.
     const still = stance !== 'walk' && stance !== 'run' && stance !== 'dead';
-    const kitLoop = still && pose.kitLoop && clips.has(pose.kitLoop) ? pose.kitLoop : null;
+    const kitLoop = still && !riding && pose.kitLoop && clips.has(pose.kitLoop) ? pose.kitLoop : null;
     if (kitLoop) chosen.loop = kitLoop;
     if (stance !== unit.stance || chosen.loop !== unit.loopName) {
       unit.stance = stance;
@@ -422,7 +467,9 @@ export class UnitModelLayer {
       unit.loop.timeScale = getMoveTimeScale(unit.speed, unit.template.speeds?.[unit.loopName]);
     }
     const fighting = stance === 'melee' || stance === 'ranged' || stance === 'cast';
-    if (still && pose.kitOnce && clips.has(pose.kitOnce)) {
+    if (riding) {
+      // No swings or casting poses in the saddle.
+    } else if (still && pose.kitOnce && clips.has(pose.kitOnce)) {
       this.playStrike(unit, pose.kitOnce);
     } else if (pose.strike && (fighting || stance === 'stand')) {
       // A real attack: the clip for what was done, whatever the stance.

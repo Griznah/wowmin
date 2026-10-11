@@ -11,7 +11,7 @@ import {
 import { drawFactionCrest, drawNameplate, FACTION_NAME_COLORS, type Faction, levelColor, type Nameplate, plateBounds, type PlateStyle } from './instance-scene/nameplates';
 import { ClientIcons } from './utils/client-icons';
 import { SpellNames } from './utils/spell-names';
-import { applyLiveSample, creaturePathKey, getUnitModelUrl, LiveAppearanceStore, LiveAuraStore, LiveBotStore, LiveCreatureBuffer, LivePathStore, LivePositionBuffer, trimPathToPosition } from './utils/live-positions';
+import { applyLiveSample, creaturePathKey, getMountModelUrl, getUnitModelUrl, LiveAppearanceStore, LiveAuraStore, LiveBotStore, LiveCreatureBuffer, LivePathStore, LivePositionBuffer, trimPathToPosition } from './utils/live-positions';
 import { getCreatureCombatStyle, getPlayerCombatStyle } from './utils/unit-animation';
 import { CONTINENT_BOUNDS, worldToCanvas } from './utils/map-coords';
 import { getEnglishMotd, getServerUptime } from './utils/dashboard-data';
@@ -7028,6 +7028,7 @@ function getInstanceUnitPoses(
       }),
       weapons: appearance,
       sheathState: appearance.sheathState,
+      mountUrl: getMountModelUrl(appearance, Boolean(player.mounted)),
       ...combat(`p${guid}`),
       marker: {
         color: player.alive ? getInstancePlayerColor(player, battleground) : '#475569',
@@ -8287,9 +8288,14 @@ function drawInstanceCanvas(followPass: boolean): void {
     const playerGuid = live ? instanceLivePositions.guidOf(player.name) : null;
     const model = playerGuid !== null && modelShown(`p${playerGuid}`);
     // With a model, labels and the click target sit over its head.
-    const top = model
-      ? projection.worldToScreen(player.position_x, player.position_y, player.position_z + INSTANCE_PLAYER_MODEL_HEIGHT).y
-      : point.y;
+    // A rider sits higher: its model's own overhead point.
+    const riderTop = model && player.mounted && sceneView && playerGuid !== null
+      ? sceneView.anchor(combatPositions, unitKey(playerGuid, false), 'overhead') : null;
+    const top = riderTop
+      ? projection.worldToScreen(riderTop[0], riderTop[1], riderTop[2]).y
+      : model
+        ? projection.worldToScreen(player.position_x, player.position_y, player.position_z + INSTANCE_PLAYER_MODEL_HEIGHT).y
+        : point.y;
     const color = getInstancePlayerColor(player, Boolean(battleground));
     const markerRadius = (player.isBot ? 6 : 8) * markerScale;
     // A model has its own ring on the floor (combat and selection included).

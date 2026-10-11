@@ -346,6 +346,12 @@ const WEAPON_SLOTS = [15, 16, 17];
 // The model for a unit's current look: a creature display (with its
 // weapons), which also covers druid forms and other shapeshifts and morphs,
 // or a dressed character.
+// A mounted unit's mount model (its mount display, as a creature), or null
+// when it isn't riding one.
+export function getMountModelUrl(appearance: StreamAppearance | null, mounted: boolean): string | null {
+  return mounted && appearance?.mountDisplayId ? `assets/models/creature/${appearance.mountDisplayId}.glb` : null;
+}
+
 export function getUnitModelUrl(appearance: StreamAppearance | null): string | null {
   if (!appearance?.displayId) return null;
   if (appearance.creature || appearance.displayId !== appearance.nativeDisplayId) {

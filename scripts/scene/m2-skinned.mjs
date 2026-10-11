@@ -49,6 +49,8 @@ export const UNIT_ANIMATIONS = {
   UseStandingLoop: 123,
   ChannelCastDirected: 124,
   ChannelCastOmni: 125,
+  // A rider's seated pose.
+  Mount: 91,
 };
 
 const asBytes = (buffer) => new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);

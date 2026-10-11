@@ -181,6 +181,8 @@ test('picks effect points from the attachment table, preferring spell hands', as
   ]);
   assert.deepEqual(effectPoints([point(17, 86), point(20, 56)]).filter((entry) => entry.role === 'breath'),
     [{ role: 'breath', bone: 86, position: [17, 0, 0] }]);
+  // A mount's saddle (attachment 0), where its rider sits.
+  assert.deepEqual(effectPoints([point(0, 3)]), [{ role: 'mount', bone: 3, position: [0, 0, 0] }]);
   // Spiders and the like have no attachment points at all.
   assert.deepEqual(effectPoints([]), []);
 });
@@ -300,6 +302,10 @@ test('builds the same character key in the renderer as the converter, hiding a h
   assert.equal(live.getUnitModelUrl({ ...appearance, creature: true, displayId: 23561, items: new Array(19).fill(0) }),
     'assets/models/creature/23561.glb');
   assert.equal(live.getUnitModelUrl(null), null);
+  // A rider's mount, only while mounted.
+  assert.equal(live.getMountModelUrl({ ...appearance, mountDisplayId: 2410 }, true), 'assets/models/creature/2410.glb');
+  assert.equal(live.getMountModelUrl({ ...appearance, mountDisplayId: 2410 }, false), null);
+  assert.equal(live.getMountModelUrl({ ...appearance, mountDisplayId: 0 }, true), null);
 });
 
 test('parses model URLs into build requests, rejecting anything else', () => {
