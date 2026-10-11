@@ -141,6 +141,7 @@ test('builds a skinned GLB document: joints at pivots, every animated channel in
     textureFor: () => null,
     scale: 1.5,
     attachments: [{ bone: 1, position: [0.2, 0, 1.5], mesh: sword, textureFor: () => null, role: 'mainHand', sheath: 'drawn' }],
+    points: [{ role: 'handRight', bone: 1, position: [0.1, -0.4, 1.2] }, { role: 'overhead', bone: 9, position: [0, 0, 2] }],
   });
   const root = document.getRoot();
   const skin = root.listSkins()[0];
@@ -159,6 +160,24 @@ test('builds a skinned GLB document: joints at pivots, every animated channel in
   const item = skin.listJoints()[1].listChildren()[0];
   assert.deepEqual(item.getTranslation(), [0.2, 0, 0]);
   assert.deepEqual(item.getExtras(), { wowItem: 'mainHand', wowSheath: 'drawn' });
+  // Effect points ride on their bone too; one on a missing bone is skipped.
+  const hand = skin.listJoints()[1].listChildren()[1];
+  assert.deepEqual(hand.getExtras(), { wowPoint: 'handRight' });
+  [0.1, -0.4, -0.3].forEach((value, axis) => near(hand.getTranslation()[axis], value, `hand ${axis}`));
+  assert.equal(root.listNodes().filter((node) => node.getExtras().wowPoint).length, 1);
+});
+
+test('picks effect points from the attachment table, preferring spell hands', async () => {
+  const { effectPoints } = await load('unit-model.mjs');
+  const point = (id, bone) => ({ id, bone, position: [id, 0, 0] });
+  assert.deepEqual(effectPoints([point(1, 10), point(2, 11), point(22, 12), point(15, 13), point(11, 14)]), [
+    { role: 'handRight', bone: 12, position: [22, 0, 0] },
+    { role: 'handLeft', bone: 11, position: [2, 0, 0] },
+    { role: 'chest', bone: 13, position: [15, 0, 0] },
+    { role: 'overhead', bone: 14, position: [11, 0, 0] },
+  ]);
+  // Spiders and the like have no attachment points at all.
+  assert.deepEqual(effectPoints([]), []);
 });
 
 test('reads WDBC records, strings, and records by ID', async () => {

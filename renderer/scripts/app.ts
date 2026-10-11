@@ -5,6 +5,9 @@ import { type ActiveInstanceSession, type DungeonMapFloor, type InstanceCoordina
 import { clampIsoPitch, createFlatProjection, createIsoView, DEFAULT_ISO_YAW, type FadeSettings, getFadeVolumes, getHeightBand, getIsoPanForCenter, getNextQuarterTurn, ISO_PITCH, type IsoView, type MapProjection, resolveMinimapTileProjection, type SceneBox } from './utils/map-projection';
 import { InstanceSceneView } from './instance-scene/scene-view';
 import type { UnitModelPose } from './instance-scene/unit-models';
+import {
+  CombatEffectStore, NUMBER_LIFETIME_MS, type Point3, type StrikeKind, type UnitKey, unitKey,
+} from './utils/spell-events';
 import { applyLiveSample, creaturePathKey, getUnitModelUrl, LiveAppearanceStore, LiveBotStore, LiveCreatureBuffer, LivePathStore, LivePositionBuffer, trimPathToPosition } from './utils/live-positions';
 import { getCreatureCombatStyle, getPlayerCombatStyle } from './utils/unit-animation';
 import { CONTINENT_BOUNDS, worldToCanvas } from './utils/map-coords';
@@ -6475,6 +6478,7 @@ const $instancePathsBtn = $<HTMLButtonElement>('instance-paths-btn');
 const $instanceMobsMode = $<HTMLSelectElement>('instance-mobs-mode');
 const $instanceDecisionsBtn = $<HTMLButtonElement>('instance-decisions-btn');
 const $instanceModelsBtn = $<HTMLButtonElement>('instance-models-btn');
+const $instanceNumbersBtn = $<HTMLButtonElement>('instance-numbers-btn');
 const $instanceBotCard = $<HTMLElement>('instance-bot-card');
 const $instanceBotDecisions = $<HTMLElement>('instance-bot-decisions');
 const $instanceDebugOverlay = $<HTMLElement>('instance-debug-overlay');
@@ -6572,6 +6576,10 @@ let instanceBotCardRenderedAt = 0;
 const instanceLiveAppearances = new LiveAppearanceStore();
 const INSTANCE_MODELS_STORAGE_KEY = 'wowmin.instanceModels';
 let instanceShowModels = readStoredInstanceModels();
+// Casts, auras, swings, damage, and heals from the live stream, as effects.
+const instanceCombatEffects = new CombatEffectStore();
+const INSTANCE_NUMBERS_STORAGE_KEY = 'wowmin.instanceNumbers';
+let instanceShowNumbers = readStoredInstanceNumbers();
 // Rough model heights in yards, for placing labels and click targets above
 // a model rather than at its feet.
 const INSTANCE_PLAYER_MODEL_HEIGHT = 2.2;
@@ -6581,7 +6589,7 @@ const instanceDebug = new URLSearchParams(window.location.search).has('debug');
 const INSTANCE_DEBUG_WINDOW_MS = 2000;
 const INSTANCE_DEBUG_INTERVAL_MS = 500;
 const instanceDebugEvents = new Map<string, Array<{ at: number; value: number }>>();
-let instanceDebugCounts = { players: 0, mobsShown: 0, mobsStreamed: 0, paths: 0, bots: 0, models: 0 };
+let instanceDebugCounts = { players: 0, mobsShown: 0, mobsStreamed: 0, paths: 0, bots: 0, models: 0, effects: 0 };
 let instanceDebugLastFrameAt = 0;
 let instanceDebugRenderedAt = 0;
 // Redraw cap while animating live positions.
@@ -6638,6 +6646,7 @@ function syncInstanceLiveStream(): void {
   instanceLiveCreatures.clear();
   instanceLiveBots.clear();
   instanceLiveAppearances.clear();
+  instanceCombatEffects.clear();
   instanceDebugEvents.clear();
   if (!wanted || !streamPositions) return;
   const stream: { key: string; stop: () => void; status: StreamStatus } = { key: wanted.key, stop: () => {}, status: 'starting' };
@@ -6676,6 +6685,11 @@ function syncInstanceLiveStream(): void {
       if (instanceLiveStream !== stream) return;
       instanceLiveAppearances.push(update, performance.now());
       noteInstanceDebug('appearances', update.units.length);
+    },
+    onCombatEvents: (update) => {
+      if (instanceLiveStream !== stream) return;
+      instanceCombatEffects.push(update, performance.now());
+      noteInstanceDebug('combat', update.events.length);
     },
   });
   instanceLiveStream = stream;
@@ -6867,6 +6881,25 @@ function readStoredInstanceModels(): boolean {
   }
 }
 
+function readStoredInstanceNumbers(): boolean {
+  try {
+    return window.localStorage.getItem(INSTANCE_NUMBERS_STORAGE_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function setInstanceShowNumbers(enabled: boolean): void {
+  instanceShowNumbers = enabled;
+  $instanceNumbersBtn?.setAttribute('aria-pressed', String(enabled));
+  try {
+    window.localStorage.setItem(INSTANCE_NUMBERS_STORAGE_KEY, String(enabled));
+  } catch {
+    // Preference is per-session only when storage is unavailable.
+  }
+  renderInstanceCanvas();
+}
+
 function setInstanceShowModels(enabled: boolean): void {
   instanceShowModels = enabled;
   $instanceModelsBtn?.setAttribute('aria-pressed', String(enabled));
@@ -6898,7 +6931,14 @@ function getInstanceUnitPoses(
   decisions: Map<string, StreamBotDecision>,
   battleground: boolean,
   now: number,
+  strikes: ReadonlyMap<UnitKey, StrikeKind>,
 ): UnitModelPose[] {
+  // Real attacks and aura glows from the combat events.
+  const combat = (id: UnitKey) => ({
+    strike: strikes.get(id) ?? null,
+    eventDriven: instanceCombatEffects.isEventDriven(id, now),
+    tint: instanceCombatEffects.tint(id),
+  });
   const poses: UnitModelPose[] = [];
   const playersByGuid = new Map<number, MapPlayerPosition>();
   for (const player of players) {
@@ -6924,6 +6964,7 @@ function getInstanceUnitPoses(
       }),
       weapons: appearance,
       sheathState: appearance.sheathState,
+      ...combat(`p${guid}`),
       marker: {
         color: player.alive ? getInstancePlayerColor(player, battleground) : '#475569',
         inCombat: player.inCombat,
@@ -6951,6 +6992,7 @@ function getInstanceUnitPoses(
         target ? Math.hypot(target.position_x - creature.x, target.position_y - creature.y) : null, true),
       weapons: appearance,
       sheathState: appearance.sheathState,
+      ...combat(`c${creature.guid}`),
       marker: {
         color: getCreatureMarkerColor(creature),
         inCombat: creature.inCombat,
@@ -7030,6 +7072,61 @@ const isBossCreature = (creature: StreamCreatureSample, info: CreatureInfo | nul
 // Creature marker: red if hostile, yellow otherwise, green for players' pets,
 // grey when dead. Elites get a gold rim, bosses a larger skull marker, and a
 // health ring shows once a creature is hurt.
+// A glowing ring round a marker for a notable aura (crowd control, shield,
+// cooldowns); models glow themselves.
+function drawInstanceAuraHalo(ctx: CanvasRenderingContext2D, tint: string | null, point: { x: number; y: number }, radius: number): void {
+  if (!tint) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
+  ctx.strokeStyle = tint;
+  ctx.lineWidth = 3;
+  ctx.shadowColor = tint;
+  ctx.shadowBlur = 8;
+  ctx.stroke();
+  ctx.restore();
+}
+
+// Where the first, second, ... number at once on one unit sits, in pixels.
+const INSTANCE_NUMBER_OFFSETS: Array<[number, number]> = [[0, 0], [-34, -10], [34, -10], [-18, -22], [18, -22]];
+
+// Damage and heals rising from above each unit and fading, like the game's
+// combat text. Several at once on one unit fan out.
+function drawInstanceCombatNumbers(
+  ctx: CanvasRenderingContext2D,
+  now: number,
+  scale: number,
+  overhead: (unit: UnitKey) => { x: number; y: number } | null,
+): void {
+  const perUnit = new Map<UnitKey, number>();
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.lineJoin = 'round';
+  // Newest last, so they draw on top.
+  for (const number of instanceCombatEffects.numbers) {
+    if (number.at > now) continue;
+    const point = overhead(number.target);
+    if (!point) continue;
+    const t = Math.min(1, (now - number.at) / NUMBER_LIFETIME_MS);
+    const index = perUnit.get(number.target) ?? 0;
+    perUnit.set(number.target, index + 1);
+    const size = Math.round((number.periodic ? 11 : 14) * Math.max(0.8, Math.min(1.4, scale)));
+    ctx.font = `700 ${size}px system-ui, sans-serif`;
+    ctx.globalAlpha = 1 - t * t;
+    const [offsetX, offsetY] = INSTANCE_NUMBER_OFFSETS[index % INSTANCE_NUMBER_OFFSETS.length];
+    const x = point.x + offsetX * scale;
+    const y = point.y - 4 + offsetY * scale - t * 30 * scale;
+    const text = `${number.heal ? '+' : ''}${number.amount}`;
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(2,6,23,0.85)';
+    ctx.strokeText(text, x, y);
+    ctx.fillStyle = number.color;
+    ctx.fillText(text, x, y);
+  }
+  ctx.restore();
+}
+
 function drawInstanceCreature(
   ctx: CanvasRenderingContext2D,
   creature: StreamCreatureSample,
@@ -7779,12 +7876,28 @@ function drawInstanceCanvas(followPass: boolean): void {
       if (decision) decisions.set(player.name, decision);
     }
   }
+  // Where the units shown stand, for combat effects: effects on units that
+  // aren't shown (the mobs selector, other floors) are skipped.
+  const combatPositions = new Map<UnitKey, Point3>();
+  if (live) {
+    for (const player of visiblePlayers) {
+      const guid = instanceLivePositions.guidOf(player.name);
+      if (guid !== null) combatPositions.set(unitKey(guid, false), [player.position_x, player.position_y, player.position_z]);
+    }
+    for (const creature of creatures) combatPositions.set(unitKey(creature.guid, true), [creature.x, creature.y, creature.z]);
+  }
+  const strikes = new Map(live ? instanceCombatEffects.advance(liveNow, (from, to) => {
+    const start = combatPositions.get(from);
+    const end = combatPositions.get(to);
+    return start && end ? Math.hypot(end[0] - start[0], end[1] - start[1], end[2] - start[2]) : null;
+  }).map((cue) => [cue.unit, cue.kind] as const) : []);
   // Models are placed before the scene draws; units without one get markers.
   const sceneView = getInstanceSceneView();
   const modelIds = sceneView
     ? sceneView.setUnits(instanceShowModels && live && instanceView3d
-      ? getInstanceUnitPoses(visiblePlayers, creatures, decisions, Boolean(battleground), liveNow) : [], liveNow)
+      ? getInstanceUnitPoses(visiblePlayers, creatures, decisions, Boolean(battleground), liveNow, strikes) : [], liveNow)
     : new Set<string>();
+  const effectsDrawn = sceneView?.setEffects(live && instanceView3d ? instanceCombatEffects : null, combatPositions, liveNow) ?? 0;
   const isoView = renderInstanceScene(session, loadedAsset, floor, width, height);
   const modelShown = (id: string) => Boolean(isoView) && modelIds.has(id);
   // Read after the scene, which may reset it when it reframes.
@@ -7881,7 +7994,10 @@ function drawInstanceCanvas(followPass: boolean): void {
       const point = projection.worldToScreen(creature.x, creature.y, creature.z);
       const model = modelShown(`c${creature.guid}`);
       // A model has its own ring on the floor, with health and combat.
-      if (!model) drawInstanceCreature(ctx, creature, info, point, markerScale);
+      if (!model) {
+        drawInstanceAuraHalo(ctx, live ? instanceCombatEffects.tint(unitKey(creature.guid, true)) : null, point, 9 * markerScale);
+        drawInstanceCreature(ctx, creature, info, point, markerScale);
+      }
       const boss = isBossCreature(creature, info);
       if (info && creature.alive && (boss || viewTransform.zoom >= INSTANCE_MOB_LABEL_ZOOM)) {
         const labelY = model
@@ -7916,6 +8032,8 @@ function drawInstanceCanvas(followPass: boolean): void {
     const markerRadius = (player.isBot ? 6 : 8) * markerScale;
     // A model has its own ring on the floor (combat and selection included).
     if (!model) {
+      drawInstanceAuraHalo(ctx, playerGuid !== null ? instanceCombatEffects.tint(unitKey(playerGuid, false)) : null, point,
+        markerRadius + 7 * markerScale);
       if (player.inCombat) {
         ctx.beginPath();
         ctx.arc(point.x, point.y, 11 * markerScale, 0, Math.PI * 2);
@@ -7987,6 +8105,17 @@ function drawInstanceCanvas(followPass: boolean): void {
     ctx.fillText(label.name, label.x, label.y);
   }
 
+  if (instanceShowNumbers && live) {
+    drawInstanceCombatNumbers(ctx, liveNow, markerScale, (unit) => {
+      const feet = combatPositions.get(unit);
+      if (!feet) return null;
+      const overhead = isoView && sceneView
+        ? sceneView.anchor(combatPositions, unit, 'overhead')
+        : [feet[0], feet[1], feet[2] + INSTANCE_PLAYER_MODEL_HEIGHT] as Point3;
+      return overhead ? projection.worldToScreen(overhead[0], overhead[1], overhead[2]) : null;
+    });
+  }
+
   instanceDebugCounts = {
     players: visiblePlayers.length,
     mobsShown: creatures.length,
@@ -7994,6 +8123,7 @@ function drawInstanceCanvas(followPass: boolean): void {
     paths: pathsDrawn,
     bots: decisions.size,
     models: isoView ? modelIds.size : 0,
+    effects: isoView ? effectsDrawn : 0,
   };
   if (liveNow - instanceBotCardRenderedAt >= INSTANCE_BOT_CARD_INTERVAL_MS) renderInstanceBotCard(session, liveNow);
 }
@@ -8162,7 +8292,8 @@ function renderInstanceDebugOverlay(now: number): void {
     `render  ${render.rate.toFixed(1)} fps · ${render.average.toFixed(1)} ms avg · ${render.max.toFixed(1)} max`,
     `scene   ${scene}`,
     `stream  ${instanceLiveStream?.status ?? 'off'} · ${frames.rate.toFixed(1)} frames/s · gap max ${Math.round(frames.max)} ms`,
-    `        per s: ${perSecond('paths')} paths · ${perSecond('creatures')} mobs · ${perSecond('bots')} bots`,
+    `        per s: ${perSecond('paths')} paths · ${perSecond('creatures')} mobs · ${perSecond('bots')} bots · ${perSecond('combat')} combat events`,
+    `combat  ${counts.effects} effects drawn · ${instanceCombatEffects.dropped} events dropped by the server`,
     `shown   ${counts.players} players · ${counts.mobsShown}/${counts.mobsStreamed} mobs · ${counts.paths} paths · ${counts.bots} bots · ${counts.models} models`,
     `view    zoom ${transform.zoom.toFixed(2)} · yaw ${Math.round(getInstanceViewYaw() * 180 / Math.PI)}° · pitch ${Math.round(getInstanceViewPitch() * 180 / Math.PI)}°${floor ? ` · floor ${floor.floorIndex}` : ''}`,
   ];
@@ -8449,6 +8580,9 @@ $instanceDecisionsBtn?.addEventListener('click', () => setInstanceShowDecisions(
 $instanceModelsBtn?.setAttribute('aria-pressed', String(instanceShowModels));
 if ($instanceModelsBtn && !window.electronAPI.map.streamPositions) $instanceModelsBtn.disabled = true;
 $instanceModelsBtn?.addEventListener('click', () => setInstanceShowModels(!instanceShowModels));
+$instanceNumbersBtn?.setAttribute('aria-pressed', String(instanceShowNumbers));
+if ($instanceNumbersBtn && !window.electronAPI.map.streamPositions) $instanceNumbersBtn.disabled = true;
+$instanceNumbersBtn?.addEventListener('click', () => setInstanceShowNumbers(!instanceShowNumbers));
 // Pointer-down too, as the card redraws every second and a click could
 // straddle a redraw.
 for (const type of ['pointerdown', 'click'] as const) {

@@ -18,7 +18,9 @@ function loadModule(relativePath) {
   return context.module.exports;
 }
 
-const { parseBotDatagram, parseCreatureDatagram, parsePathDatagram, parseStreamDatagram } = loadModule('../src/telemetry-stream.ts');
+const {
+  parseBotDatagram, parseCombatEventDatagram, parseCreatureDatagram, parsePathDatagram, parseStreamDatagram,
+} = loadModule('../src/telemetry-stream.ts');
 const {
   LIVE_BOT_STALE_MS, LIVE_CREATURE_STALE_MS, LIVE_PATH_STALE_MS, LIVE_RENDER_DELAY_MS, LiveBotStore, LiveCreatureBuffer,
   LivePathStore, LivePositionBuffer,
@@ -248,6 +250,64 @@ test('parses a creature datagram and its state flags', () => {
   const good = creatureDatagram({ creatures: [{ guid: 1, entry: 2, x: 0, y: 0, z: 0, orientation: 0, healthPct: 1, flags: 1, targetGuid: 0, wmoGroupId: -1 }] });
   assert.equal(parseCreatureDatagram(good.subarray(0, good.length - 1)), null);
   assert.equal(parsePathDatagram(good), null);
+});
+
+// Builds a datagram as BuildCombatEventDatagrams in WowMinTelemetry.cpp does.
+function combatDatagram({ mapId = 601, instanceId = 7, serverTimeMs = 5000, dropped = 0, events }) {
+  const header = Buffer.alloc(24);
+  header.write('WME1', 0, 'latin1');
+  header.writeUInt8(1, 4);
+  header.writeUInt32LE(mapId, 8);
+  header.writeUInt32LE(instanceId, 12);
+  header.writeUInt32LE(serverTimeMs, 16);
+  header.writeUInt16LE(events.length, 20);
+  header.writeUInt16LE(dropped, 22);
+  return Buffer.concat([header, ...events.map((event) => {
+    const entry = Buffer.alloc(44);
+    entry.writeUInt8(event.kind, 0);
+    entry.writeUInt8(event.flags ?? 0, 1);
+    entry.writeUInt8(event.schoolMask ?? 0, 2);
+    entry.writeUInt8(event.auraCategory ?? 0, 3);
+    entry.writeUInt32LE(event.sourceGuid ?? 0, 4);
+    entry.writeUInt32LE(event.targetGuid ?? 0, 8);
+    entry.writeUInt32LE(event.spellId ?? 0, 12);
+    entry.writeUInt32LE(event.value ?? 0, 16);
+    entry.writeFloatLE(event.missileSpeed ?? 0, 20);
+    entry.writeFloatLE(event.radius ?? 0, 24);
+    (event.point ?? [0, 0, 0]).forEach((value, index) => entry.writeFloatLE(value, 28 + index * 4));
+    entry.writeUInt16LE(event.ageMs ?? 0, 40);
+    return entry;
+  })]);
+}
+
+test('parses combat events, their flags, and the dropped count', () => {
+  const parsed = parseCombatEventDatagram(combatDatagram({ dropped: 3, events: [
+    { kind: 2, flags: 2 | 4 | 16 | 128, schoolMask: 16, sourceGuid: 42, targetGuid: 900, spellId: 10, value: 0,
+      missileSpeed: 20, radius: 8, point: [550, 250, 224], ageMs: 35 },
+    { kind: 4, flags: 1 | 64, schoolMask: 2, auraCategory: 2, sourceGuid: 901, targetGuid: 43, spellId: 48066, value: 30000 },
+    { kind: 7, flags: 2 | 32, schoolMask: 32, sourceGuid: 42, targetGuid: 900, spellId: 48125, value: 812 },
+    { kind: 99 },
+    { kind: 6, flags: 1, schoolMask: 1, sourceGuid: 900, targetGuid: 42 },
+  ] }));
+  assert.equal(parsed.mapId, 601);
+  assert.equal(parsed.serverTimeMs, 5000);
+  assert.equal(parsed.dropped, 3);
+  const events = JSON.parse(JSON.stringify(parsed.events));
+  assert.deepEqual(events.map((event) => event.kind), ['castGo', 'auraApply', 'damage', 'swing']);
+  assert.deepEqual(events[0], {
+    kind: 'castGo', sourceCreature: false, targetCreature: true, area: true, channeled: false, periodic: false,
+    helpful: false, triggered: true, schoolMask: 16, auraCategory: null, sourceGuid: 42, targetGuid: 900, spellId: 10,
+    value: 0, missileSpeed: 20, radius: 8, point: [550, 250, 224], ageMs: 35,
+  });
+  assert.equal(events[1].auraCategory, 'shield');
+  assert.equal(events[1].sourceCreature, true);
+  assert.equal(events[1].helpful, true);
+  assert.equal(events[1].point, null);
+  assert.equal(events[2].periodic, true);
+  assert.equal(events[2].value, 812);
+  const good = combatDatagram({ events: [{ kind: 6 }] });
+  assert.equal(parseCombatEventDatagram(good.subarray(0, good.length - 1)), null);
+  assert.equal(parseCreatureDatagram(good), null);
 });
 
 test('interpolates creatures and drops ones that stop being sent', () => {

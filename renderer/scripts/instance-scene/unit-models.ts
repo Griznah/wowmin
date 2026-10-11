@@ -20,10 +20,12 @@ import {
   type Object3D,
   RingGeometry,
   SkinnedMesh,
+  Vector3,
 } from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js';
 
+import type { Point3, StrikeKind } from '../utils/spell-events';
 import {
   chooseUnitStance,
   getMoveTimeScale,
@@ -52,7 +54,16 @@ export interface UnitModelPose {
   // 0 weapons sheathed, 1 melee weapons drawn, 2 ranged weapon drawn.
   sheathState: number;
   marker: UnitMarkerStyle;
+  // A real attack that starts now, from the combat events.
+  strike?: StrikeKind | null;
+  // Recent attacks came from real events, so no made-up timed strikes.
+  eventDriven?: boolean;
+  // Glow colour for a notable aura, or null for none.
+  tint?: string | null;
 }
+
+// Effect points the converter exports on the skeleton.
+export type UnitPointRole = 'handRight' | 'handLeft' | 'chest' | 'overhead';
 
 // The ring on the floor under a model, with a pointer the way it faces.
 export interface UnitMarkerStyle {
@@ -70,6 +81,8 @@ interface ModelTemplate {
   speeds?: Record<string, number>;
   // Floor ring radius in model units, from the model's footprint.
   radius?: number;
+  // Standing height in model units (times the display scale).
+  height?: number;
 }
 
 interface UnitMarker {
@@ -104,6 +117,11 @@ interface UnitInstance {
   // Item models tagged drawn or sheathed by the converter.
   sheathItems: Object3D[];
   marker: UnitMarker;
+  model: Object3D;
+  points: Map<string, Object3D>;
+  tint: string | null;
+  // The shared materials swapped out for tinted copies, by mesh.
+  tinted: Map<Mesh, Material | Material[]>;
 }
 
 const CROSSFADE_SECONDS = 0.2;
@@ -118,6 +136,7 @@ const MODEL_RENDER_ORDER = 2;
 const MARKER_LIFT = 0.05;
 const MARKER_MIN_RADIUS = 0.6;
 const MARKER_MAX_RADIUS = 8;
+const TINT_STRENGTH = 0.55;
 const COMBAT_COLOR = '#ef4444';
 const SELECTED_COLOR = '#fbbf24';
 
@@ -211,6 +230,21 @@ export class UnitModelLayer {
     return this.group.children.length;
   }
 
+  // An effect point on a drawn unit, in server coordinates, or null if the
+  // unit isn't drawn as a model or its model has no such point.
+  pointOf(id: string, role: UnitPointRole): Point3 | null {
+    const point = this.units.get(id)?.points.get(role);
+    if (!point) return null;
+    const position = this.group.worldToLocal(point.getWorldPosition(new Vector3()));
+    return [position.x, position.y, position.z];
+  }
+
+  // A drawn unit's standing height in yards, or null.
+  heightOf(id: string): number | null {
+    const unit = this.units.get(id);
+    return unit?.template.height ? unit.template.height * unit.root.scale.x : null;
+  }
+
   // Places and animates the given units; returns the IDs drawn as models.
   // Units whose model is still loading, or has none, are left to markers.
   update(poses: UnitModelPose[], nowMs: number): Set<string> {
@@ -258,6 +292,7 @@ export class UnitModelLayer {
       loading.radius = footprint.isEmpty()
         ? MARKER_MIN_RADIUS
         : getMarkerRadius(footprint.max.x - footprint.min.x, footprint.max.y - footprint.min.y, root?.scale.x ?? 1);
+      loading.height = footprint.isEmpty() ? undefined : footprint.max.z * (root?.scale.x ?? 1);
       const durations = (root?.userData.wowClipDurations ?? {}) as Record<string, number>;
       loading.clips = new Map(gltf.animations.map((clip) => {
         if (durations[clip.name]) clip.duration = durations[clip.name];
@@ -299,9 +334,14 @@ export class UnitModelLayer {
       sheathState: null,
       sheathItems: [],
       marker,
+      model,
+      points: new Map(),
+      tint: null,
+      tinted: new Map(),
     };
     model.traverse((object) => {
       if (object.userData.wowSheath) unit.sheathItems.push(object);
+      if (object.userData.wowPoint) unit.points.set(object.userData.wowPoint as string, object);
     });
     this.units.set(pose.id, unit);
     return unit;
@@ -311,6 +351,7 @@ export class UnitModelLayer {
     const unit = this.units.get(id);
     if (!unit) return;
     unit.mixer.stopAllAction();
+    this.setTint(unit, null);
     disposeMarker(unit.marker);
     this.group.remove(unit.root);
     this.units.delete(id);
@@ -332,6 +373,7 @@ export class UnitModelLayer {
     }
     if (pose.alive) unit.seenAlive = true;
     updateMarker(unit.marker, pose.marker, pose.alive);
+    this.setTint(unit, pose.tint ?? null);
     if (unit.sheathState !== pose.sheathState) {
       unit.sheathState = pose.sheathState;
       for (const item of unit.sheathItems) item.visible = isItemShown(item.userData.wowItem, item.userData.wowSheath, pose.sheathState);
@@ -347,7 +389,12 @@ export class UnitModelLayer {
     if (unit.loop && (stance === 'walk' || stance === 'run') && unit.loopName) {
       unit.loop.timeScale = getMoveTimeScale(unit.speed, unit.template.speeds?.[unit.loopName]);
     }
-    if (chosen.strike && (stance === 'melee' || stance === 'ranged' || stance === 'cast') && nowMs >= unit.nextStrikeAt) {
+    const fighting = stance === 'melee' || stance === 'ranged' || stance === 'cast';
+    if (pose.strike && (fighting || stance === 'stand')) {
+      // A real attack: the clip for what was done, whatever the stance.
+      const strike = getStanceClips(pose.strike, pose.weapons, new Set(clips.keys())).strike;
+      if (strike) this.playStrike(unit, strike);
+    } else if (!pose.eventDriven && chosen.strike && fighting && nowMs >= unit.nextStrikeAt) {
       unit.nextStrikeAt = nowMs + getStrikeInterval(stance, unit.jitter) * 1000;
       unit.jitter = Math.random();
       this.playStrike(unit, chosen.strike);
@@ -387,6 +434,7 @@ export class UnitModelLayer {
     const clip = unit.template.clips!.get(name);
     if (!clip || !unit.loop) return;
     const strike = unit.mixer.clipAction(clip);
+    if (unit.strike && unit.strike !== strike) unit.strike.fadeOut(CROSSFADE_SECONDS);
     strike.reset();
     strike.setLoop(LoopOnce, 1);
     strike.clampWhenFinished = false;
@@ -402,6 +450,32 @@ export class UnitModelLayer {
     unit.loop.reset().play();
     unit.loop.crossFadeFrom(strike, CROSSFADE_SECONDS, false);
     unit.strike = null;
+  }
+
+  // Swaps the unit's materials for glowing copies, or back to the shared ones.
+  private setTint(unit: UnitInstance, color: string | null): void {
+    if (unit.tint === color) return;
+    unit.tint = color;
+    if (!color) {
+      for (const [mesh, original] of unit.tinted) {
+        for (const copy of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) copy.dispose();
+        mesh.material = original;
+      }
+      unit.tinted.clear();
+      return;
+    }
+    unit.model.traverse((object) => {
+      if (!(object instanceof Mesh)) return;
+      if (!unit.tinted.has(object)) {
+        unit.tinted.set(object, object.material);
+        object.material = Array.isArray(object.material)
+          ? object.material.map((material: Material) => material.clone())
+          : (object.material as Material).clone();
+      }
+      for (const material of Array.isArray(object.material) ? object.material : [object.material]) {
+        if (material instanceof MeshLambertMaterial) material.emissive.set(color).multiplyScalar(TINT_STRENGTH);
+      }
+    });
   }
 
   // Lit, so models keep their shape; the scene itself is unlit.

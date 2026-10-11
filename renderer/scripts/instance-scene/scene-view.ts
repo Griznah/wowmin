@@ -24,7 +24,9 @@ import {
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
 import { type FadeSettings, type FadeVolume, type IsoView, MAX_FADE_VOLUMES } from '../utils/map-projection';
+import type { CombatEffectStore, Point3, UnitKey } from '../utils/spell-events';
 import { applyIsoCamera } from './iso-camera';
+import { SpellEffectLayer, type UnitAnchorRole } from './spell-effects';
 import { type UnitModelPose, UnitModelLayer } from './unit-models';
 
 type WowBlend = 'opaque' | 'alphaKey' | 'alpha' | 'add' | 'mod' | 'mod2x';
@@ -35,6 +37,10 @@ type WowBlend = 'opaque' | 'alphaKey' | 'alpha' | 'add' | 'mod' | 'mod2x';
 const VERTEX_LIT_BRIGHTNESS = 2;
 const UNLIT_BRIGHTNESS = 0.75;
 const BACKGROUND = 0x08111d;
+// Effect heights on units drawn without a model, or whose model lacks the
+// point, as fractions of a standing height (yards).
+const DEFAULT_UNIT_HEIGHT = 2;
+const CHEST_HEIGHT = 0.6;
 
 // Party fade, matching getSceneFade() in map-projection.ts: each volume keeps
 // its surroundings solid, fading out over the height range above and below and
@@ -134,6 +140,9 @@ export class InstanceSceneView {
   private lost = false;
   // Player and creature models; lit, unlike the scene.
   private readonly units: UnitModelLayer;
+  // Spell effects, drawn over everything.
+  private readonly effects = new SpellEffectLayer();
+  private effectsShown = false;
   // What the canvas currently shows, to skip redrawing an unchanged frame.
   private lastFrameKey = '';
 
@@ -146,6 +155,7 @@ export class InstanceSceneView {
       this.onChange();
     });
     this.scene.add(this.units.group);
+    this.scene.add(this.effects.group);
     this.scene.add(new AmbientLight(0xffffff, 2.2));
     const sun = new DirectionalLight(0xffffff, 1.6);
     sun.position.set(0.4, 1, 0.6);
@@ -175,6 +185,30 @@ export class InstanceSceneView {
   setUnits(poses: UnitModelPose[], nowMs: number): Set<string> {
     if (this.lost) return new Set();
     return this.units.update(poses, nowMs);
+  }
+
+  // Where an effect sits on a unit, in server coordinates: the model's own
+  // point when it has one, otherwise a height up from its feet. `positions`
+  // holds the units shown (feet, server coordinates).
+  anchor(positions: ReadonlyMap<UnitKey, Point3>, unit: UnitKey, role: UnitAnchorRole): Point3 | null {
+    const feet = positions.get(unit);
+    if (!feet) return null;
+    if (role === 'feet') return feet;
+    const point = this.units.pointOf(unit, role);
+    if (point) return point;
+    const height = this.units.heightOf(unit) ?? DEFAULT_UNIT_HEIGHT;
+    return [feet[0], feet[1], feet[2] + (role === 'overhead' ? height + 0.3 : height * CHEST_HEIGHT)];
+  }
+
+  // Places the store's live effects for the next render; call after
+  // setUnits, so hand points follow this frame's animation.
+  setEffects(store: CombatEffectStore | null, positions: ReadonlyMap<UnitKey, Point3>, now: number): number {
+    if (this.lost) return 0;
+    const before = this.effects.count;
+    this.effects.update(store, now, (unit, role) => this.anchor(positions, unit, role));
+    // One more frame after the last effect ends, to clear it.
+    this.effectsShown = this.effects.count > 0 || before > 0;
+    return this.effects.count;
   }
 
   state(url: string): SceneLoadState | undefined {
@@ -238,8 +272,8 @@ export class InstanceSceneView {
       ...active.flatMap((volume) => [volume.minX, volume.maxX, volume.minY, volume.maxY, volume.minZ, volume.maxZ]
         .map((value) => Math.round(value))),
     ].join('|');
-    // Animated models need every frame.
-    if (frameKey === this.lastFrameKey && !this.units.count) return true;
+    // Animated models and live effects need every frame.
+    if (frameKey === this.lastFrameKey && !this.units.count && !this.effectsShown) return true;
     this.lastFrameKey = frameKey;
     if (this.shown !== root) {
       if (this.shown) this.scene.remove(this.shown);

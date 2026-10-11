@@ -1,7 +1,8 @@
 import * as dgram from 'dgram';
 
 import type {
-  StreamAppearance, StreamAppearanceUpdate, StreamBotDecision, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame, StreamListeners,
+  StreamAppearance, StreamAppearanceUpdate, StreamAuraCategory, StreamBotDecision, StreamCombatEvent, StreamCombatEventKind,
+  StreamCombatEventUpdate, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame, StreamListeners,
   StreamPath, StreamPathUpdate, StreamPlayerSample, StreamStatus,
 } from './types/electron';
 
@@ -25,6 +26,7 @@ const PATH_MAGIC = 'WMP1';
 const CREATURE_MAGIC = 'WMC1';
 const BOT_MAGIC = 'WMB1';
 const APPEARANCE_MAGIC = 'WMA1';
+const COMBAT_MAGIC = 'WME1';
 const VERSION = 1;
 const HEADER_SIZE = 28;
 const PLAYER_SIZE = 30;
@@ -35,6 +37,11 @@ const CREATURE_SIZE = 36;
 const BOT_SIZE = 36;
 const BOT_ACTION_SIZE = 12;
 const APPEARANCE_SIZE = 108;
+const COMBAT_EVENT_SIZE = 44;
+const COMBAT_EVENT_KINDS: Array<StreamCombatEventKind | undefined> = [
+  undefined, 'castStart', 'castGo', 'castCancel', 'auraApply', 'auraRemove', 'swing', 'damage', 'heal',
+];
+const AURA_CATEGORIES: Array<StreamAuraCategory | null> = [null, 'crowdControl', 'shield', 'defensive', 'offensive'];
 const EQUIPMENT_SLOTS = 19;
 const BOT_STATES: StreamBotDecision['state'][] = ['combat', 'idle', 'dead'];
 const RENEW_INTERVAL_MS = 3000;
@@ -262,6 +269,45 @@ export function parseAppearanceDatagram(buffer: Buffer): StreamAppearanceUpdate 
   return { mapId: header.mapId, instanceId: header.instanceId, serverTimeMs: header.serverTimeMs, units };
 }
 
+export function parseCombatEventDatagram(buffer: Buffer): StreamCombatEventUpdate | null {
+  const header = readEntryHeader(buffer, COMBAT_MAGIC);
+  if (!header || buffer.length < PATH_HEADER_SIZE + header.count * COMBAT_EVENT_SIZE) return null;
+  const events: StreamCombatEvent[] = [];
+  for (let index = 0; index < header.count; index += 1) {
+    const offset = PATH_HEADER_SIZE + index * COMBAT_EVENT_SIZE;
+    // Kinds from a newer module are skipped.
+    const kind = COMBAT_EVENT_KINDS[buffer.readUInt8(offset)];
+    if (!kind) continue;
+    const flags = buffer.readUInt8(offset + 1);
+    events.push({
+      kind,
+      sourceCreature: Boolean(flags & 1),
+      targetCreature: Boolean(flags & 2),
+      area: Boolean(flags & 4),
+      channeled: Boolean(flags & 8),
+      periodic: Boolean(flags & 32),
+      helpful: Boolean(flags & 64),
+      triggered: Boolean(flags & 128),
+      schoolMask: buffer.readUInt8(offset + 2),
+      auraCategory: AURA_CATEGORIES[buffer.readUInt8(offset + 3)] ?? null,
+      sourceGuid: buffer.readUInt32LE(offset + 4),
+      targetGuid: buffer.readUInt32LE(offset + 8),
+      spellId: buffer.readUInt32LE(offset + 12),
+      value: buffer.readUInt32LE(offset + 16),
+      missileSpeed: buffer.readFloatLE(offset + 20),
+      radius: buffer.readFloatLE(offset + 24),
+      point: flags & 16
+        ? [buffer.readFloatLE(offset + 28), buffer.readFloatLE(offset + 32), buffer.readFloatLE(offset + 36)]
+        : null,
+      ageMs: buffer.readUInt16LE(offset + 40),
+    });
+  }
+  return {
+    mapId: header.mapId, instanceId: header.instanceId, serverTimeMs: header.serverTimeMs,
+    dropped: buffer.readUInt16LE(22), events,
+  };
+}
+
 type CommandRunner = (command: string) => Promise<{ success: boolean; message: string }>;
 
 interface WatchedSession {
@@ -374,6 +420,10 @@ export class TelemetryStream {
       this.receiveAppearances(message);
       return;
     }
+    if (magic === COMBAT_MAGIC) {
+      this.receiveCombatEvents(message);
+      return;
+    }
     const datagram = parseStreamDatagram(message);
     if (!datagram) return;
     const session = this.sessions.get(`${datagram.mapId}:${datagram.instanceId}`);
@@ -456,6 +506,14 @@ export class TelemetryStream {
     const session = this.sessions.get(`${update.mapId}:${update.instanceId}`);
     if (!session) return;
     for (const listener of session.listeners) listener.onAppearances?.(update);
+  }
+
+  private receiveCombatEvents(message: Buffer): void {
+    const update = parseCombatEventDatagram(message);
+    if (!update || (!update.events.length && !update.dropped)) return;
+    const session = this.sessions.get(`${update.mapId}:${update.instanceId}`);
+    if (!session) return;
+    for (const listener of session.listeners) listener.onCombatEvents?.(update);
   }
 
   private setStatus(session: WatchedSession, status: StreamStatus): void {

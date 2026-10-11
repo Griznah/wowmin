@@ -298,6 +298,52 @@ export interface StreamAppearanceUpdate {
   units: StreamAppearance[];
 }
 
+export type StreamCombatEventKind =
+  | 'castStart' | 'castGo' | 'castCancel' | 'auraApply' | 'auraRemove' | 'swing' | 'damage' | 'heal';
+// Notable auras, as the module classes them.
+export type StreamAuraCategory = 'crowdControl' | 'shield' | 'defensive' | 'offensive';
+
+// A cast, notable aura, auto-attack swing, damage, or heal. Guids are players'
+// unless the matching creature flag is set; 0 is none.
+export interface StreamCombatEvent {
+  kind: StreamCombatEventKind;
+  sourceGuid: number;
+  sourceCreature: boolean;
+  targetGuid: number;
+  targetCreature: boolean;
+  // 0 for none, e.g. a white hit.
+  spellId: number;
+  // Spell school bits: 1 physical, 2 holy, 4 fire, 8 nature, 16 frost,
+  // 32 shadow, 64 arcane; 0 unknown.
+  schoolMask: number;
+  auraCategory: StreamAuraCategory | null;
+  // castStart: cast time in ms; castGo: channel duration in ms; auraApply:
+  // duration in ms (0 permanent); damage and heal: the final amount.
+  value: number;
+  // Yards per second; 0 is instant.
+  missileSpeed: number;
+  // Yards; 0 when the spell has no area.
+  radius: number;
+  // The spell's ground point, if it has one.
+  point: [number, number, number] | null;
+  area: boolean;
+  channeled: boolean;
+  periodic: boolean;
+  helpful: boolean;
+  triggered: boolean;
+  // How long before the update's serverTimeMs it happened.
+  ageMs: number;
+}
+
+export interface StreamCombatEventUpdate {
+  mapId: number;
+  instanceId: number;
+  serverTimeMs: number;
+  // Events the module dropped since the last update because there were too many.
+  dropped: number;
+  events: StreamCombatEvent[];
+}
+
 export interface StreamBotUpdate {
   mapId: number;
   instanceId: number;
@@ -312,6 +358,7 @@ export interface StreamListeners {
   onCreatures?: (update: StreamCreatureUpdate) => void;
   onBots?: (update: StreamBotUpdate) => void;
   onAppearances?: (update: StreamAppearanceUpdate) => void;
+  onCombatEvents?: (update: StreamCombatEventUpdate) => void;
 }
 
 // creature_template details for labelling streamed creatures.

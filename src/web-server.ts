@@ -205,6 +205,7 @@ const server = createServer(async (request, response) => {
       onCreatures: (update) => send('creatures', update),
       onBots: (update) => send('bots', update),
       onAppearances: (update) => send('appearances', update),
+      onCombatEvents: (update) => send('combat', update),
     });
     // Comment lines keep idle connections open through proxies.
     const keepAlive = setInterval(() => response.write(': keep-alive\n\n'), 15000);

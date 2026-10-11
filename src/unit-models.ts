@@ -8,6 +8,10 @@ import * as path from 'path';
 // already in the cache are served.
 
 const BUILD_TIMEOUT_MS = 60000;
+// Bumped when the converter's output changes, so models are rebuilt: built
+// models live under v<version>/, and older ones are removed at startup.
+// 2: spell effect points (hands, chest, overhead).
+export const UNIT_MODEL_CACHE_VERSION = 2;
 // A look that could not be built is not retried for this long.
 const FAILURE_RETRY_MS = 10 * 60 * 1000;
 
@@ -45,14 +49,37 @@ export class UnitModels {
   private readonly building = new Map<string, Promise<boolean>>();
   private readonly failedAt = new Map<string, number>();
 
-  constructor(private readonly cacheRoot: string, private readonly workerScript: string) {}
+  constructor(private readonly cacheRoot: string, private readonly workerScript: string) {
+    this.removeOldVersions();
+  }
 
   get enabled(): boolean {
     return Boolean(process.env.WOWMIN_CLIENT_DATA);
   }
 
   pathFor(request: UnitModelRequest): string {
-    return path.join(this.cacheRoot, request.kind, `${request.key}.glb`);
+    return path.join(this.cacheRoot, `v${UNIT_MODEL_CACHE_VERSION}`, request.kind, `${request.key}.glb`);
+  }
+
+  // Only folders this cache made: older versions, and the unversioned
+  // creature/ and character/ from before versioning.
+  private removeOldVersions(): void {
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(this.cacheRoot);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const old = entry === 'creature' || entry === 'character'
+        || (/^v\d+$/.test(entry) && entry !== `v${UNIT_MODEL_CACHE_VERSION}`);
+      if (!old) continue;
+      try {
+        fs.rmSync(path.join(this.cacheRoot, entry), { recursive: true, force: true });
+      } catch (error) {
+        console.warn(`Could not remove old unit models in ${entry}: ${error instanceof Error ? error.message : error}`);
+      }
+    }
   }
 
   // Resolves to the cached file, building it first if needed; null if there

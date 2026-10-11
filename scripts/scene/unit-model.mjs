@@ -8,7 +8,9 @@ import { Document, NodeIO, TextureInfo } from '@gltf-transform/core';
 
 import { M2_MATERIAL_FLAG_TWO_SIDED, M2_TEXTURE_FLAG_WRAP_S, M2_TEXTURE_FLAG_WRAP_T } from './m2.mjs';
 import { loadSkinnedM2 } from './m2-skinned.mjs';
-import { CharacterData, creatureWeaponAttachments, loadCharacter, SLOT, VISIBLE_SLOTS } from './character.mjs';
+import {
+  CharacterData, creatureWeaponAttachments, loadCharacter, readM2Attachments, SLOT, VISIBLE_SLOTS,
+} from './character.mjs';
 import { encodeTexture } from './textures.mjs';
 import { readDbc } from './dbc.mjs';
 
@@ -16,6 +18,18 @@ const M2_BLEND = ['opaque', 'alphaKey', 'alpha', 'add', 'add', 'mod', 'mod2x'];
 const TEXTURE_TYPE_HARDCODED = 0;
 const TEXTURE_TYPE_MONSTER_1 = 11;
 const IDENTITY_ROTATION = [0, 0, 0, 1];
+// Points spell effects are drawn at, by M2 attachment ID; the first one the
+// model has wins. 22/21 are the spell hands, 1/2 the hands, 15 the chest, and
+// 18 the name point above the head (11 the helm).
+const EFFECT_POINTS = { handRight: [22, 1], handLeft: [21, 2], chest: [15], overhead: [18, 11] };
+
+// The effect points a skeleton has, from its attachment table.
+export function effectPoints(skeletonAttachments) {
+  return Object.entries(EFFECT_POINTS).flatMap(([role, ids]) => {
+    const point = ids.map((id) => skeletonAttachments.find((candidate) => candidate.id === id)).find(Boolean);
+    return point ? [{ role, bone: point.bone, position: point.position }] : [];
+  });
+}
 
 // Strictly increasing key times in seconds, dropping repeated times.
 export function keyframeTimes(times, values, width) {
@@ -41,7 +55,7 @@ export function animatedChannels(clips, boneCount) {
   return paths;
 }
 
-export function buildUnitDocument(model, { name, textureFor, scale = 1, textureMax = 256, attachments = [] }) {
+export function buildUnitDocument(model, { name, textureFor, scale = 1, textureMax = 256, attachments = [], points = [] }) {
   const document = new Document();
   const buffer = document.createBuffer();
   const accessor = (type, array, normalized = false) =>
@@ -181,6 +195,16 @@ export function buildUnitDocument(model, { name, textureFor, scale = 1, textureM
       .setExtras({ wowItem: attachment.role, wowSheath: attachment.sheath ?? null }));
   });
 
+  // Empty nodes where spell effects go, moving with their bone.
+  for (const point of points) {
+    const joint = joints[point.bone];
+    if (!joint) continue;
+    const pivot = model.bones[point.bone].pivot;
+    joint.addChild(document.createNode(`${name}-${point.role}`)
+      .setTranslation(point.position.map((value, axis) => value - pivot[axis]))
+      .setExtras({ wowPoint: point.role }));
+  }
+
   const channels = animatedChannels(model.clips, model.bones.length);
   const durations = {};
   const speeds = {};
@@ -276,7 +300,10 @@ export async function buildCreatureGlb(unitData, displayId, { textureMax, weapon
   };
   unitData.characters ??= new CharacterData(unitData);
   const attachments = creatureWeaponAttachments(unitData.characters, display.modelName, weapons);
-  const document = buildUnitDocument(model, { name: `creature-${displayId}`, textureFor, scale: display.scale, textureMax, attachments });
+  const points = effectPoints(readM2Attachments(unitData.readFile(display.modelName)));
+  const document = buildUnitDocument(model, {
+    name: `creature-${displayId}`, textureFor, scale: display.scale, textureMax, attachments, points,
+  });
   return writeGlb(document);
 }
 
@@ -315,6 +342,7 @@ async function buildCharacterGlb(unitData, look, { name = 'character', scale = 1
   if (!character) return null;
   const document = buildUnitDocument(character.model, {
     name, textureFor: character.textureFor, scale, textureMax: 256, attachments: character.attachments,
+    points: effectPoints(readM2Attachments(unitData.characters.readFile(character.modelName))),
   });
   return writeGlb(document);
 }
