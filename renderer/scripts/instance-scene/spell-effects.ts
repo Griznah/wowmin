@@ -12,6 +12,7 @@ import {
 } from 'three';
 
 import {
+  type CastGlow,
   type CombatEffectStore,
   type Impact,
   IMPACT_LIFETIME_MS,
@@ -26,7 +27,8 @@ import {
 // so walls never hide them.
 
 // Where on a unit an effect sits.
-export type UnitAnchorRole = 'handRight' | 'handLeft' | 'chest' | 'head' | 'overhead' | 'feet';
+export type { UnitAnchorRole } from '../utils/spell-kits';
+import type { UnitAnchorRole } from '../utils/spell-kits';
 // A unit's anchor point in server coordinates, or null if it isn't shown.
 export type UnitAnchor = (unit: UnitKey, role: UnitAnchorRole) => Point3 | null;
 
@@ -86,14 +88,14 @@ export class SpellEffectLayer {
   // Draws the store's effects, or none for a null store, except missiles and
   // impacts `skip` says are drawn elsewhere (the client's own art).
   update(store: CombatEffectStore | null, now: number, anchor: UnitAnchor,
-    skip: (entry: Projectile | Impact) => boolean = () => false): void {
+    skip: (entry: Projectile | Impact | CastGlow) => boolean = () => false): void {
     this.spritesUsed = 0;
     this.ringsUsed = 0;
     let drawn = 0;
     const effects = store ?? NO_EFFECTS;
 
     for (const cast of effects.casts) {
-      if (cast.startAt > now) continue;
+      if (cast.startAt > now || skip(cast)) continue;
       const right = anchor(cast.caster, 'handRight');
       if (!right) continue;
       drawn += 1;

@@ -108,8 +108,13 @@ test('instant spells streak; no missile without both units; triggered spells onl
     triggered.advance(LIVE_RENDER_DELAY_MS, tenYards));
   assert.deepEqual(plain(cues), []);
   assert.equal(triggered.casts.length, 0);
-  assert.equal(triggered.projectiles.length, 0);
+  // A triggered spell with a missile (a channel's bolts) flies; one without doesn't.
+  assert.equal(triggered.projectiles.length, 1);
   assert.equal(triggered.rings.length, 1);
+  const proc = new CombatEffectStore();
+  proc.push(update([event({ triggered: true, missileSpeed: 0 })]), 0);
+  proc.advance(LIVE_RENDER_DELAY_MS, tenYards);
+  assert.equal(proc.projectiles.length, 0);
 });
 
 test('area spells ring at their ground point; channelled ones last the channel and beam to a target', () => {

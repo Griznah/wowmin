@@ -12,7 +12,8 @@ const BUILD_TIMEOUT_MS = 60000;
 // models live under v<version>/, and older ones are removed at startup.
 // 2: spell effect points (hands, chest, overhead).
 // 3: a head point; spell effect models and spell art lookups.
-export const UNIT_MODEL_CACHE_VERSION = 3;
+// 4: animations spell kits name (channelling, hit reactions, other casts).
+export const UNIT_MODEL_CACHE_VERSION = 4;
 // A look that could not be built is not retried for this long.
 const FAILURE_RETRY_MS = 10 * 60 * 1000;
 

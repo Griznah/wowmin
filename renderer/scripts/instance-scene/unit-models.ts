@@ -60,6 +60,11 @@ export interface UnitModelPose {
   eventDriven?: boolean;
   // Glow colour for a notable aura, or null for none.
   tint?: string | null;
+  // Animations the spell's kits name: a loop while casting or channelling,
+  // and a one-off as a spell fires or lands (clip names; skipped if the
+  // model lacks them).
+  kitLoop?: string | null;
+  kitOnce?: string | null;
 }
 
 // Effect points the converter exports on the skeleton.
@@ -239,6 +244,11 @@ export class UnitModelLayer {
     return [position.x, position.y, position.z];
   }
 
+  // Which way a drawn unit faces (radians about Z), or null.
+  orientationOf(id: string): number | null {
+    return this.units.get(id)?.root.rotation.z ?? null;
+  }
+
   // A drawn unit's overall scale (its display's times its own), or null.
   scaleOf(id: string): number | null {
     const unit = this.units.get(id);
@@ -389,6 +399,10 @@ export class UnitModelLayer {
     const clips = unit.template.clips!;
     const stance = chooseUnitStance({ alive: pose.alive, speed: unit.speed, inCombat: pose.inCombat, style: pose.style });
     const chosen = getStanceClips(stance, pose.weapons, new Set(clips.keys()));
+    // Standing or fighting, a cast or channel holds the pose its kit names.
+    const still = stance !== 'walk' && stance !== 'run' && stance !== 'dead';
+    const kitLoop = still && pose.kitLoop && clips.has(pose.kitLoop) ? pose.kitLoop : null;
+    if (kitLoop) chosen.loop = kitLoop;
     if (stance !== unit.stance || chosen.loop !== unit.loopName) {
       unit.stance = stance;
       this.playLoop(unit, chosen.loop, Boolean(chosen.holdLastFrame), pose.alive || unit.seenAlive);
@@ -397,11 +411,13 @@ export class UnitModelLayer {
       unit.loop.timeScale = getMoveTimeScale(unit.speed, unit.template.speeds?.[unit.loopName]);
     }
     const fighting = stance === 'melee' || stance === 'ranged' || stance === 'cast';
-    if (pose.strike && (fighting || stance === 'stand')) {
+    if (still && pose.kitOnce && clips.has(pose.kitOnce)) {
+      this.playStrike(unit, pose.kitOnce);
+    } else if (pose.strike && (fighting || stance === 'stand')) {
       // A real attack: the clip for what was done, whatever the stance.
       const strike = getStanceClips(pose.strike, pose.weapons, new Set(clips.keys())).strike;
       if (strike) this.playStrike(unit, strike);
-    } else if (!pose.eventDriven && chosen.strike && fighting && nowMs >= unit.nextStrikeAt) {
+    } else if (!pose.eventDriven && !kitLoop && chosen.strike && fighting && nowMs >= unit.nextStrikeAt) {
       unit.nextStrikeAt = nowMs + getStrikeInterval(stance, unit.jitter) * 1000;
       unit.jitter = Math.random();
       this.playStrike(unit, chosen.strike);

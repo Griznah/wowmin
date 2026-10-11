@@ -27,7 +27,7 @@ import { type FadeSettings, type FadeVolume, type IsoView, MAX_FADE_VOLUMES } fr
 import type { CombatEffectStore, Point3, UnitKey } from '../utils/spell-events';
 import { applyIsoCamera } from './iso-camera';
 import { SpellEffectLayer, type UnitAnchorRole } from './spell-effects';
-import { SpellVisualLayer } from './spell-visual-layer';
+import { SpellVisualLayer, type UnitInfo } from './spell-visual-layer';
 import { type UnitModelPose, UnitModelLayer } from './unit-models';
 
 type WowBlend = 'opaque' | 'alphaKey' | 'alpha' | 'add' | 'mod' | 'mod2x';
@@ -193,7 +193,12 @@ export class InstanceSceneView {
   // models (the rest still need markers).
   setUnits(poses: UnitModelPose[], nowMs: number): Set<string> {
     if (this.lost) return new Set();
-    return this.units.update(poses, nowMs);
+    // Animations the spells' kits ask for (from the last frame's effects).
+    const animations = this.spellVisuals.takeAnimations();
+    return this.units.update(animations.size ? poses.map((pose) => {
+      const animation = animations.get(pose.id);
+      return animation ? { ...pose, kitLoop: animation.loop, kitOnce: animation.once } : pose;
+    }) : poses, nowMs);
   }
 
   // Where an effect sits on a unit, in server coordinates: the model's own
@@ -216,7 +221,12 @@ export class InstanceSceneView {
     if (this.lost) return 0;
     const before = this.effects.count + this.spellVisuals.count;
     const anchor = (unit: UnitKey, role: UnitAnchorRole) => this.anchor(positions, unit, role);
-    this.spellVisuals.update(store, now, anchor, (unit) => this.units.scaleOf(unit) ?? 1, this.camera);
+    const units: UnitInfo = {
+      anchor,
+      scale: (unit) => this.units.scaleOf(unit) ?? 1,
+      facing: (unit) => this.units.orientationOf(unit) ?? 0,
+    };
+    this.spellVisuals.update(store, now, units, this.camera);
     this.effects.update(store, now, anchor, (entry) => this.spellVisuals.handles(entry));
     const count = this.effects.count + this.spellVisuals.count;
     // One more frame after the last effect ends, to clear it.

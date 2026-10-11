@@ -36,6 +36,19 @@ export const UNIT_ANIMATIONS = {
   ReadySpellOmni: 52,
   SpellCastDirected: 53,
   SpellCastOmni: 54,
+  // Named by spell visual kits: hit reactions, channelling, and other casts.
+  CombatWound: 9,
+  CombatCritical: 10,
+  Stun: 14,
+  SpellCast: 32,
+  BattleRoar: 55,
+  Special1H: 57,
+  AttackThrown: 107,
+  ReadyThrown: 108,
+  SpecialUnarmed: 118,
+  UseStandingLoop: 123,
+  ChannelCastDirected: 124,
+  ChannelCastOmni: 125,
 };
 
 const asBytes = (buffer) => new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);

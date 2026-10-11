@@ -17,7 +17,9 @@ import { CombatEffectStore, type Point3, type UnitKey } from './utils/spell-even
 
 // Spell preview (dev tool, /spell-preview): plays one spell on a loop between
 // a caster and a target, close up, so its effects can be compared with the
-// client's. Query or form: spell, speed (missile yards/s), cast (ms), heal.
+// client's. Query or form: spell, speed (missile yards/s), cast (ms), channel
+// (ms; a channelled spell instead of a missile), bolt (a spell the channel
+// fires each second, flying at `speed`), heal.
 
 const CASTER: UnitKey = 'p1';
 const TARGET: UnitKey = 'c2';
@@ -34,7 +36,7 @@ const facing = new Map<UnitKey, number>([[CASTER, 0], [TARGET, Math.PI], [ALLY, 
 const form = document.getElementById('preview-form') as HTMLFormElement;
 const field = (name: string) => form.elements.namedItem(name) as HTMLInputElement;
 const params = new URLSearchParams(window.location.search);
-for (const name of ['spell', 'speed', 'cast', 'rate']) {
+for (const name of ['spell', 'speed', 'cast', 'channel', 'bolt', 'rate']) {
   const value = params.get(name);
   if (value !== null) field(name).value = value;
 }
@@ -102,6 +104,7 @@ function scheduleLoop(at: number): void {
   const spellId = Number(field('spell').value) || 0;
   const speed = Math.max(0, Number(field('speed').value) || 0);
   const castMs = Math.max(0, Number(field('cast').value) || 0);
+  const channelMs = Math.max(0, Number(field('channel').value) || 0);
   const heal = field('heal').checked;
   const target = heal ? { targetGuid: 3, targetCreature: false } : { targetGuid: 2, targetCreature: true };
   const [from, to] = [positions.get(CASTER)!, positions.get(heal ? ALLY : TARGET)!];
@@ -112,6 +115,19 @@ function scheduleLoop(at: number): void {
     setTimeoutVirtual(time, () => store.push({ mapId: 0, instanceId: 0, serverTimeMs: 0, dropped: 0, events: [event({ spellId, ...target, ...fields })] }, virtualNow));
   };
   if (castMs > 0) push(at, { kind: 'castStart', value: castMs, helpful: heal });
+  if (channelMs > 0) {
+    push(at + castMs, { kind: 'castGo', channeled: true, value: channelMs, helpful: heal });
+    const bolt = Number(field('bolt').value) || 0;
+    for (let tick = 1000; tick <= channelMs; tick += 1000) {
+      if (bolt) {
+        push(at + castMs + tick - travel, { kind: 'castGo', spellId: bolt, missileSpeed: speed, triggered: true, helpful: heal });
+        push(at + castMs + tick, { kind: heal ? 'heal' : 'damage', spellId: bolt, value: 400, helpful: heal });
+      } else {
+        push(at + castMs + tick, { kind: heal ? 'heal' : 'damage', value: 400, helpful: heal, periodic: true });
+      }
+    }
+    return;
+  }
   push(at + castMs, { kind: 'castGo', missileSpeed: speed, helpful: heal });
   push(at + castMs + travel, { kind: heal ? 'heal' : 'damage', value: 1234, helpful: heal });
 }
@@ -149,11 +165,18 @@ function frame(): void {
     return from && to ? Math.hypot(to[0] - from[0], to[1] - from[1], to[2] - from[2]) : null;
   });
   const strikes = new Map(cues.map((cue) => [cue.unit, cue.kind] as const));
+  const animations = visuals.takeAnimations();
   units.update([CASTER, TARGET, ALLY].map((id) => ({
     ...pose(id, id === CASTER ? CASTER_URL : id === TARGET ? TARGET_URL : ALLY_URL),
     strike: strikes.get(id) ?? null,
+    kitLoop: animations.get(id)?.loop ?? null,
+    kitOnce: animations.get(id)?.once ?? null,
   })), virtualNow);
-  visuals.update(store, virtualNow, anchor, (unit) => units.scaleOf(unit) ?? 1, camera);
+  visuals.update(store, virtualNow, {
+    anchor,
+    scale: (unit) => units.scaleOf(unit) ?? 1,
+    facing: (unit) => facing.get(unit) ?? 0,
+  }, camera);
   glows.update(field('glows').checked ? store : null, virtualNow, anchor, (entry) => visuals.handles(entry));
   renderer.render(scene, camera);
   const status = document.getElementById('preview-status');
@@ -169,10 +192,12 @@ form.addEventListener('submit', (submitted) => {
 });
 document.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((button) => {
   button.addEventListener('click', () => {
-    const [spell, speed, cast, heal] = button.dataset.preset!.split(',');
+    const [spell, speed, cast, heal, channel = '0', bolt = '0'] = button.dataset.preset!.split(',');
+    field('bolt').value = bolt;
     field('spell').value = spell;
     field('speed').value = speed;
     field('cast').value = cast;
+    field('channel').value = channel;
     field('heal').checked = heal === '1';
     form.requestSubmit();
   });

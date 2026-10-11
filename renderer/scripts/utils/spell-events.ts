@@ -23,6 +23,8 @@ export interface CastGlow {
   endAt: number;
   // A short flash as a spell is released, rather than a held cast.
   release: boolean;
+  // A channel, held for its duration, rather than a cast before release.
+  channeled: boolean;
 }
 
 export interface Projectile {
@@ -286,7 +288,9 @@ export class CombatEffectStore {
     switch (event.kind) {
       case 'castStart':
         this.endCast(source);
-        this.castList.push({ caster: source, spellId: event.spellId, color, startAt: at, endAt: at + event.value + CAST_GRACE_MS, release: false });
+        this.castList.push({
+          caster: source, spellId: event.spellId, color, startAt: at, endAt: at + event.value + CAST_GRACE_MS, release: false, channeled: false,
+        });
         return null;
       case 'castCancel':
         this.endCast(source);
@@ -339,15 +343,17 @@ export class CombatEffectStore {
     const atOther = target !== null && target !== source;
     if (!event.triggered && !physical) {
       if (event.channeled && event.value > 0) {
-        this.castList.push({ caster: source, spellId: event.spellId, color, startAt: at, endAt: at + event.value, release: false });
+        this.castList.push({ caster: source, spellId: event.spellId, color, startAt: at, endAt: at + event.value, release: false, channeled: true });
         if (atOther) {
           this.beamList.push({ source, target: target!, spellId: event.spellId, color, startAt: at, endAt: at + event.value });
         }
       } else {
-        this.castList.push({ caster: source, spellId: event.spellId, color, startAt: at, endAt: at + RELEASE_FLASH_MS, release: true });
+        this.castList.push({ caster: source, spellId: event.spellId, color, startAt: at, endAt: at + RELEASE_FLASH_MS, release: true, channeled: false });
       }
     }
-    if (!event.triggered && atOther && !event.channeled && (!physical || event.missileSpeed > 0)) {
+    // Triggered spells (procs, a channel's bolts) fly only with a real missile.
+    const flies = event.triggered ? event.missileSpeed > 0 : !physical || event.missileSpeed > 0;
+    if (atOther && !event.channeled && flies) {
       const yards = distance(source, target!);
       if (yards !== null) {
         this.projectileList.push({

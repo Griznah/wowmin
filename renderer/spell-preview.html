@@ -21,6 +21,8 @@
     <label>Spell <input name="spell" type="number" value="116"></label>
     <label>Missile speed <input name="speed" type="number" value="28" step="any"></label>
     <label>Cast ms <input name="cast" type="number" value="1500"></label>
+    <label>Channel ms <input name="channel" type="number" value="0"></label>
+    <label>Bolt spell <input name="bolt" type="number" value="0" title="A spell the channel fires each second, such as Arcane Missiles' 7268"></label>
     <label><input name="heal" type="checkbox"> Heal (target an ally)</label>
     <label>Speed <input name="rate" type="number" value="1" step="0.05" min="0.05"></label>
     <label><input name="glows" type="checkbox" checked> Level 1 glows</label>
@@ -29,6 +31,7 @@
     <button type="button" data-preset="133,24,1500,0">Fireball</button>
     <button type="button" data-preset="686,20,1500,0">Shadow Bolt</button>
     <button type="button" data-preset="635,0,1500,1">Holy Light</button>
+    <button type="button" data-preset="5143,20,0,0,3000,7268">Arcane Missiles</button>
     <span id="preview-status"></span>
   </form>
   <canvas id="preview-canvas"></canvas>

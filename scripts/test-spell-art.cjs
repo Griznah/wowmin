@@ -205,3 +205,23 @@ test('spawns particles on planes and spheres, and counts emission', () => {
   assert.equal(tracks.particleBlend(2), 'alpha');
   assert.equal(tracks.materialBlend(4), 'add');
 });
+
+test('picks the kit a cast plays, its body slots, and the animations it names', () => {
+  const kits = loadModule('../renderer/scripts/utils/spell-kits.ts');
+  const kit = (anim) => ({ anim, effects: [] });
+  const visual = { missile: null, kits: { precast: kit(51), cast: kit(53), channel: kit(124) } };
+  assert.equal(kits.castKit(visual, { release: false, channeled: false }).anim, 51);
+  assert.equal(kits.castKit(visual, { release: true, channeled: false }).anim, 53);
+  assert.equal(kits.castKit(visual, { release: false, channeled: true }).anim, 124);
+  // A channel without its own kit keeps the precast one.
+  assert.equal(kits.castKit({ missile: null, kits: { precast: kit(52) } }, { release: false, channeled: true }).anim, 52);
+  assert.equal(kits.castKit({ missile: null, kits: {} }, { release: true, channeled: false }), undefined);
+  assert.equal(kits.slotAnchor('leftHand'), 'handLeft');
+  assert.equal(kits.slotAnchor('rightWeapon'), 'handRight');
+  assert.equal(kits.slotAnchor('base'), 'feet');
+  assert.equal(kits.slotAnchor('breath'), 'head');
+  assert.equal(kits.slotAnchor('special2'), 'chest');
+  assert.equal(kits.kitAnimationName(125), 'ChannelCastOmni');
+  assert.equal(kits.kitAnimationName(9), 'CombatWound');
+  assert.equal(kits.kitAnimationName(-1), null);
+});
