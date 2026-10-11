@@ -1321,10 +1321,12 @@ async function exportScenes(options, summaries, missingTargets) {
           outputDir: options.output,
           textureMax: options.sceneTextureMax,
           floors: metadata.floors ?? [],
+          worldMapBounds: metadata.worldMapBounds ?? null,
         });
         fs.writeFileSync(metadataPath, `${JSON.stringify({ ...metadata, schemaVersion: 3, scene }, null, 2)}\n`);
         console.log(`  ✓ Wrote ${scene.file} (${(stats.bytes / 1048576).toFixed(1)} MB; ${stats.wmoCount} WMO, `
-          + `${stats.groupCount} groups, ${stats.doodadCount} doodads, ${stats.modelCount} models, ${stats.textureCount} textures)`);
+          + `${stats.groupCount} groups, ${stats.doodadCount} doodads, ${stats.modelCount} models, ${stats.textureCount} textures`
+          + `${stats.terrainTiles ? `, terrain ${stats.terrainTiles} tiles / ${stats.terrainChunks} chunks` : ''})`);
         for (const skipped of stats.skippedWmos) console.warn(`  ! Skipped WMO ${skipped}`);
         if (stats.missing.length) {
           console.warn(`  ! ${stats.missing.length} referenced file(s) not found in the client, e.g. ${stats.missing.slice(0, 3).join(', ')}`);

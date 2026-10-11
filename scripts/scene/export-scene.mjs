@@ -1,7 +1,8 @@
 // Builds <mapId>.glb for one instance map: every placed WMO with its groups
-// and doodad set, plus doodads placed directly on ADT tiles. Terrain geometry
-// is not exported yet. Node transforms keep server world coordinates under a
-// single Z-up to Y-up root, so the renderer can place telemetry directly.
+// and doodad set, doodads placed directly on ADT tiles, and the ADT terrain
+// of the area players use. Node transforms keep server world coordinates
+// under a single Z-up to Y-up root, so the renderer can place telemetry
+// directly.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -9,7 +10,11 @@ import path from 'node:path';
 import { Document, NodeIO, TextureInfo } from '@gltf-transform/core';
 
 import { loadM2, M2_MATERIAL_FLAG_TWO_SIDED, M2_TEXTURE_FLAG_WRAP_S, M2_TEXTURE_FLAG_WRAP_T } from './m2.mjs';
+import { findChunk, readChunks } from './chunks.mjs';
 import { dedupeByUniqueId, readAdtPlacements, readWdt } from './placement.mjs';
+import { PNG } from 'pngjs';
+
+import { ATLAS_SIZE, buildTerrainTile, playArea, WDT_FLAG_BIG_ALPHA } from './terrain.mjs';
 import { encodeTexture } from './textures.mjs';
 import {
   loadWmo,
@@ -23,6 +28,9 @@ import {
 // -90° about X: (x, y, z) Z-up becomes (x, z, -y) Y-up.
 const Z_UP_TO_Y_UP = [-Math.SQRT1_2, 0, 0, Math.SQRT1_2];
 const DUNGEON_MAP_CHUNK_NO_MIN_Z = -9999;
+// Ground textures are tileable and small; the renderer resamples them into
+// one texture array.
+const TERRAIN_TEXTURE_MAX = 256;
 
 const WMO_BLEND = ['opaque', 'alphaKey', 'alpha', 'add', 'mod', 'mod2x'];
 const M2_BLEND = ['opaque', 'alphaKey', 'alpha', 'add', 'add', 'mod', 'mod2x'];
@@ -222,7 +230,9 @@ class SceneBuilder {
   }
 }
 
-export async function exportMapScene({ mapId, internalName, readFile, outputDir, textureMax = 512, floors = [] }) {
+export async function exportMapScene({
+  mapId, internalName, readFile, outputDir, textureMax = 512, floors = [], worldMapBounds = null,
+}) {
   const mapPath = `World\\maps\\${internalName}\\${internalName}`;
   const wdtBuffer = readFile(`${mapPath}.wdt`);
   if (!wdtBuffer) throw new Error(`Missing ${mapPath}.wdt`);
@@ -298,7 +308,75 @@ export async function exportMapScene({ mapId, internalName, readFile, outputDir,
     doodadCount += 1;
   }
 
-  if (!groups.length && !doodadCount) throw new Error(`${internalName} produced no drawable geometry.`);
+  // Terrain, cropped to the area players use (placeholder tiles are skipped).
+  const terrain = { tiles: 0, chunks: 0, bounds: null };
+  if (!wdt.wmoOnly) {
+    const bigAlpha = Boolean(findChunk(readChunks(wdtBuffer), 'MPHD').readUInt32LE(0) & WDT_FLAG_BIG_ALPHA);
+    const area = playArea(floors, worldMapBounds);
+    const buffer = document.getRoot().listBuffers()[0] ?? document.createBuffer();
+    const accessor = (type, array) => document.createAccessor().setType(type).setArray(array).setBuffer(buffer);
+    // Each ground texture once, as a material named for its layer index.
+    const layerNames = [];
+    const layerIndex = new Map();
+    const textureIndex = (name) => {
+      const key = name.toLowerCase();
+      if (layerIndex.has(key)) return layerIndex.get(key);
+      const blp = readFile(name);
+      let index = -1;
+      if (blp) {
+        try {
+          const encoded = encodeTexture(blp, TERRAIN_TEXTURE_MAX);
+          const image = document.createTexture(path.win32.basename(name)).setImage(encoded.data).setMimeType(encoded.mimeType);
+          index = layerNames.length;
+          layerNames.push(`terrain-layer-${index}`);
+          document.createMaterial(`terrain-layer-${index}`).setBaseColorTexture(image);
+        } catch (error) {
+          console.warn(`  ! Ground texture ${name} unreadable: ${error instanceof Error ? error.message : error}`);
+        }
+      }
+      layerIndex.set(key, index);
+      return index;
+    };
+    for (const { x, y } of wdt.tiles) {
+      const adt = readFile(`${mapPath}_${x}_${y}.adt`);
+      if (!adt) continue;
+      let tile;
+      try {
+        tile = buildTerrainTile(adt, { bigAlpha, area, textureIndex });
+      } catch (error) {
+        console.warn(`  ! Terrain tile ${x},${y} unreadable: ${error instanceof Error ? error.message : error}`);
+        continue;
+      }
+      if (!tile) continue;
+      // The tile's layer alphas and shadow, lossless.
+      const atlas = document.createTexture(`terrain-alpha-${x}-${y}`).setMimeType('image/png')
+        .setImage(PNG.sync.write({ width: ATLAS_SIZE, height: ATLAS_SIZE, data: Buffer.from(tile.atlas.buffer) }));
+      document.createMaterial(`terrain-alpha-${x}-${y}`).setBaseColorTexture(atlas);
+      const material = document.createMaterial(`terrain-${x}-${y}`).setMetallicFactor(0).setRoughnessFactor(1)
+        .setExtras({ wowTerrain: true, alpha: `terrain-alpha-${x}-${y}`, origin: tile.origin });
+      const mesh = document.createMesh(`terrain-${x}-${y}`).addPrimitive(document.createPrimitive()
+        .setAttribute('POSITION', accessor('VEC3', tile.positions))
+        .setAttribute('NORMAL', accessor('VEC3', tile.normals))
+        .setAttribute('COLOR_0', accessor('VEC3', tile.colors))
+        .setAttribute('_LAYERS', accessor('VEC4', tile.layers))
+        .setAttribute('_CELL', accessor('VEC2', tile.cells))
+        .setIndices(accessor('SCALAR', tile.indices))
+        .setMaterial(material));
+      root.addChild(document.createNode(`terrain-${x}-${y}`).setMesh(mesh)
+        .setExtras({ kind: 'terrain', tile: [x, y], minZ: tile.bounds.minZ, maxZ: tile.bounds.maxZ }));
+      terrain.tiles += 1;
+      terrain.chunks += tile.chunkCount;
+      const b = tile.bounds;
+      terrain.bounds = terrain.bounds ? {
+        minX: Math.min(terrain.bounds.minX, b.minX), maxX: Math.max(terrain.bounds.maxX, b.maxX),
+        minY: Math.min(terrain.bounds.minY, b.minY), maxY: Math.max(terrain.bounds.maxY, b.maxY),
+        minZ: Math.min(terrain.bounds.minZ, b.minZ), maxZ: Math.max(terrain.bounds.maxZ, b.maxZ),
+      } : b;
+    }
+    if (terrain.tiles) root.setExtras({ ...root.getExtras(), wowTerrainLayers: layerNames });
+  }
+
+  if (!groups.length && !doodadCount && !terrain.tiles) throw new Error(`${internalName} produced no drawable geometry.`);
 
   const file = `${mapId}.glb`;
   const glb = await new NodeIO().writeBinary(document);
@@ -320,8 +398,11 @@ export async function exportMapScene({ mapId, internalName, readFile, outputDir,
       bounds,
       groups: groups.map(({ wmoGroupId, exterior, minZ, maxZ }) => ({ wmoGroupId, exterior, minZ, maxZ })),
       floors: computeFloorHeights(floors, groups),
+      ...(terrain.tiles ? { terrain: { tiles: terrain.tiles, chunks: terrain.chunks, bounds: terrain.bounds } } : {}),
     },
     stats: {
+      terrainTiles: terrain.tiles,
+      terrainChunks: terrain.chunks,
       bytes: glb.byteLength,
       wmoCount: wmoPlacements.length,
       groupCount: groups.length,

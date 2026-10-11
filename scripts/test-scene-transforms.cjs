@@ -197,3 +197,109 @@ test('fixes WMO vertex colours after the last transparent batch, even when every
   assert.deepEqual([...fixVertexColors(bgra, batches, 2)], [...bgra]);
   assert.deepEqual([...bgra], [100, 100, 100, 64, 100, 100, 100, 64], 'input is not mutated');
 });
+
+test('lays out a terrain chunk: 9 x 9 outer and 8 x 8 centre vertices running south and east', async () => {
+  const { chunkPositions, CHUNK_SIZE, CHUNK_VERTEX_COUNT } = await load('terrain.mjs');
+  const heights = new Float32Array(CHUNK_VERTEX_COUNT).fill(2);
+  const positions = chunkPositions([100, 200, 10], heights);
+  const unit = CHUNK_SIZE / 8;
+  const at = (index) => [positions[index * 3], positions[index * 3 + 1], positions[index * 3 + 2]];
+  near(at(0)[0], 100, 'first outer x'); near(at(0)[1], 200, 'first outer y'); near(at(0)[2], 12, 'height added');
+  near(at(8)[1], 200 - 8 * unit, 'last outer of row 0 is a chunk east');
+  near(at(9)[0], 100 - unit / 2, 'first centre is half a step south');
+  near(at(9)[1], 200 - unit / 2, 'and half a step east');
+  near(at(144)[0], 100 - CHUNK_SIZE, 'last outer is a chunk south');
+  near(at(144)[1], 200 - CHUNK_SIZE, 'and a chunk east');
+});
+
+test('builds four up-facing triangles per quad and leaves holes out', async () => {
+  const { chunkIndices, chunkPositions, isHole, CHUNK_VERTEX_COUNT } = await load('terrain.mjs');
+  assert.equal(chunkIndices(0).length, 8 * 8 * 4 * 3);
+  // Bit 0 covers quads (0-1, 0-1); bit 5 covers rows 2-3, columns 2-3.
+  assert.equal(chunkIndices(1).length, (64 - 4) * 12);
+  assert.ok(isHole(1 << 5, 3, 2) && !isHole(1 << 5, 1, 2));
+  const positions = chunkPositions([0, 0, 0], new Float32Array(CHUNK_VERTEX_COUNT));
+  const indices = chunkIndices(0);
+  const vertex = (index) => [positions[index * 3], positions[index * 3 + 1], positions[index * 3 + 2]];
+  for (let triangle = 0; triangle < indices.length; triangle += 3) {
+    const [a, b, c] = [vertex(indices[triangle]), vertex(indices[triangle + 1]), vertex(indices[triangle + 2])];
+    const normalZ = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    assert.ok(normalZ > 0, `triangle ${triangle / 3} faces up`);
+  }
+});
+
+test('crops terrain to the play area and spots placeholder tiles', async () => {
+  const { chunkInArea, isPlaceholderArea, playArea, CHUNK_SIZE } = await load('terrain.mjs');
+  const area = playArea([{ bounds: { minX: 0, maxX: 100, minY: -50, maxY: 50 } }, { bounds: { minX: 200, maxX: 300, minY: 0, maxY: 10 } }], null, 10);
+  assert.deepEqual(area, { minX: -10, maxX: 310, minY: -60, maxY: 60 });
+  assert.deepEqual(playArea([], { minX: 1, maxX: 2, minY: 3, maxY: 4 }, 0), { minX: 1, maxX: 2, minY: 3, maxY: 4 });
+  assert.equal(playArea([], null), null);
+  // A chunk spans [north - size, north] by [west - size, west].
+  assert.ok(chunkInArea([0, 0], area));
+  assert.ok(chunkInArea([-10 + CHUNK_SIZE - 1, 0], area));
+  assert.ok(!chunkInArea([-11, 0], area));
+  assert.ok(!chunkInArea([400 + CHUNK_SIZE, 0], area));
+  assert.ok(chunkInArea([999, 999], null));
+  const chunk = (z, heights, layers = []) => ({ position: [0, 0, z], vertexHeights: heights, layers });
+  assert.ok(isPlaceholderArea({ chunks: [chunk(0, [0, 0]), chunk(0, [0, 0])] }));
+  assert.ok(!isPlaceholderArea({ chunks: [chunk(0, [0, 0]), chunk(5, [0, 0])] }));
+  assert.ok(!isPlaceholderArea({ chunks: [chunk(0, [0, 0], [{}])] }));
+  const { isPlaceholderChunk } = await load('terrain.mjs');
+  assert.ok(isPlaceholderChunk(chunk(0, [0, 0])));
+  assert.ok(!isPlaceholderChunk(chunk(0, [0, 1])));
+  assert.ok(!isPlaceholderChunk(chunk(5, [0, 0])));
+  assert.ok(!isPlaceholderChunk(chunk(0, [0, 0], [{}])));
+});
+
+test('reads MCCV vertex shading as colour multipliers', async () => {
+  const { readVertexShading, CHUNK_VERTEX_COUNT } = await load('terrain.mjs');
+  const mccv = Buffer.alloc(8 + CHUNK_VERTEX_COUNT * 4);
+  mccv.write('VCCM', 0, 'ascii');
+  mccv.writeUInt32LE(CHUNK_VERTEX_COUNT * 4, 4);
+  for (let index = 0; index < CHUNK_VERTEX_COUNT; index += 1) mccv.set([127, 254, 0, 127], 8 + index * 4);
+  const header = Buffer.alloc(128);
+  header.writeUInt32LE(8 + 128, 0x74);
+  const data = Buffer.concat([header, mccv]);
+  const mcnk = Buffer.concat([Buffer.from('KNCM', 'ascii'), Buffer.alloc(4), data]);
+  mcnk.writeUInt32LE(data.length, 4);
+  const [colors] = readVertexShading(mcnk);
+  // BGRA (127, 254, 0) → RGB (0, 2, 1).
+  near(colors[0], 0, 'red'); near(colors[1], 2, 'green'); near(colors[2], 1, 'blue');
+  assert.equal(readVertexShading(Buffer.concat([Buffer.from('KNCM', 'ascii'), Buffer.from([128, 0, 0, 0]), Buffer.alloc(128)]))[0], null);
+});
+
+test('packs a chunk\'s layer alphas and shadow into its cell of the tile atlas', async () => {
+  const { packChunkSplats, ATLAS_SIZE, SPLAT_SIZE } = await load('terrain.mjs');
+  const atlas = new Uint8Array(ATLAS_SIZE * ATLAS_SIZE * 4);
+  const splat = (value) => new Uint8Array(SPLAT_SIZE * SPLAT_SIZE).fill(value);
+  const shadow = new Uint8Array(SPLAT_SIZE * SPLAT_SIZE);
+  shadow[SPLAT_SIZE + 2] = 1;
+  packChunkSplats(atlas, 2, 3, [{}, { splat: splat(10) }, { splat: splat(20) }, null], shadow);
+  const pixel = (x, y) => Array.from(atlas.subarray((y * ATLAS_SIZE + x) * 4, (y * ATLAS_SIZE + x) * 4 + 4));
+  // Cell (row 2, column 3) starts at pixel (192, 128).
+  assert.deepEqual(pixel(192, 128), [10, 20, 0, 255]);
+  // The shadowed texel (row 1, column 2 in the chunk) is darker.
+  assert.ok(pixel(194, 129)[3] < 255);
+  assert.deepEqual(pixel(191, 128), [0, 0, 0, 0]);
+});
+
+test('reads MCSH shadows a bit per texel, least significant first', async () => {
+  const { readShadows, SPLAT_SIZE } = await load('terrain.mjs');
+  const mcsh = Buffer.alloc(8 + 512);
+  mcsh.write('HSCM', 0, 'ascii');
+  mcsh.writeUInt32LE(512, 4);
+  mcsh[8 + 1 * 8 + 0] = 0b100;
+  const header = Buffer.alloc(128);
+  header.writeUInt32LE(0x1, 0x00);
+  header.writeUInt32LE(8 + 128, 0x2C);
+  const data = Buffer.concat([header, mcsh]);
+  const mcnk = Buffer.concat([Buffer.from('KNCM', 'ascii'), Buffer.alloc(4), data]);
+  mcnk.writeUInt32LE(data.length, 4);
+  const [shadow] = readShadows(mcnk);
+  assert.equal(shadow[1 * SPLAT_SIZE + 2], 1);
+  assert.equal(shadow.reduce((sum, value) => sum + value, 0), 1);
+  header.writeUInt32LE(0, 0x00);
+  const noFlag = Buffer.concat([Buffer.from('KNCM', 'ascii'), Buffer.alloc(4), header, mcsh]);
+  noFlag.writeUInt32LE(header.length + mcsh.length, 4);
+  assert.equal(readShadows(noFlag)[0], null);
+});

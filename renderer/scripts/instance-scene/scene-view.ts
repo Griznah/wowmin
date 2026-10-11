@@ -4,12 +4,14 @@ import {
   Box3,
   type BufferGeometry,
   Color,
+  type DataArrayTexture,
   DirectionalLight,
   DoubleSide,
   FrontSide,
   Material,
   Mesh,
   MeshBasicMaterial,
+  MeshLambertMaterial,
   MeshStandardMaterial,
   MultiplyBlending,
   NormalBlending,
@@ -17,20 +19,27 @@ import {
   OrthographicCamera,
   Scene,
   Sphere,
+  type Texture,
   Vector3,
   WebGLRenderer,
   type WebGLProgramParametersWithUniforms,
 } from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { type GLTF, GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
 import { type FadeSettings, type FadeVolume, type IsoView, MAX_FADE_VOLUMES } from '../utils/map-projection';
 import type { CombatEffectStore, Point3, UnitKey } from '../utils/spell-events';
 import { applyIsoCamera } from './iso-camera';
 import { SpellEffectLayer, type UnitAnchorRole } from './spell-effects';
+import { buildLayerArray, createTerrainMaterial, prepareAlphaAtlas } from './terrain-material';
 import { SpellVisualLayer, type UnitInfo } from './spell-visual-layer';
 import { type UnitModelPose, UnitModelLayer } from './unit-models';
 
 type WowBlend = 'opaque' | 'alphaKey' | 'alpha' | 'add' | 'mod' | 'mod2x';
+
+interface TerrainTextures {
+  layers: DataArrayTexture;
+  alphas: Map<string, Texture>;
+}
 
 // WMO interiors carry baked lighting in their vertex colours, which the client
 // brightens; props have no baked light and are drawn slightly dimmed to sit in
@@ -38,6 +47,8 @@ type WowBlend = 'opaque' | 'alphaKey' | 'alpha' | 'add' | 'mod' | 'mod2x';
 const VERTEX_LIT_BRIGHTNESS = 2;
 const UNLIT_BRIGHTNESS = 0.75;
 const BACKGROUND = 0x08111d;
+// Untextured ground until terrain textures are drawn.
+const TERRAIN_COLOR = 0x4a5a3c;
 // Effect heights on units drawn without a model, or whose model lacks the
 // point, as fractions of a standing height (yards).
 const DEFAULT_UNIT_HEIGHT = 2;
@@ -252,10 +263,11 @@ export class InstanceSceneView {
   load(url: string): void {
     if (this.states.has(url)) return;
     this.states.set(url, 'loading');
-    this.loader.load(url, (gltf) => {
+    this.loader.load(url, async (gltf) => {
       const root = gltf.scene;
+      const terrain = await this.terrainTextures(gltf);
       root.traverse((object) => {
-        if (object instanceof Mesh) object.material = this.convertMaterial(object);
+        if (object instanceof Mesh) object.material = this.convertMaterial(object, terrain);
       });
       root.updateMatrixWorld(true);
       const bounds: MeshBounds[] = [];
@@ -346,9 +358,39 @@ export class InstanceSceneView {
       .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>\n${FADE_FRAGMENT}`);
   };
 
-  private convertMaterial(mesh: Mesh): Material | Material[] {
+  // The map's ground textures as one array, and each tile's alpha atlas by
+  // name; null for a scene without terrain.
+  private async terrainTextures(gltf: GLTF): Promise<TerrainTextures | null> {
+    const names = gltf.scene.children[0]?.userData.wowTerrainLayers as string[] | undefined;
+    if (!names?.length) return null;
+    const materials = (await gltf.parser.getDependencies('material')) as MeshStandardMaterial[];
+    const byName = new Map(materials.map((material) => [material.name, material]));
+    const layers = buildLayerArray(names.map((name) => (byName.get(name)?.map?.image as CanvasImageSource | undefined) ?? null));
+    const alphas = new Map<string, Texture>();
+    for (const material of materials) {
+      if (material.name.startsWith('terrain-alpha-') && material.map) alphas.set(material.name, prepareAlphaAtlas(material.map));
+    }
+    return { layers, alphas };
+  }
+
+  private convertMaterial(mesh: Mesh, terrain: TerrainTextures | null = null): Material | Material[] {
     const vertexLit = Boolean(mesh.geometry.getAttribute('color'));
     const convert = (source: Material): Material => {
+      // Terrain: its texture layers blended through its alpha atlas, lit by
+      // the scene's lights (it has no baked lighting), with its vertex
+      // shading as colour. Plain ground if its textures are missing.
+      if (source.userData.wowTerrain) {
+        const alpha = terrain?.alphas.get(source.userData.alpha as string);
+        if (!terrain || !alpha) {
+          const plain = new MeshLambertMaterial({ color: TERRAIN_COLOR, vertexColors: vertexLit });
+          plain.onBeforeCompile = this.injectPartyFade;
+          return plain;
+        }
+        return createTerrainMaterial({
+          layers: terrain.layers, alpha, origin: source.userData.origin as [number, number],
+          vertexShaded: vertexLit, partyFade: this.injectPartyFade,
+        });
+      }
       const key = `${source.uuid}|${vertexLit}`;
       const cached = this.materials.get(key);
       if (cached) return cached;
