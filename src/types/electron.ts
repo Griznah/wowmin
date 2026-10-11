@@ -389,6 +389,13 @@ export interface CreatureInfo {
   maxLevel: number;
   // 0 normal, 1 elite, 2 rare elite, 3 boss, 4 rare.
   rank: number;
+  // creature_template's unit_flags, flags_extra, npcflag, and type (10 not
+  // specified, 11 totem, 12 non-combat pet), for telling scenery and
+  // summoned objects from units worth a nameplate.
+  unitFlags: number;
+  flagsExtra: number;
+  npcFlags: number;
+  creatureType: number;
 }
 
 export interface StreamPathUpdate {

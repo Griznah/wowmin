@@ -1,4 +1,4 @@
-import type { MapBattlegroundState, MapPlayerPosition } from '../../../src/types/electron';
+import type { CreatureInfo, MapBattlegroundState, MapPlayerPosition, StreamCreatureSample } from '../../../src/types/electron';
 import { getMapName } from './helpers';
 
 export interface ActiveInstanceSession {
@@ -305,4 +305,30 @@ export function projectInstancePosition(
   const x = ((bounds.maxY - position.position_y) / (bounds.maxY - bounds.minY)) * width;
   const y = ((bounds.maxX - position.position_x) / (bounds.maxX - bounds.minX)) * height;
   return { x, y };
+}
+
+// creature_template unit_flags and flags_extra bits.
+const UNIT_FLAG_NON_ATTACKABLE = 0x2;
+const UNIT_FLAG_IMMUNE_TO_PC = 0x100;
+const UNIT_FLAG_NOT_SELECTABLE = 0x2000000;
+const CREATURE_FLAG_EXTRA_TRIGGER = 0x80;
+// Creature types a player's summon has when it is an object rather than a
+// pet: not specified (healing flowers and the like), totem, non-combat pet.
+const SUMMONED_OBJECT_TYPES = new Set([10, 11, 12]);
+
+// Whether a creature is scenery or a summoned object that gets no name or
+// nameplate: units players can't select (Arathi Basin's workers) or that are
+// script triggers; units that can't be attacked and offer nothing to talk
+// to, unless they're fighting; and players' summoned objects. Bosses always
+// get theirs.
+export function isSceneryCreature(
+  creature: Pick<StreamCreatureSample, 'inCombat' | 'playerControlled'>,
+  info: Pick<CreatureInfo, 'unitFlags' | 'flagsExtra' | 'npcFlags' | 'creatureType'> | null | undefined,
+  boss: boolean,
+): boolean {
+  if (boss || !info) return false;
+  const unitFlags = info.unitFlags ?? 0;
+  if (unitFlags & UNIT_FLAG_NOT_SELECTABLE || (info.flagsExtra ?? 0) & CREATURE_FLAG_EXTRA_TRIGGER) return true;
+  if (!creature.inCombat && unitFlags & (UNIT_FLAG_NON_ATTACKABLE | UNIT_FLAG_IMMUNE_TO_PC) && !info.npcFlags) return true;
+  return creature.playerControlled && SUMMONED_OBJECT_TYPES.has(info.creatureType ?? 0);
 }

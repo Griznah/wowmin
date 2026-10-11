@@ -1446,8 +1446,12 @@ ipcMain.handle('map:getCreatureInfo', async (_event, entries: unknown): Promise<
     minlevel: number;
     maxlevel: number;
     rank: number;
+    unit_flags: number;
+    flags_extra: number;
+    npcflag: number;
+    type: number;
   }>(
-    `SELECT entry, name, subname, minlevel, maxlevel, \`rank\`
+    `SELECT entry, name, subname, minlevel, maxlevel, \`rank\`, unit_flags, flags_extra, npcflag, \`type\`
        FROM ${escapeIdentifier(worldDb)}.\`creature_template\`
       WHERE entry IN (${ids.map(() => '?').join(', ')})`,
     ids,
@@ -1459,6 +1463,10 @@ ipcMain.handle('map:getCreatureInfo', async (_event, entries: unknown): Promise<
     minLevel: Number(row.minlevel),
     maxLevel: Number(row.maxlevel),
     rank: Number(row.rank),
+    unitFlags: Number(row.unit_flags) || 0,
+    flagsExtra: Number(row.flags_extra) || 0,
+    npcFlags: Number(row.npcflag) || 0,
+    creatureType: Number(row.type) || 0,
   }));
 });
 

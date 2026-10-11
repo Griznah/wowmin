@@ -1,7 +1,7 @@
 /// <reference path="./types/window.d.ts" />
 import { ts, escapeHtml, showResult, debounce, getMapName, CLASS_COLORS, RACE_NAMES, CLASS_NAMES } from './utils/helpers';
 import { parseOnlineList, playersFromDatabase } from './utils/online-players';
-import { type ActiveInstanceSession, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getInstanceCoordinateBounds, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, groupActiveInstanceSessions, INSTANCE_MAX_ZOOM, parseInstanceSessionKey, zoomInstanceViewAt } from './utils/instance-watch';
+import { type ActiveInstanceSession, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getInstanceCoordinateBounds, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, groupActiveInstanceSessions, INSTANCE_MAX_ZOOM, isSceneryCreature, parseInstanceSessionKey, zoomInstanceViewAt } from './utils/instance-watch';
 import { clampIsoPitch, createFlatProjection, createIsoView, DEFAULT_ISO_YAW, type FadeSettings, getFadeVolumes, getHeightBand, getIsoPanForCenter, getNextQuarterTurn, ISO_PITCH, type IsoView, type MapProjection, resolveMinimapTileProjection, type SceneBox } from './utils/map-projection';
 import { InstanceSceneView } from './instance-scene/scene-view';
 import type { UnitModelPose } from './instance-scene/unit-models';
@@ -8136,8 +8136,9 @@ function drawInstanceCanvas(followPass: boolean): void {
         drawInstanceCreature(ctx, creature, info, point, markerScale);
       }
       const boss = isBossCreature(creature, info);
+      const scenery = isSceneryCreature(creature, info, boss);
       if (plateStyle) {
-        if (info && creature.alive && (boss || creature.inCombat || viewTransform.zoom >= INSTANCE_MOB_LABEL_ZOOM)) {
+        if (info && creature.alive && !scenery && (boss || creature.inCombat || viewTransform.zoom >= INSTANCE_MOB_LABEL_ZOOM)) {
           const plateY = model
             ? projection.worldToScreen(creature.x, creature.y, creature.z + INSTANCE_CREATURE_MODEL_HEIGHT).y - 2
             : point.y - 10 * markerScale;
@@ -8163,7 +8164,7 @@ function drawInstanceCanvas(followPass: boolean): void {
             keep: boss || creature.inCombat,
           });
         }
-      } else if (info && creature.alive && (boss || viewTransform.zoom >= INSTANCE_MOB_LABEL_ZOOM)) {
+      } else if (info && creature.alive && !scenery && (boss || viewTransform.zoom >= INSTANCE_MOB_LABEL_ZOOM)) {
         const labelY = model
           ? projection.worldToScreen(creature.x, creature.y, creature.z + INSTANCE_CREATURE_MODEL_HEIGHT).y
           : point.y - 4 * markerScale;

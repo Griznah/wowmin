@@ -24,6 +24,7 @@ const {
   getInstanceProjectionViewport,
   getParticipantDungeonFloor,
   groupActiveInstanceSessions,
+  isSceneryCreature,
   parseInstanceSessionKey,
   projectInstancePosition,
   projectMinimapTilePosition,
@@ -179,4 +180,26 @@ test('zoom stops at the flat map limit unless a closer one is allowed', () => {
   assert.equal(zoomInstanceViewAt({ zoom: 5, panX: 0, panY: 0 }, viewport, 400, 300, 40, 30).zoom, 30);
   // A limit below the flat map's never makes zooming stop sooner.
   assert.equal(zoomInstanceViewAt({ zoom: 5, panX: 0, panY: 0 }, viewport, 400, 300, 6, 2).zoom, 6);
+});
+
+test('leaves scenery and summoned objects without names or plates', () => {
+  const info = (fields) => ({ unitFlags: 0, flagsExtra: 0, npcFlags: 0, creatureType: 7, ...fields });
+  const idle = { inCombat: false, playerControlled: false };
+  // Arathi Basin's workers: not selectable.
+  assert.equal(isSceneryCreature(idle, info({ unitFlags: 0x2000300 }), false), true);
+  // Script triggers.
+  assert.equal(isSceneryCreature(idle, info({ flagsExtra: 0x82 }), false), true);
+  // Can't be attacked and nothing to talk to: scenery, unless fighting.
+  assert.equal(isSceneryCreature(idle, info({ unitFlags: 0x302 }), false), true);
+  assert.equal(isSceneryCreature({ ...idle, inCombat: true }, info({ unitFlags: 0x302 }), false), false);
+  assert.equal(isSceneryCreature(idle, info({ unitFlags: 0x300, npcFlags: 1 }), false), false);
+  // Players' summoned objects, but not their pets.
+  const summon = { inCombat: false, playerControlled: true };
+  for (const creatureType of [10, 11, 12]) assert.equal(isSceneryCreature(summon, info({ creatureType }), false), true);
+  assert.equal(isSceneryCreature(summon, info({ creatureType: 1 }), false), false);
+  assert.equal(isSceneryCreature(idle, info({ creatureType: 10 }), false), false);
+  // Ordinary mobs, bosses, and unknown creatures keep theirs.
+  assert.equal(isSceneryCreature(idle, info({}), false), false);
+  assert.equal(isSceneryCreature(idle, info({ unitFlags: 0x2000000 }), true), false);
+  assert.equal(isSceneryCreature(idle, null, false), false);
 });
