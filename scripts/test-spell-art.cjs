@@ -225,3 +225,15 @@ test('picks the kit a cast plays, its body slots, and the animations it names', 
   assert.equal(kits.kitAnimationName(9), 'CombatWound');
   assert.equal(kits.kitAnimationName(-1), null);
 });
+
+test('rains only for spells whose area runs procedure 9, at its rate, spread over the disc', () => {
+  const kits = loadModule('../renderer/scripts/utils/spell-kits.ts');
+  const kit = (procs) => ({ anim: -1, effects: [], procs });
+  const blizzard = { missile: null, falling: { id: 398, scale: 1 }, kits: { persistentArea: kit([{ code: 9, params: [0, 5, 0, 0] }]) } };
+  assert.equal(kits.rainRate(blizzard), 5);
+  assert.equal(kits.rainRate({ ...blizzard, falling: null }), 0);
+  assert.equal(kits.rainRate({ ...blizzard, kits: { persistentArea: kit([{ code: 3, params: [0, 5, 0, 0] }]) } }), 0);
+  assert.equal(kits.rainRate({ ...blizzard, kits: { impactArea: kit([{ code: 9, params: [0, 0, 0, 0] }]) } }), 5);
+  assert.deepEqual(plain(kits.pointInDisc([10, 20, 3], 8, 1, 0)), [18, 20, 3]);
+  assert.deepEqual(plain(kits.pointInDisc([10, 20, 3], 8, 0, 0.5)), [10, 20, 3]);
+});

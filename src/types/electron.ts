@@ -331,6 +331,9 @@ export interface StreamCombatEvent {
   periodic: boolean;
   helpful: boolean;
   triggered: boolean;
+  // The spell leaves a lasting area on the ground (Consecration); its
+  // castGo carries the area's duration in value.
+  persistentArea: boolean;
   // How long before the update's serverTimeMs it happened.
   ageMs: number;
 }

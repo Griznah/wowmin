@@ -18,12 +18,16 @@ export interface VisualEffect {
 export interface VisualKit {
   anim: number;
   effects: VisualEffect[];
+  // Procedures the client runs for the kit: a code and four parameters.
+  procs?: Array<{ code: number; params: number[] }>;
 }
 
-export type KitStage = 'precast' | 'cast' | 'channel' | 'impact' | 'targetImpact';
+export type KitStage = 'precast' | 'cast' | 'channel' | 'impact' | 'targetImpact' | 'instantArea' | 'impactArea' | 'persistentArea';
 
 export interface SpellVisual {
   missile: { id: number; scale: number } | null;
+  // The model procedure 9 rains over the area (Blizzard, Rain of Fire).
+  falling?: { id: number; scale: number } | null;
   kits: Partial<Record<KitStage, VisualKit>>;
 }
 
@@ -59,3 +63,26 @@ export function castKit(visual: SpellVisual, cast: Pick<CastGlow, 'release' | 'c
   return visual.kits.precast;
 }
 
+
+// Procedure 9 rains a model over the area; its second parameter looks like
+// the number a second (5 for Blizzard and Rain of Fire).
+const RAIN_PROCEDURE = 9;
+const DEFAULT_RAIN_RATE = 5;
+
+// How many falling models a second the spell's area rains, or 0 for none.
+export function rainRate(visual: SpellVisual): number {
+  if (!visual.falling) return 0;
+  for (const kit of [visual.kits.persistentArea, visual.kits.impactArea, visual.kits.instantArea]) {
+    const proc = kit?.procs?.find((candidate) => candidate.code === RAIN_PROCEDURE);
+    if (proc) return proc.params[1] > 0 ? proc.params[1] : DEFAULT_RAIN_RATE;
+  }
+  return 0;
+}
+
+// A point spread evenly over a disc of `radius` round `center`, from two
+// random numbers in [0, 1).
+export function pointInDisc(center: [number, number, number], radius: number, a: number, b: number): [number, number, number] {
+  const distance = radius * Math.sqrt(a);
+  const angle = b * Math.PI * 2;
+  return [center[0] + Math.cos(angle) * distance, center[1] + Math.sin(angle) * distance, center[2]];
+}

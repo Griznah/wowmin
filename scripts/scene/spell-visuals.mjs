@@ -20,6 +20,15 @@ const KIT_ANIM = 2;
 const KIT_SLOTS = ['head', 'chest', 'base', 'leftHand', 'rightHand', 'breath', 'leftWeapon', 'rightWeapon',
   'special1', 'special2', 'special3', 'world'];
 const KIT_FIRST_SLOT = 3;
+// Up to four procedures a kit runs (CharProc), each with four parameters
+// (CharParamZero..Three, one array per parameter).
+const KIT_PROCS = 17;
+const KIT_PROC_PARAMS = [21, 25, 29, 33];
+// Procedure 9 (undocumented) rains models over the area: Blizzard's ice,
+// Rain of Fire's fire. The data doesn't say which model falls; these are the
+// models the client has for them (creature Rain of Fire spells name the fire
+// model directly). By SpellVisual ID: Blizzard, Rain of Fire.
+export const FALLING_EFFECTS = { 9490: 398, 10379: 448 };
 // SpellVisualEffectName: name, file, area effect size, scale.
 const EFFECT_FILE = 2;
 const EFFECT_AREA_SIZE = 3;
@@ -63,8 +72,12 @@ export class SpellVisuals {
     });
     const startAnim = kit.int(KIT_START_ANIM);
     const anim = kit.int(KIT_ANIM);
-    if (!effects.length && anim < 0 && startAnim < 0) return null;
-    return { id: kitId, startAnim, anim, effects };
+    const procs = [0, 1, 2, 3].flatMap((index) => {
+      const code = kit.int(KIT_PROCS + index);
+      return code > 0 ? [{ code, params: KIT_PROC_PARAMS.map((field) => kit.float(field + index)) }] : [];
+    });
+    if (!effects.length && !procs.length && anim < 0 && startAnim < 0) return null;
+    return { id: kitId, startAnim, anim, effects, procs };
   }
 
   // Everything wowmin draws for a spell, or null if it has no art.
@@ -79,6 +92,7 @@ export class SpellVisuals {
     }
     const missile = this.effect(visual.uint(VISUAL_MISSILE_MODEL));
     if (!missile && !Object.keys(kits).length) return null;
+    const falling = this.effect(FALLING_EFFECTS[visual.uint(0)] ?? 0);
     return {
       spellId,
       visualId: visual.uint(0),
@@ -87,6 +101,7 @@ export class SpellVisuals {
         attachment: visual.int(VISUAL_MISSILE_ATTACHMENT),
         destinationAttachment: visual.int(VISUAL_MISSILE_DESTINATION_ATTACHMENT),
       },
+      falling,
       kits,
     };
   }

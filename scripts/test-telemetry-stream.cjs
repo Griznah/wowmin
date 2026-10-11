@@ -276,6 +276,7 @@ function combatDatagram({ mapId = 601, instanceId = 7, serverTimeMs = 5000, drop
     entry.writeFloatLE(event.radius ?? 0, 24);
     (event.point ?? [0, 0, 0]).forEach((value, index) => entry.writeFloatLE(value, 28 + index * 4));
     entry.writeUInt16LE(event.ageMs ?? 0, 40);
+    entry.writeUInt16LE(event.extraFlags ?? 0, 42);
     return entry;
   })]);
 }
@@ -286,6 +287,7 @@ test('parses combat events, their flags, and the dropped count', () => {
       missileSpeed: 20, radius: 8, point: [550, 250, 224], ageMs: 35 },
     { kind: 4, flags: 1 | 64, schoolMask: 2, auraCategory: 2, sourceGuid: 901, targetGuid: 43, spellId: 48066, value: 30000 },
     { kind: 7, flags: 2 | 32, schoolMask: 32, sourceGuid: 42, targetGuid: 900, spellId: 48125, value: 812 },
+    { kind: 2, sourceGuid: 2, spellId: 26573, schoolMask: 2, value: 8000, extraFlags: 1 },
     { kind: 99 },
     { kind: 6, flags: 1, schoolMask: 1, sourceGuid: 900, targetGuid: 42 },
   ] }));
@@ -293,11 +295,13 @@ test('parses combat events, their flags, and the dropped count', () => {
   assert.equal(parsed.serverTimeMs, 5000);
   assert.equal(parsed.dropped, 3);
   const events = JSON.parse(JSON.stringify(parsed.events));
-  assert.deepEqual(events.map((event) => event.kind), ['castGo', 'auraApply', 'damage', 'swing']);
+  assert.deepEqual(events.map((event) => event.kind), ['castGo', 'auraApply', 'damage', 'castGo', 'swing']);
+  assert.equal(events[3].persistentArea, true);
+  assert.equal(events[3].value, 8000);
   assert.deepEqual(events[0], {
     kind: 'castGo', sourceCreature: false, targetCreature: true, area: true, channeled: false, periodic: false,
     helpful: false, triggered: true, schoolMask: 16, auraCategory: null, sourceGuid: 42, targetGuid: 900, spellId: 10,
-    value: 0, missileSpeed: 20, radius: 8, point: [550, 250, 224], ageMs: 35,
+    value: 0, missileSpeed: 20, radius: 8, point: [550, 250, 224], ageMs: 35, persistentArea: false,
   });
   assert.equal(events[1].auraCategory, 'shield');
   assert.equal(events[1].sourceCreature, true);

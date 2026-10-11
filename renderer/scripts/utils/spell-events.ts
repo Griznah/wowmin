@@ -63,12 +63,28 @@ export interface Impact {
 
 export interface AreaRing {
   caster: UnitKey;
+  spellId: number;
+  channeled: boolean;
   // The spell's ground point, or null to centre on the caster.
   point: Point3 | null;
   radius: number;
   color: string;
   startAt: number;
   endAt: number;
+}
+
+// A spell's area on the ground, for the client's area art: where, how wide,
+// and how long it lasts (a channel's or a lasting area's duration; 0 for an
+// instant burst).
+export interface AreaEffect {
+  caster: UnitKey;
+  spellId: number;
+  // The spell's ground point, or null to centre on the caster.
+  point: Point3 | null;
+  radius: number;
+  startAt: number;
+  endAt: number;
+  channeled: boolean;
 }
 
 export interface CombatNumber {
@@ -183,6 +199,7 @@ export class CombatEffectStore {
   private beamList: Beam[] = [];
   private impactList: Impact[] = [];
   private ringList: AreaRing[] = [];
+  private areaList: AreaEffect[] = [];
   private numberList: CombatNumber[] = [];
   private readonly auras = new Map<string, ActiveAura>();
   private readonly lastStrikeAt = new Map<UnitKey, number>();
@@ -207,6 +224,7 @@ export class CombatEffectStore {
     this.beamList = [];
     this.impactList = [];
     this.ringList = [];
+    this.areaList = [];
     this.numberList = [];
     this.auras.clear();
     this.lastStrikeAt.clear();
@@ -236,13 +254,14 @@ export class CombatEffectStore {
   get beams(): readonly Beam[] { return this.beamList; }
   get impacts(): readonly Impact[] { return this.impactList; }
   get rings(): readonly AreaRing[] { return this.ringList; }
+  get areas(): readonly AreaEffect[] { return this.areaList; }
   get numbers(): readonly CombatNumber[] { return this.numberList; }
   get dropped(): number { return this.droppedTotal; }
 
   // Whether anything is still to play or on screen, so the view keeps drawing.
   get active(): boolean {
     return Boolean(this.queue.length || this.castList.length || this.projectileList.length || this.beamList.length
-      || this.impactList.length || this.ringList.length || this.numberList.length);
+      || this.impactList.length || this.ringList.length || this.areaList.length || this.numberList.length);
   }
 
   // Events received over the last couple of seconds, per second.
@@ -295,6 +314,9 @@ export class CombatEffectStore {
       case 'castCancel':
         this.endCast(source);
         this.beamList = this.beamList.filter((beam) => beam.source !== source || beam.spellId !== event.spellId);
+        // A cancelled channel's area ends with it; a lasting area stays.
+        this.areaList = this.areaList.filter((area) => !area.channeled || area.caster !== source || area.spellId !== event.spellId);
+        this.ringList = this.ringList.filter((ring) => !ring.channeled || ring.caster !== source || ring.spellId !== event.spellId);
         return null;
       case 'castGo':
         return this.applyCastGo(event, source, target, color, at, distance);
@@ -365,8 +387,16 @@ export class CombatEffectStore {
     // Buffs and heals reach the party; only harmful areas get a ring.
     if (event.area && !event.helpful && event.radius > 0 && event.radius <= MAX_RING_RADIUS) {
       this.ringList.push({
-        caster: source, point: event.point, radius: event.radius, color, startAt: at,
-        endAt: at + (event.channeled && event.value > 0 ? event.value : AREA_FLASH_MS),
+        caster: source, spellId: event.spellId, channeled: event.channeled, point: event.point, radius: event.radius, color,
+        startAt: at, endAt: at + (event.channeled && event.value > 0 ? event.value : AREA_FLASH_MS),
+      });
+    }
+    // Every area, for the client's area art (which draws helpful ones too).
+    if (event.area || event.persistentArea) {
+      const lasts = (event.channeled || event.persistentArea) && event.value > 0;
+      this.areaList.push({
+        caster: source, spellId: event.spellId, point: event.point, radius: event.radius, startAt: at,
+        endAt: at + (lasts ? event.value : 0), channeled: event.channeled,
       });
     }
     const kind = getCastStrikeKind(event);
@@ -386,6 +416,8 @@ export class CombatEffectStore {
     this.beamList = this.beamList.filter((beam) => beam.endAt > now);
     this.impactList = this.impactList.filter((impact) => impact.at + IMPACT_LIFETIME_MS > now).slice(-MAX_IMPACTS);
     this.ringList = this.ringList.filter((ring) => ring.endAt > now);
+    // Instant areas stay a moment, so the layer sees them.
+    this.areaList = this.areaList.filter((area) => Math.max(area.endAt, area.startAt + AREA_FLASH_MS) > now);
     this.numberList = this.numberList.filter((number) => number.at + NUMBER_LIFETIME_MS > now).slice(-MAX_NUMBERS);
     for (const [key, aura] of this.auras) if (aura.endAt <= now) this.auras.delete(key);
     for (const [unit, at] of this.lastStrikeAt) if (now - at >= EVENT_DRIVEN_MS) this.lastStrikeAt.delete(unit);

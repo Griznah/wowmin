@@ -146,6 +146,27 @@ test('area spells ring at their ground point; channelled ones last the channel a
   assert.equal(store.beams.length, 0);
 });
 
+test('keeps every area for the client art: lasting ones for their duration, cancelled channels ending early', () => {
+  const store = new CombatEffectStore();
+  store.push(update([
+    event({ sourceGuid: 2, spellId: 26573, area: true, radius: 8, point: [1, 2, 3], persistentArea: true, value: 8000, targetGuid: 0, schoolMask: 2 }),
+    event({ sourceGuid: 3, spellId: 10, area: true, radius: 8, point: [4, 5, 6], channeled: true, value: 8000, targetGuid: 0 }),
+    event({ sourceGuid: 4, spellId: 48078, area: true, radius: 10, helpful: true, targetGuid: 0, schoolMask: 2 }),
+  ]), 0);
+  store.advance(LIVE_RENDER_DELAY_MS, tenYards);
+  assert.deepEqual(plain(store.areas.map(({ caster, spellId, endAt, channeled }) => ({ caster, spellId, endAt, channeled }))), [
+    { caster: 'p2', spellId: 26573, endAt: LIVE_RENDER_DELAY_MS + 8000, channeled: false },
+    { caster: 'p3', spellId: 10, endAt: LIVE_RENDER_DELAY_MS + 8000, channeled: true },
+    // A helpful burst: no level 1 ring, but an instant area for the art.
+    { caster: 'p4', spellId: 48078, endAt: LIVE_RENDER_DELAY_MS, channeled: false },
+  ]);
+  store.push(update([event({ kind: 'castCancel', sourceGuid: 3, spellId: 10 }), event({ kind: 'castCancel', sourceGuid: 2, spellId: 26573 })]), 2000);
+  store.advance(2000 + LIVE_RENDER_DELAY_MS, tenYards);
+  assert.deepEqual(plain(store.areas.map((area) => area.spellId)), [26573]);
+  store.advance(LIVE_RENDER_DELAY_MS + 8000, tenYards);
+  assert.equal(store.areas.length, 0);
+});
+
 test('chooses attack animations for fired spells', () => {
   assert.equal(getCastStrikeKind(event({ schoolMask: 4 })), 'cast');
   assert.equal(getCastStrikeKind(event({ schoolMask: 1, spellId: 75 })), 'ranged');

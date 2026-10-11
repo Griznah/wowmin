@@ -300,6 +300,7 @@ export function parseCombatEventDatagram(buffer: Buffer): StreamCombatEventUpdat
         ? [buffer.readFloatLE(offset + 28), buffer.readFloatLE(offset + 32), buffer.readFloatLE(offset + 36)]
         : null,
       ageMs: buffer.readUInt16LE(offset + 40),
+      persistentArea: Boolean(buffer.readUInt16LE(offset + 42) & 1),
     });
   }
   return {

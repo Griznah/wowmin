@@ -1,4 +1,5 @@
 import {
+  type AnimationAction,
   type AnimationClip,
   AnimationMixer,
   BufferAttribute,
@@ -368,10 +369,16 @@ export class EffectInstance {
   private readonly billboards: Object3D[] = [];
   private readonly materials: AnimatedMaterial[] = [];
   private readonly loops: number[];
-  private readonly clipDuration: number;
+  private readonly clips: Record<string, number>;
+  private readonly actions = new Map<string, AnimationAction>();
   private readonly startAt: number;
   private lastAt: number;
+  // A lasting effect plays Birth, loops Stand, and ends with Death; a
+  // one-off plays Stand once.
+  private phase: 'Birth' | 'Stand' | 'Death' = 'Stand';
+  private phaseAt: number;
   private emitting = true;
+  private stopRequested = false;
   private scale = 1;
 
   constructor(private readonly template: EffectTemplate, now: number, private readonly loop: boolean) {
@@ -382,20 +389,20 @@ export class EffectInstance {
     this.root.add(this.model);
     this.startAt = now;
     this.lastAt = now;
+    this.phaseAt = now;
     this.loops = template.effect.loops ?? [];
-    this.clipDuration = template.effect.clips.Stand ?? Object.values(template.effect.clips)[0] ?? 1000;
+    this.clips = template.effect.clips ?? {};
     this.mixer = new AnimationMixer(this.model);
     for (const clip of template.animations) {
       const action = this.mixer.clipAction(clip);
-      if (clip.name === 'Stand') {
-        action.setLoop(loop ? LoopRepeat : LoopOnce, loop ? Infinity : 1);
-        action.clampWhenFinished = true;
-        action.play();
-      } else if (clip.name.startsWith('global')) {
+      if (clip.name.startsWith('global')) {
         action.setLoop(LoopRepeat, Infinity);
         action.play();
+      } else {
+        this.actions.set(clip.name, action);
       }
     }
+    this.enterPhase(loop && this.clips.Birth ? 'Birth' : 'Stand', now);
     const joints = new Map<number, Object3D>();
     this.model.traverse((object) => {
       const match = /^bone(\d+)$/.exec(object.name);
@@ -422,21 +429,45 @@ export class EffectInstance {
 
   // How long one play of the effect lasts, in ms.
   get duration(): number {
-    return this.clipDuration;
+    return this.clips.Stand ?? Object.values(this.clips)[0] ?? 1000;
+  }
+
+  private enterPhase(phase: 'Birth' | 'Stand' | 'Death', now: number): void {
+    this.actions.get(this.phase)?.stop();
+    this.phase = phase;
+    this.phaseAt = now;
+    const action = this.actions.get(phase);
+    if (!action) return;
+    const repeat = phase === 'Stand' && this.loop;
+    action.reset();
+    action.setLoop(repeat ? LoopRepeat : LoopOnce, repeat ? Infinity : 1);
+    action.clampWhenFinished = true;
+    action.play();
   }
 
   get particleCount(): number {
     return this.emitters.reduce((sum, emitter) => sum + emitter.particles.length, 0);
   }
 
-  // Stops emitting and hides the model; particles and ribbons live out.
-  stop(): void {
+  // Ends the effect: a lasting one plays its Death first; then it stops
+  // emitting and hides the model, and particles and ribbons live out.
+  stop(now = this.lastAt): void {
+    if (this.stopRequested) return;
+    this.stopRequested = true;
+    if (this.loop && this.clips.Death && this.emitting) {
+      this.enterPhase('Death', now);
+      return;
+    }
+    this.finish();
+  }
+
+  private finish(): void {
     this.emitting = false;
     this.model.visible = false;
   }
 
   get stopped(): boolean {
-    return !this.emitting;
+    return this.stopRequested;
   }
 
   // Stopped, with nothing left on screen.
@@ -449,9 +480,14 @@ export class EffectInstance {
     const seconds = Math.min(0.1, Math.max(0, (now - this.lastAt) / 1000));
     this.lastAt = now;
     const elapsed = now - this.startAt;
+    const phaseLength = this.clips[this.phase] ?? this.duration;
+    if (this.phase === 'Birth' && now - this.phaseAt >= phaseLength) this.enterPhase('Stand', now);
+    if (this.phase === 'Death' && this.emitting && now - this.phaseAt >= phaseLength) this.finish();
+    const inPhase = now - this.phaseAt;
+    const length = Math.max(1, this.clips[this.phase] ?? this.duration);
     const clock: TrackClock = {
-      clip: 'Stand',
-      timeMs: this.loop ? elapsed % Math.max(1, this.clipDuration) : Math.min(elapsed, this.clipDuration),
+      clip: this.phase,
+      timeMs: this.phase === 'Stand' && this.loop ? inPhase % length : Math.min(inPhase, length),
       elapsedMs: elapsed,
       loops: this.loops,
     };

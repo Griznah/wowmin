@@ -12,6 +12,8 @@ import {
 } from 'three';
 
 import {
+  type AreaRing,
+  type Beam,
   type CastGlow,
   type CombatEffectStore,
   type Impact,
@@ -88,7 +90,7 @@ export class SpellEffectLayer {
   // Draws the store's effects, or none for a null store, except missiles and
   // impacts `skip` says are drawn elsewhere (the client's own art).
   update(store: CombatEffectStore | null, now: number, anchor: UnitAnchor,
-    skip: (entry: Projectile | Impact | CastGlow) => boolean = () => false): void {
+    skip: (entry: Projectile | Impact | CastGlow | AreaRing | Beam) => boolean = () => false): void {
     this.spritesUsed = 0;
     this.ringsUsed = 0;
     let drawn = 0;
@@ -113,7 +115,7 @@ export class SpellEffectLayer {
     }
 
     for (const beam of effects.beams) {
-      if (beam.startAt > now) continue;
+      if (beam.startAt > now || skip(beam)) continue;
       const from = anchor(beam.source, 'handRight');
       const to = anchor(beam.target, 'chest');
       if (!from || !to) continue;
@@ -174,7 +176,7 @@ export class SpellEffectLayer {
     }
 
     for (const area of effects.rings) {
-      if (area.startAt > now) continue;
+      if (area.startAt > now || skip(area)) continue;
       const center = area.point ?? anchor(area.caster, 'feet');
       // The caster must be shown, even for a ring at a ground point.
       if (!center || !anchor(area.caster, 'feet')) continue;

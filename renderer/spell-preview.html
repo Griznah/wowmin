@@ -23,15 +23,24 @@
     <label>Cast ms <input name="cast" type="number" value="1500"></label>
     <label>Channel ms <input name="channel" type="number" value="0"></label>
     <label>Bolt spell <input name="bolt" type="number" value="0" title="A spell the channel fires each second, such as Arcane Missiles' 7268"></label>
+    <label>Area yd <input name="area" type="number" value="0" step="any" title="The spell's radius, for an area spell"></label>
+    <label>Lasting ms <input name="lasting" type="number" value="0" title="How long a lasting area stays, such as Consecration's"></label>
+    <label><input name="ground" type="checkbox"> On the target's ground</label>
     <label><input name="heal" type="checkbox"> Heal (target an ally)</label>
     <label>Speed <input name="rate" type="number" value="1" step="0.05" min="0.05"></label>
     <label><input name="glows" type="checkbox" checked> Level 1 glows</label>
     <button type="submit">Play</button>
-    <button type="button" data-preset="116,28,1500,0">Frostbolt</button>
-    <button type="button" data-preset="133,24,1500,0">Fireball</button>
-    <button type="button" data-preset="686,20,1500,0">Shadow Bolt</button>
-    <button type="button" data-preset="635,0,1500,1">Holy Light</button>
-    <button type="button" data-preset="5143,20,0,0,3000,7268">Arcane Missiles</button>
+    <button type="button" data-preset='{"spell":116,"speed":28,"cast":1500}'>Frostbolt</button>
+    <button type="button" data-preset='{"spell":133,"speed":24,"cast":1500}'>Fireball</button>
+    <button type="button" data-preset='{"spell":686,"speed":20,"cast":1500}'>Shadow Bolt</button>
+    <button type="button" data-preset='{"spell":635,"cast":1500,"heal":true}'>Holy Light</button>
+    <button type="button" data-preset='{"spell":5143,"speed":20,"channel":3000,"bolt":7268}'>Arcane Missiles</button>
+    <button type="button" data-preset='{"spell":10,"channel":8000,"area":8,"ground":true}'>Blizzard</button>
+    <button type="button" data-preset='{"spell":5740,"channel":8000,"area":8,"ground":true}'>Rain of Fire</button>
+    <button type="button" data-preset='{"spell":26573,"area":8,"lasting":8000}'>Consecration</button>
+    <button type="button" data-preset='{"spell":2120,"cast":2000,"area":8,"lasting":8000,"ground":true}'>Flamestrike</button>
+    <button type="button" data-preset='{"spell":43265,"area":10,"lasting":10000,"ground":true}'>Death and Decay</button>
+    <button type="button" data-preset='{"spell":1449,"area":10}'>Arcane Explosion</button>
     <span id="preview-status"></span>
   </form>
   <canvas id="preview-canvas"></canvas>
