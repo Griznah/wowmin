@@ -23,7 +23,8 @@ export const UNIT_MODEL_CACHE_VERSION = 5;
 // 3: effect clips named for what they are: Stand (start), Hold (idle),
 // Decay (end), not Birth/Death.
 export const SPELL_ART_CACHE_VERSION = 3;
-const SPELL_ART_KINDS = new Set<UnitModelRequest['kind']>(['effect', 'visual']);
+const SPELL_ART_KINDS = new Set<UnitModelRequest['kind']>(['effect', 'visual', 'spell']);
+const JSON_KINDS = new Set<UnitModelRequest['kind']>(['visual', 'spell']);
 // A look that could not be built is not retried for this long.
 const FAILURE_RETRY_MS = 10 * 60 * 1000;
 
@@ -33,8 +34,9 @@ interface PendingBuild {
 }
 
 export interface UnitModelRequest {
-  // 'effect' is a SpellVisualEffectName model; 'visual' a spell's art (JSON).
-  kind: 'creature' | 'character' | 'effect' | 'visual';
+  // 'effect' is a SpellVisualEffectName model; 'visual' a spell's art (JSON);
+  // 'spell' a spell's name (JSON).
+  kind: 'creature' | 'character' | 'effect' | 'visual' | 'spell';
   key: string;
   params: Record<string, unknown>;
 }
@@ -54,6 +56,8 @@ export function parseUnitModelPath(urlPath: string): UnitModelRequest | null {
   if (effect) return { kind: 'effect', key: effect[1], params: { effectId: Number(effect[1]) } };
   const visual = urlPath.match(/^\/assets\/models\/visual\/(\d{1,7})\.json$/);
   if (visual) return { kind: 'visual', key: visual[1], params: { spellId: Number(visual[1]) } };
+  const spell = urlPath.match(/^\/assets\/models\/spell\/(\d{1,7})\.json$/);
+  if (spell) return { kind: 'spell', key: spell[1], params: { spellId: Number(spell[1]) } };
   const character = urlPath.match(/^\/assets\/models\/character\/([0-9][0-9.-]{0,199})\.glb$/);
   if (character) return { kind: 'character', key: character[1], params: { key: character[1] } };
   return null;
@@ -75,7 +79,7 @@ export class UnitModels {
   }
 
   pathFor(request: UnitModelRequest): string {
-    const extension = request.kind === 'visual' ? 'json' : 'glb';
+    const extension = JSON_KINDS.has(request.kind) ? 'json' : 'glb';
     const folder = SPELL_ART_KINDS.has(request.kind) ? `art-v${SPELL_ART_CACHE_VERSION}` : `v${UNIT_MODEL_CACHE_VERSION}`;
     return path.join(this.cacheRoot, folder, request.kind, `${request.key}.${extension}`);
   }

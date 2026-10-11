@@ -6,8 +6,10 @@ import { clampIsoPitch, createFlatProjection, createIsoView, DEFAULT_ISO_YAW, ty
 import { InstanceSceneView } from './instance-scene/scene-view';
 import type { UnitModelPose } from './instance-scene/unit-models';
 import {
-  CombatEffectStore, NUMBER_LIFETIME_MS, type Point3, type StrikeKind, type UnitKey, unitKey,
+  CAST_GRACE_MS, CombatEffectStore, NUMBER_LIFETIME_MS, type Point3, type StrikeKind, type UnitKey, unitKey,
 } from './utils/spell-events';
+import { drawNameplate, levelColor, type Nameplate, plateBounds, type PlateStyle } from './instance-scene/nameplates';
+import { SpellNames } from './utils/spell-names';
 import { applyLiveSample, creaturePathKey, getUnitModelUrl, LiveAppearanceStore, LiveAuraStore, LiveBotStore, LiveCreatureBuffer, LivePathStore, LivePositionBuffer, trimPathToPosition } from './utils/live-positions';
 import { getCreatureCombatStyle, getPlayerCombatStyle } from './utils/unit-animation';
 import { CONTINENT_BOUNDS, worldToCanvas } from './utils/map-coords';
@@ -6476,6 +6478,7 @@ const $instanceHorizontalFadeValue = $<HTMLOutputElement>('instance-horizontal-f
 const $instanceFollowBtn = $<HTMLButtonElement>('instance-follow-btn');
 const $instancePathsBtn = $<HTMLButtonElement>('instance-paths-btn');
 const $instanceMobsMode = $<HTMLSelectElement>('instance-mobs-mode');
+const $instancePlatesMode = $<HTMLSelectElement>('instance-plates-mode');
 const $instanceDecisionsBtn = $<HTMLButtonElement>('instance-decisions-btn');
 const $instanceModelsBtn = $<HTMLButtonElement>('instance-models-btn');
 const $instanceNumbersBtn = $<HTMLButtonElement>('instance-numbers-btn');
@@ -6556,6 +6559,18 @@ const INSTANCE_MOBS_NEAR_YARDS = 50;
 const INSTANCE_MOBS_NEAR_HEIGHT = 20;
 // Ordinary mobs are labelled from this zoom in; bosses always are.
 const INSTANCE_MOB_LABEL_ZOOM = 2.5;
+// Names over units in the 3D view: TidyPlates-style nameplates, or the plain
+// labels the flat map uses.
+type InstancePlatesMode = PlateStyle | 'labels';
+const INSTANCE_PLATES_STORAGE_KEY = 'wowmin.instancePlates';
+let instancePlatesMode = readStoredInstancePlatesMode();
+// Plates are drawn at this size with the icon size setting at its default.
+const INSTANCE_PLATE_BASE_ICON_SCALE = 1.25;
+// Mob plates: hostile, neutral, and a player's pet or guardian.
+const INSTANCE_PLATE_HOSTILE_COLOR = '#d42a1e';
+const INSTANCE_PLATE_NEUTRAL_COLOR = '#e8c62a';
+const INSTANCE_PLATE_FRIENDLY_COLOR = '#3fbf3f';
+const instanceSpellNames = new SpellNames(() => renderInstanceCanvas());
 // creature_template details by entry; null while loading or when unknown.
 const instanceCreatureInfo = new Map<number, CreatureInfo | null>();
 let instanceCreatureInfoQueue = new Set<number>();
@@ -7041,6 +7056,26 @@ function readStoredInstanceMobsMode(): InstanceMobsMode {
   }
 }
 
+function readStoredInstancePlatesMode(): InstancePlatesMode {
+  try {
+    const stored = window.localStorage.getItem(INSTANCE_PLATES_STORAGE_KEY);
+    return stored === 'grey' || stored === 'quatre' || stored === 'labels' ? stored : 'neon';
+  } catch {
+    return 'neon';
+  }
+}
+
+function setInstancePlatesMode(mode: InstancePlatesMode): void {
+  instancePlatesMode = mode;
+  if ($instancePlatesMode) $instancePlatesMode.value = mode;
+  try {
+    window.localStorage.setItem(INSTANCE_PLATES_STORAGE_KEY, mode);
+  } catch {
+    // Preference is per-session only when storage is unavailable.
+  }
+  renderInstanceCanvas();
+}
+
 function setInstanceMobsMode(mode: InstanceMobsMode): void {
   instanceMobsMode = mode;
   if ($instanceMobsMode) $instanceMobsMode.value = mode;
@@ -7140,6 +7175,30 @@ function drawInstanceCombatNumbers(
     ctx.fillText(text, x, y);
   }
   ctx.restore();
+}
+
+// Nameplates stack upward out of each other's way, the most important placed
+// first and drawn last (on top).
+function drawInstancePlates(
+  ctx: CanvasRenderingContext2D,
+  style: PlateStyle,
+  plates: { plate: Nameplate; x: number; y: number; priority: number }[],
+  scale: number,
+): void {
+  const ordered = [...plates].sort((left, right) => right.priority - left.priority);
+  const placed: { left: number; right: number; top: number; bottom: number }[] = [];
+  for (const entry of ordered) {
+    const bounds = plateBounds(style, entry.plate, scale);
+    const rectAt = (y: number) => ({ left: entry.x + bounds.left, right: entry.x + bounds.right, top: y + bounds.top, bottom: y + bounds.bottom });
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const rect = rectAt(entry.y);
+      const hit = placed.find((used) => rect.left < used.right && rect.right > used.left && rect.top < used.bottom && rect.bottom > used.top);
+      if (!hit) break;
+      entry.y = hit.top - 1 - bounds.bottom;
+    }
+    placed.push(rectAt(entry.y));
+  }
+  for (const entry of ordered.reverse()) drawNameplate(ctx, style, entry.plate, entry.x, entry.y, scale);
 }
 
 function drawInstanceCreature(
@@ -7955,6 +8014,29 @@ function drawInstanceCanvas(followPass: boolean): void {
   // An 'action' label is a bot's current action, under its name.
   const pendingLabels: { name: string; x: number; y: number; priority: number; action?: boolean }[] = [];
   const markerScale = getCanvasPlayerIconScale(viewTransform.zoom);
+  // In 3D, nameplates take the labels' place; (x, y) is over the unit's head.
+  const plateStyle = isoView && instancePlatesMode !== 'labels' ? instancePlatesMode : null;
+  const pendingPlates: { plate: Nameplate; x: number; y: number; priority: number }[] = [];
+  const partyLevel = Math.max(1, ...visiblePlayers.map((player) => player.level || 1));
+  const activeCasts = new Map<UnitKey, { spellId: number; startAt: number; endAt: number; channeled: boolean }>();
+  if (plateStyle && live) {
+    for (const cast of instanceCombatEffects.casts) if (!cast.release) activeCasts.set(cast.caster, cast);
+  }
+  const castOf = (unit: UnitKey): Nameplate['cast'] => {
+    const cast = activeCasts.get(unit);
+    if (!cast) return null;
+    // A cast's end includes a grace in case the "fired" event is late.
+    const length = cast.endAt - cast.startAt - (cast.channeled ? 0 : CAST_GRACE_MS);
+    return {
+      fraction: length > 0 ? Math.max(0, Math.min(1, (liveNow - cast.startAt) / length)) : 1,
+      name: instanceSpellNames.get(cast.spellId),
+      channeled: cast.channeled,
+    };
+  };
+  // Players a shown mob is attacking.
+  const attackedPlayers = new Set(creatures
+    .filter((creature) => creature.alive && creature.inCombat && creature.targetIsPlayer)
+    .map((creature) => creature.targetGuid));
   let pathsDrawn = 0;
   // Paths, move targets, and target lines go under every marker.
   for (const player of visiblePlayers) {
@@ -8016,7 +8098,33 @@ function drawInstanceCanvas(followPass: boolean): void {
         drawInstanceCreature(ctx, creature, info, point, markerScale);
       }
       const boss = isBossCreature(creature, info);
-      if (info && creature.alive && (boss || viewTransform.zoom >= INSTANCE_MOB_LABEL_ZOOM)) {
+      if (plateStyle) {
+        if (info && creature.alive && (boss || creature.inCombat || viewTransform.zoom >= INSTANCE_MOB_LABEL_ZOOM)) {
+          const plateY = model
+            ? projection.worldToScreen(creature.x, creature.y, creature.z + INSTANCE_CREATURE_MODEL_HEIGHT).y - 2
+            : point.y - 10 * markerScale;
+          pendingPlates.push({
+            plate: {
+              name: info.name,
+              level: String(info.maxLevel),
+              levelColor: levelColor(info.maxLevel, partyLevel),
+              elite: info.rank === 1 || info.rank === 2,
+              boss,
+              healthPct: creature.healthPct,
+              barColor: creature.playerControlled ? INSTANCE_PLATE_FRIENDLY_COLOR
+                : creature.hostile ? INSTANCE_PLATE_HOSTILE_COLOR : INSTANCE_PLATE_NEUTRAL_COLOR,
+              alive: true,
+              threat: creature.inCombat && creature.targetIsPlayer,
+              selected: false,
+              cast: castOf(unitKey(creature.guid, true)),
+              note: null,
+            },
+            x: point.x,
+            y: plateY,
+            priority: boss ? 1 : creature.inCombat ? 0 : -1,
+          });
+        }
+      } else if (info && creature.alive && (boss || viewTransform.zoom >= INSTANCE_MOB_LABEL_ZOOM)) {
         const labelY = model
           ? projection.worldToScreen(creature.x, creature.y, creature.z + INSTANCE_CREATURE_MODEL_HEIGHT).y
           : point.y - 4 * markerScale;
@@ -8064,8 +8172,9 @@ function drawInstanceCanvas(followPass: boolean): void {
       ctx.fill();
       drawCanvasClassIcon(ctx, player.class, point.x, point.y, markerRadius * 1.65);
     }
-    drawCanvasStateIcon(ctx, player, point.x + markerRadius * 0.7, (model ? top : point.y - markerRadius) - 6 * markerScale,
-      markerScale);
+    // State icons (combat swords and the like) are for the flat map; the 3D
+    // view shows combat on the ring and the models.
+    if (!isoView) drawCanvasStateIcon(ctx, player, point.x + markerRadius * 0.7, point.y - markerRadius - 6 * markerScale, markerScale);
     if (!model && player.name === selectedInstancePlayerName) {
       ctx.beginPath();
       ctx.arc(point.x, point.y, markerRadius + 4, 0, Math.PI * 2);
@@ -8088,7 +8197,28 @@ function drawInstanceCanvas(followPass: boolean): void {
       ctx.stroke();
     }
 
-    if (visiblePlayers.length <= 60) {
+    if (plateStyle) {
+      const level = player.level || 1;
+      pendingPlates.push({
+        plate: {
+          name: player.name,
+          level: String(level),
+          levelColor: levelColor(level, partyLevel),
+          elite: false,
+          boss: false,
+          healthPct: player.alive ? player.healthPct ?? 100 : 0,
+          barColor: CLASS_COLORS[player.class] || '#94a3b8',
+          alive: player.alive,
+          threat: playerGuid !== null && attackedPlayers.has(playerGuid),
+          selected: player.name === selectedInstancePlayerName,
+          cast: playerGuid !== null ? castOf(unitKey(playerGuid, false)) : null,
+          note: getCurrentBotAction(decisions.get(player.name)) ?? null,
+        },
+        x: point.x,
+        y: model ? top - 2 : point.y - markerRadius - 4,
+        priority: (player.name === selectedInstancePlayerName ? 4 : 0) + (!player.isBot ? 2 : 0) + (player.inCombat ? 1 : 0),
+      });
+    } else if (visiblePlayers.length <= 60) {
       const labelY = model ? top - 1 : point.y - markerRadius - 1;
       pendingLabels.push({
         name: player.name,
@@ -8108,6 +8238,8 @@ function drawInstanceCanvas(followPass: boolean): void {
       }
     }
   }
+
+  if (plateStyle) drawInstancePlates(ctx, plateStyle, pendingPlates, playerIconScale / INSTANCE_PLATE_BASE_ICON_SCALE);
 
   const occupiedLabels: { left: number; right: number; top: number; bottom: number }[] = [];
   for (const label of pendingLabels.sort((left, right) => right.priority - left.priority)) {
@@ -8615,6 +8747,10 @@ if (instanceDebug) {
   setInterval(() => {
     if (getActiveMainTabId() === 'instances') renderInstanceDebugOverlay(performance.now());
   }, INSTANCE_DEBUG_INTERVAL_MS);
+}
+if ($instancePlatesMode) {
+  $instancePlatesMode.value = instancePlatesMode;
+  $instancePlatesMode.addEventListener('change', () => setInstancePlatesMode($instancePlatesMode.value as InstancePlatesMode));
 }
 if ($instanceMobsMode) {
   $instanceMobsMode.value = instanceMobsMode;

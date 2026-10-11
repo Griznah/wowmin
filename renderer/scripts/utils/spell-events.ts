@@ -113,7 +113,7 @@ export const AREA_FLASH_MS = 900;
 export const EVENT_DRIVEN_MS = 5000;
 // A held cast stays lit a little past its cast time, in case the "fired"
 // event is late.
-const CAST_GRACE_MS = 400;
+export const CAST_GRACE_MS = 400;
 const MIN_TRAVEL_MS = 120;
 // Wider than this, an area is raid- or zone-wide (boss auras, party buffs),
 // and a ring would cover the whole view.

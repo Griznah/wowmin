@@ -313,6 +313,9 @@ test('parses model URLs into build requests, rejecting anything else', () => {
   assert.deepEqual(JSON.parse(JSON.stringify(parseUnitModelPath('/assets/models/visual/116.json'))),
     { kind: 'visual', key: '116', params: { spellId: 116 } });
   assert.equal(parseUnitModelPath('/assets/models/visual/116.glb'), null);
+  assert.deepEqual(JSON.parse(JSON.stringify(parseUnitModelPath('/assets/models/spell/116.json'))),
+    { kind: 'spell', key: '116', params: { spellId: 116 } });
+  assert.equal(parseUnitModelPath('/assets/models/spell/116.glb'), null);
   assert.equal(parseUnitModelPath('/assets/models/creature/../../.env.glb'), null);
   assert.equal(parseUnitModelPath('/assets/models/character/../x.glb'), null);
   assert.equal(parseUnitModelPath('/assets/models/other/1.glb'), null);

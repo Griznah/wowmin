@@ -6,6 +6,9 @@
 import { readDbc } from './dbc.mjs';
 
 const SPELL_VISUAL_FIELD = 131;
+// Spell.dbc's enUS name and rank ("Rank 3", "Racial").
+const SPELL_NAME_FIELD = 136;
+const SPELL_RANK_FIELD = 153;
 // SpellVisual fields naming a kit, by the stage the kit plays at.
 const VISUAL_KITS = {
   precast: 1, cast: 2, impact: 3, state: 4, stateDone: 5, channel: 6,
@@ -78,6 +81,13 @@ export class SpellVisuals {
     });
     if (!effects.length && !procs.length && anim < 0 && startAnim < 0) return null;
     return { id: kitId, startAnim, anim, effects, procs };
+  }
+
+  // The spell's name and rank, or null if the client has no such spell.
+  info(spellId) {
+    const spell = this.table('Spell').get(spellId);
+    if (!spell) return null;
+    return { id: spellId, name: spell.string(SPELL_NAME_FIELD), rank: spell.string(SPELL_RANK_FIELD) };
   }
 
   // Everything wowmin draws for a spell, or null if it has no art.

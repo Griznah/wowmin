@@ -1,5 +1,5 @@
 // Child process of the web server that builds unit models, spell effect
-// models (GLB), and spell art lookups (JSON) from the WoW client's Data
+// models (GLB), and spell art and name lookups (JSON) from the WoW client's Data
 // directory on request, writing each to the cache path it is given. Messages in: { id, kind, key, params, outputPath }; out:
 // { id, ok, error? }. Client archives are opened once, on the first request.
 
@@ -33,6 +33,10 @@ async function build(kind, params) {
     const visual = visuals().forSpell(Number(params.spellId));
     return visual ? Buffer.from(JSON.stringify(visual)) : null;
   }
+  if (kind === 'spell') {
+    const spell = visuals().info(Number(params.spellId));
+    return spell ? Buffer.from(JSON.stringify(spell)) : null;
+  }
   if (kind === 'effect') {
     const modelName = visuals().effectModel(Number(params.effectId));
     return modelName ? buildEffectGlb(data().readFile, modelName) : null;
@@ -44,7 +48,8 @@ process.on('message', async ({ id, kind, params, outputPath }) => {
   try {
     const output = await build(kind, params);
     if (!output) {
-      process.send({ id, ok: false, error: kind === 'visual' ? `No art for spell ${params.spellId}.` : 'No model for this look.' });
+      process.send({ id, ok: false, error: kind === 'visual' ? `No art for spell ${params.spellId}.`
+        : kind === 'spell' ? `No spell ${params.spellId}.` : 'No model for this look.' });
       return;
     }
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });

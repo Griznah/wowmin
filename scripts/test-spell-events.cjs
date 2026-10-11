@@ -236,3 +236,30 @@ test('counts dropped events and the event rate', () => {
   store.clear();
   assert.equal(store.dropped, 0);
 });
+
+const plates = loadModule('../renderer/scripts/instance-scene/nameplates.ts');
+
+test('colours nameplate levels against the party, as the client does', () => {
+  assert.equal(plates.levelColor(85, 80), '#ff2020');
+  assert.equal(plates.levelColor(83, 80), '#ff8040');
+  assert.equal(plates.levelColor(78, 80), '#ffff00');
+  assert.equal(plates.levelColor(75, 80), '#40c040');
+  assert.equal(plates.levelColor(71, 80), '#808080');
+  // Low levels: nothing is grey to a level 5.
+  assert.equal(plates.levelColor(1, 5), '#40c040');
+});
+
+test('sizes nameplates above their anchor, growing with a cast and a note', () => {
+  const plate = {
+    name: 'Tankard', level: '80', levelColor: '#ffff00', elite: false, boss: false, healthPct: 50, barColor: '#C79C6E',
+    alive: true, threat: false, selected: false, cast: null, note: null,
+  };
+  for (const style of ['neon', 'grey', 'quatre']) {
+    const plain = plates.plateBounds(style, plate, 1);
+    assert.equal(plain.bottom, 0);
+    assert.ok(plain.top < 0 && plain.left < 0 && plain.right > 0);
+    const busy = plates.plateBounds(style, { ...plate, cast: { fraction: 0.5, name: 'Frostbolt', channeled: false }, note: 'attack' }, 1);
+    assert.ok(busy.top < plain.top, style);
+    assert.equal(plates.plateBounds(style, plate, 2).top, plain.top * 2);
+  }
+});
