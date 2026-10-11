@@ -2,7 +2,7 @@ import * as dgram from 'dgram';
 
 import type {
   StreamAppearance, StreamAppearanceUpdate, StreamAuraCategory, StreamBotDecision, StreamCombatEvent, StreamCombatEventKind,
-  StreamCombatEventUpdate, StreamGameObject, StreamGameObjectUpdate, StreamPassenger, StreamPassengerUpdate, StreamUnitAuras, StreamUnitAuraUpdate, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame, StreamListeners,
+  StreamCombatEventUpdate, StreamDebuff, StreamDebuffUpdate, StreamGameObject, StreamGameObjectUpdate, StreamMarker, StreamMarkerUpdate, StreamUnitDebuffs, StreamPassenger, StreamPassengerUpdate, StreamUnitAuras, StreamUnitAuraUpdate, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame, StreamListeners,
   StreamPath, StreamPathUpdate, StreamPlayerSample, StreamStatus,
 } from './types/electron';
 
@@ -30,6 +30,10 @@ const COMBAT_MAGIC = 'WME1';
 const UNIT_AURA_MAGIC = 'WMU1';
 const PASSENGER_MAGIC = 'WMV1';
 const GAMEOBJECT_MAGIC = 'WMG1';
+const DEBUFF_MAGIC = 'WMD1';
+const MARKER_MAGIC = 'WMR1';
+const DEBUFF_SIZE = 16;
+const MARKER_SIZE = 8;
 const GAMEOBJECT_SIZE = 48;
 const PASSENGER_SIZE = 12;
 const VERSION = 1;
@@ -375,6 +379,47 @@ export function parseGameObjectDatagram(buffer: Buffer): StreamGameObjectUpdate 
   return { mapId: header.mapId, instanceId: header.instanceId, serverTimeMs: header.serverTimeMs, objects };
 }
 
+export function parseDebuffDatagram(buffer: Buffer): StreamDebuffUpdate | null {
+  const header = readEntryHeader(buffer, DEBUFF_MAGIC);
+  if (!header) return null;
+  const units: StreamUnitDebuffs[] = [];
+  let offset = PATH_HEADER_SIZE;
+  for (let index = 0; index < header.count; index += 1) {
+    if (offset + 8 > buffer.length) return null;
+    const count = buffer.readUInt8(offset + 5);
+    if (offset + 8 + count * DEBUFF_SIZE > buffer.length) return null;
+    const debuffs: StreamDebuff[] = [];
+    for (let debuff = 0; debuff < count; debuff += 1) {
+      const at = offset + 8 + debuff * DEBUFF_SIZE;
+      debuffs.push({
+        spellId: buffer.readUInt32LE(at),
+        remainingMs: buffer.readUInt32LE(at + 4),
+        durationMs: buffer.readUInt32LE(at + 8),
+        stacks: buffer.readUInt8(at + 12),
+        fromPlayer: Boolean(buffer.readUInt8(at + 13) & 1),
+      });
+    }
+    units.push({ guid: buffer.readUInt32LE(offset), creature: Boolean(buffer.readUInt8(offset + 4) & 1), debuffs });
+    offset += 8 + count * DEBUFF_SIZE;
+  }
+  return { mapId: header.mapId, instanceId: header.instanceId, serverTimeMs: header.serverTimeMs, units };
+}
+
+export function parseMarkerDatagram(buffer: Buffer): StreamMarkerUpdate | null {
+  const header = readEntryHeader(buffer, MARKER_MAGIC);
+  if (!header || buffer.length < PATH_HEADER_SIZE + header.count * MARKER_SIZE) return null;
+  const markers: StreamMarker[] = [];
+  for (let index = 0; index < header.count; index += 1) {
+    const offset = PATH_HEADER_SIZE + index * MARKER_SIZE;
+    markers.push({
+      icon: buffer.readUInt8(offset),
+      creature: Boolean(buffer.readUInt8(offset + 1) & 1),
+      guid: buffer.readUInt32LE(offset + 4),
+    });
+  }
+  return { mapId: header.mapId, instanceId: header.instanceId, serverTimeMs: header.serverTimeMs, markers };
+}
+
 type CommandRunner = (command: string) => Promise<{ success: boolean; message: string }>;
 
 interface WatchedSession {
@@ -499,6 +544,14 @@ export class TelemetryStream {
       this.receiveGameObjects(message);
       return;
     }
+    if (magic === DEBUFF_MAGIC) {
+      this.receiveDebuffs(message);
+      return;
+    }
+    if (magic === MARKER_MAGIC) {
+      this.receiveMarkers(message);
+      return;
+    }
     if (magic === UNIT_AURA_MAGIC) {
       this.receiveUnitAuras(message);
       return;
@@ -593,6 +646,23 @@ export class TelemetryStream {
     const session = this.sessions.get(`${update.mapId}:${update.instanceId}`);
     if (!session) return;
     for (const listener of session.listeners) listener.onCombatEvents?.(update);
+  }
+
+  private receiveDebuffs(message: Buffer): void {
+    const update = parseDebuffDatagram(message);
+    if (!update?.units.length) return;
+    const session = this.sessions.get(`${update.mapId}:${update.instanceId}`);
+    if (!session) return;
+    for (const listener of session.listeners) listener.onDebuffs?.(update);
+  }
+
+  // An empty list matters: it clears the markers.
+  private receiveMarkers(message: Buffer): void {
+    const update = parseMarkerDatagram(message);
+    if (!update) return;
+    const session = this.sessions.get(`${update.mapId}:${update.instanceId}`);
+    if (!session) return;
+    for (const listener of session.listeners) listener.onMarkers?.(update);
   }
 
   private receiveGameObjects(message: Buffer): void {

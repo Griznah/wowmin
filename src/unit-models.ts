@@ -39,7 +39,8 @@ interface PendingBuild {
 export interface UnitModelRequest {
   // 'effect' is a SpellVisualEffectName model; 'visual' a spell's art (JSON);
   // 'spell' a spell's name (JSON); 'icon' a client icon (PNG): a spell's, or
-  // a side's PvP crest; 'gameobject' a game object display's model (GLB).
+  // a side's PvP crest, or a raid marker; 'gameobject' a game object
+  // display's model (GLB).
   kind: 'creature' | 'character' | 'effect' | 'visual' | 'spell' | 'icon' | 'gameobject';
   key: string;
   params: Record<string, unknown>;
@@ -64,9 +65,10 @@ export function parseUnitModelPath(urlPath: string): UnitModelRequest | null {
   if (spell) return { kind: 'spell', key: spell[1], params: { spellId: Number(spell[1]) } };
   const gameObject = urlPath.match(/^\/assets\/models\/gameobject\/(\d{1,7})\.glb$/);
   if (gameObject) return { kind: 'gameobject', key: gameObject[1], params: { displayId: Number(gameObject[1]) } };
-  const icon = urlPath.match(/^\/assets\/models\/icon\/(faction-(alliance|horde)|spell-(\d{1,7}))\.png$/);
+  const icon = urlPath.match(/^\/assets\/models\/icon\/(faction-(alliance|horde)|spell-(\d{1,7})|marker-([1-8]))\.png$/);
   if (icon) {
-    return { kind: 'icon', key: icon[1], params: icon[2] ? { faction: icon[2] } : { spellId: Number(icon[3]) } };
+    const params = icon[2] ? { faction: icon[2] } : icon[4] ? { marker: Number(icon[4]) } : { spellId: Number(icon[3]) };
+    return { kind: 'icon', key: icon[1], params };
   }
   const character = urlPath.match(/^\/assets\/models\/character\/([0-9][0-9.-]{0,199})\.glb$/);
   if (character) return { kind: 'character', key: character[1], params: { key: character[1] } };

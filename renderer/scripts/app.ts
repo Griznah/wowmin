@@ -9,10 +9,10 @@ import type { GameObjectPose } from './instance-scene/game-objects';
 import {
   CAST_GRACE_MS, CombatEffectStore, NUMBER_LIFETIME_MS, type Point3, type StrikeKind, type UnitKey, unitKey,
 } from './utils/spell-events';
-import { drawFactionCrest, drawNameplate, FACTION_NAME_COLORS, type Faction, levelColor, type Nameplate, plateBounds, type PlateStyle } from './instance-scene/nameplates';
+import { drawFactionCrest, drawNameplate, FACTION_NAME_COLORS, type Faction, levelColor, type Nameplate, plateBounds, type PlateStyle, POWER_COLORS } from './instance-scene/nameplates';
 import { ClientIcons } from './utils/client-icons';
 import { SpellNames } from './utils/spell-names';
-import { applyLiveSample, creaturePathKey, getMountModelUrl, getUnitModelUrl, LiveAppearanceStore, LiveAuraStore, LiveGameObjectStore, LivePassengerStore, LiveBotStore, LiveCreatureBuffer, LivePathStore, LivePositionBuffer, trimPathToPosition } from './utils/live-positions';
+import { applyLiveSample, creaturePathKey, getMountModelUrl, getUnitModelUrl, LiveAppearanceStore, LiveAuraStore, LiveDebuffStore, LiveGameObjectStore, LiveMarkerStore, LivePassengerStore, LiveBotStore, LiveCreatureBuffer, LivePathStore, LivePositionBuffer, trimPathToPosition } from './utils/live-positions';
 import { getCreatureCombatStyle, getPlayerCombatStyle } from './utils/unit-animation';
 import { CONTINENT_BOUNDS, worldToCanvas } from './utils/map-coords';
 import { getEnglishMotd, getServerUptime } from './utils/dashboard-data';
@@ -6613,6 +6613,9 @@ const instanceLiveAuras = new LiveAuraStore();
 const instanceLivePassengers = new LivePassengerStore();
 // Spawned game objects with models (battleground banners and flags, doors).
 const instanceLiveGameObjects = new LiveGameObjectStore();
+// Harmful auras and raid markers, for the plates.
+const instanceLiveDebuffs = new LiveDebuffStore();
+const instanceLiveMarkers = new LiveMarkerStore();
 // GameobjectTypes door, and GOState active: an open door, drawn as gone.
 const GAMEOBJECT_TYPE_DOOR = 0;
 const GO_STATE_ACTIVE = 0;
@@ -6699,6 +6702,8 @@ function syncInstanceLiveStream(): void {
   instanceLiveAuras.clear();
   instanceLivePassengers.clear();
   instanceLiveGameObjects.clear();
+  instanceLiveDebuffs.clear();
+  instanceLiveMarkers.clear();
   instanceCombatEffects.clear();
   instanceDebugEvents.clear();
   if (!wanted || !streamPositions) return;
@@ -6757,6 +6762,14 @@ function syncInstanceLiveStream(): void {
       if (instanceLiveStream !== stream) return;
       instanceLiveGameObjects.push(update, performance.now());
       noteInstanceDebug('gameobjects', update.objects.length);
+    },
+    onDebuffs: (update) => {
+      if (instanceLiveStream !== stream) return;
+      instanceLiveDebuffs.push(update, performance.now());
+    },
+    onMarkers: (update) => {
+      if (instanceLiveStream !== stream) return;
+      instanceLiveMarkers.push(update, performance.now());
     },
   });
   instanceLiveStream = stream;
@@ -7286,6 +7299,18 @@ function drawInstanceCombatNumbers(
     ctx.fillText(text, x, y);
   }
   ctx.restore();
+}
+
+// A unit's debuffs and raid marker for its plate or label, from the live
+// stores, with their client icons once loaded.
+function getInstancePlateExtras(key: UnitKey, now: number): Pick<Nameplate, 'debuffs' | 'marker'> {
+  const marker = instanceLiveMarkers.get(key, now);
+  return {
+    debuffs: instanceLiveDebuffs.get(key, now).map((debuff) => ({
+      icon: instanceClientIcons.get(`spell-${debuff.spellId}`), remainingMs: debuff.remainingMs, stacks: debuff.stacks,
+    })),
+    marker: marker === null ? null : instanceClientIcons.get(`marker-${marker + 1}`),
+  };
 }
 
 // Nameplates stack upward out of each other's way, the most important placed
@@ -8210,7 +8235,10 @@ function drawInstanceCanvas(followPass: boolean): void {
 
   // An 'action' label is a bot's current action, under its name.
   // A player's label in a battleground carries their side (crest, colour).
-  const pendingLabels: { name: string; x: number; y: number; priority: number; action?: boolean; faction?: Faction | null }[] = [];
+  // A label can also carry its unit's raid marker.
+  const pendingLabels: {
+    name: string; x: number; y: number; priority: number; action?: boolean; faction?: Faction | null; marker?: number | null;
+  }[] = [];
   const factionOf = (player: MapPlayerPosition): Faction | null => !battleground ? null
     : player.teamId === 1 ? 'alliance' : player.teamId === 0 ? 'horde' : null;
   const markerScale = getCanvasPlayerIconScale(viewTransform.zoom);
@@ -8305,7 +8333,9 @@ function drawInstanceCanvas(followPass: boolean): void {
         drawInstanceCreature(ctx, creature, info, point, markerScale, scenery);
       }
       if (plateStyle) {
-        if (info && creature.alive && !scenery && (boss || creature.inCombat || viewTransform.zoom >= INSTANCE_MOB_LABEL_ZOOM)) {
+        const extras = live ? getInstancePlateExtras(unitKey(creature.guid, true), liveNow) : {};
+        const marked = Boolean(live && instanceLiveMarkers.get(unitKey(creature.guid, true), liveNow) !== null);
+        if (info && creature.alive && !scenery && (boss || marked || creature.inCombat || viewTransform.zoom >= INSTANCE_MOB_LABEL_ZOOM)) {
           const plateY = model
             ? projection.worldToScreen(creature.x, creature.y, creature.z + INSTANCE_CREATURE_MODEL_HEIGHT).y - 2
             : point.y - 10 * markerScale;
@@ -8324,19 +8354,22 @@ function drawInstanceCanvas(followPass: boolean): void {
               selected: false,
               cast: castOf(unitKey(creature.guid, true)),
               note: null,
+              ...extras,
             },
             x: point.x,
             y: plateY,
             priority: boss ? 1 : creature.inCombat ? 0 : -1,
-            keep: boss || creature.inCombat,
+            keep: boss || marked || creature.inCombat,
             size: creature.playerControlled ? INSTANCE_PET_PLATE_SIZE : 1,
           });
         }
-      } else if (info && creature.alive && !scenery && (boss || viewTransform.zoom >= INSTANCE_MOB_LABEL_ZOOM)) {
+      } else if (info && creature.alive && !scenery && (boss || (live && instanceLiveMarkers.get(unitKey(creature.guid, true), liveNow) !== null)
+        || viewTransform.zoom >= INSTANCE_MOB_LABEL_ZOOM)) {
         const labelY = model
           ? projection.worldToScreen(creature.x, creature.y, creature.z + INSTANCE_CREATURE_MODEL_HEIGHT).y
           : point.y - 4 * markerScale;
-        pendingLabels.push({ name: info.name, x: point.x + 6 * markerScale, y: labelY, priority: boss ? 1 : -1 });
+        const marker = live ? instanceLiveMarkers.get(unitKey(creature.guid, true), liveNow) : null;
+        pendingLabels.push({ name: info.name, x: point.x + 6 * markerScale, y: labelY, priority: boss || marker !== null ? 1 : -1, marker });
       }
     }
   }
@@ -8434,6 +8467,9 @@ function drawInstanceCanvas(followPass: boolean): void {
           note: getCurrentBotAction(decisions.get(player.name)) ?? null,
           faction: factionOf(player),
           factionIcon: factionOf(player) ? instanceClientIcons.get(`faction-${factionOf(player)}`) : null,
+          power: player.alive && player.powerPct !== undefined && POWER_COLORS[player.powerType ?? -1]
+            ? { pct: player.powerPct, color: POWER_COLORS[player.powerType ?? 0] } : null,
+          ...(playerGuid !== null ? getInstancePlateExtras(unitKey(playerGuid, false), liveNow) : {}),
         },
         x: point.x,
         y: model || riderTop ? top - 2 : point.y - markerRadius - 4,
@@ -8448,6 +8484,7 @@ function drawInstanceCanvas(followPass: boolean): void {
         y: labelY,
         priority: (!player.isBot ? 2 : 0) + (player.inCombat ? 1 : 0),
         faction: factionOf(player),
+        marker: playerGuid !== null ? instanceLiveMarkers.get(unitKey(playerGuid, false), liveNow) : null,
       });
       const action = getCurrentBotAction(decisions.get(player.name));
       if (action) {
@@ -8468,16 +8505,19 @@ function drawInstanceCanvas(followPass: boolean): void {
   for (const label of pendingLabels.sort((left, right) => right.priority - left.priority)) {
     ctx.font = label.action ? 'italic 10px sans-serif' : '11px sans-serif';
     ctx.fillStyle = label.action ? '#fcd34d' : label.faction ? FACTION_NAME_COLORS[label.faction] : '#e5edf7';
-    // Room for the side's crest before the name.
-    const crest = label.faction ? 12 : 0;
+    // Room for the raid marker and the side's crest before the name.
+    const markerIcon = label.marker !== undefined && label.marker !== null ? instanceClientIcons.get(`marker-${label.marker + 1}`) : null;
+    const markerRoom = markerIcon ? 14 : 0;
+    const crest = (label.faction ? 12 : 0) + markerRoom;
     const labelWidth = ctx.measureText(label.name).width + crest;
     const rect = { left: label.x - 2, right: label.x + labelWidth + 2, top: label.y - 11, bottom: label.y + 3 };
     const overlaps = occupiedLabels.some((used) =>
       rect.left < used.right && rect.right > used.left && rect.top < used.bottom && rect.bottom > used.top);
     if (overlaps) continue;
     occupiedLabels.push(rect);
+    if (markerIcon) ctx.drawImage(markerIcon, label.x, label.y - 10, 12, 12);
     if (label.faction) {
-      drawFactionCrest(ctx, label.faction, label.x + 4.5, label.y - 4, 11, instanceClientIcons.get(`faction-${label.faction}`));
+      drawFactionCrest(ctx, label.faction, label.x + markerRoom + 4.5, label.y - 4, 11, instanceClientIcons.get(`faction-${label.faction}`));
     }
     ctx.fillText(label.name, label.x + crest, label.y);
   }

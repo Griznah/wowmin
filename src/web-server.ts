@@ -211,6 +211,8 @@ const server = createServer(async (request, response) => {
       onUnitAuras: (update) => send('auras', update),
       onPassengers: (update) => send('passengers', update),
       onGameObjects: (update) => send('gameobjects', update),
+      onDebuffs: (update) => send('debuffs', update),
+      onMarkers: (update) => send('markers', update),
     });
     // Comment lines keep idle connections open through proxies.
     const keepAlive = setInterval(() => response.write(': keep-alive\n\n'), 15000);

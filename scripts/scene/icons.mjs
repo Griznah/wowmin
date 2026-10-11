@@ -1,6 +1,7 @@
 // Client icons as PNG for wowmin's overlay: a spell's icon (Spell.dbc →
-// SpellIcon.dbc → Interface\Icons), and each side's PvP crest (the target
-// frame's), cropped to what's visible. Built on request from the viewer's own
+// SpellIcon.dbc → Interface\Icons), each side's PvP crest (the target
+// frame's), and the raid markers (1 star .. 8 skull), the last two cropped to
+// what's visible. Built on request from the viewer's own
 // client data, like the unit models; never committed.
 
 import { PNG } from 'pngjs';
@@ -21,6 +22,10 @@ const VISIBLE_ALPHA = 20;
 // params ({ faction } or { spellId }); null if there is none.
 export function iconSource(params, tables) {
   if (params.faction) return FACTION_ICONS[params.faction] ? { path: FACTION_ICONS[params.faction], crop: true } : null;
+  if (params.marker) {
+    const marker = Number(params.marker);
+    return marker >= 1 && marker <= 8 ? { path: `Interface\\TargetingFrame\\UI-RaidTargetingIcon_${marker}.blp`, crop: true } : null;
+  }
   const spell = tables.table('Spell').get(Number(params.spellId));
   const icon = spell ? tables.table('SpellIcon').get(spell.uint(SPELL_ICON_FIELD)) : null;
   const name = icon?.string(ICON_PATH_FIELD);

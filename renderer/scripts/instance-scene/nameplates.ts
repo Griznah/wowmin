@@ -30,11 +30,20 @@ export interface Nameplate {
   // the side's colour. The client's crest when it has loaded.
   faction?: Faction | null;
   factionIcon?: CanvasImageSource | null;
+  // A player's mana, rage, energy, or runic power, as a thin bar under the
+  // health bar.
+  power?: { pct: number; color: string } | null;
+  // Harmful auras, as a row of icons above the name with time left and
+  // stacks; the icon is null until it has loaded.
+  debuffs?: Array<{ icon: CanvasImageSource | null; remainingMs: number | null; stacks: number }>;
+  // The raid marker set on the unit (skull, cross, ...), beside the bar.
+  marker?: CanvasImageSource | null;
 }
 
 interface Theme {
   width: number;
   barHeight: number;
+  powerHeight: number;
   castHeight: number;
   // Space between the name and the bar, and between the bar and the cast.
   gap: number;
@@ -45,9 +54,9 @@ interface Theme {
 }
 
 const THEMES: Record<PlateStyle, Theme> = {
-  neon: { width: 92, barHeight: 7, castHeight: 5, gap: 2, nameFont: '700 11px system-ui, sans-serif', nameInside: false, healthText: false, border: 1 },
-  grey: { width: 104, barHeight: 12, castHeight: 9, gap: 2, nameFont: '700 9px system-ui, sans-serif', nameInside: true, healthText: true, border: 1 },
-  quatre: { width: 112, barHeight: 14, castHeight: 8, gap: 2, nameFont: '700 10px system-ui, sans-serif', nameInside: false, healthText: true, border: 2 },
+  neon: { width: 92, barHeight: 7, powerHeight: 2, castHeight: 5, gap: 2, nameFont: '700 11px system-ui, sans-serif', nameInside: false, healthText: false, border: 1 },
+  grey: { width: 104, barHeight: 12, powerHeight: 3, castHeight: 9, gap: 2, nameFont: '700 9px system-ui, sans-serif', nameInside: true, healthText: true, border: 1 },
+  quatre: { width: 112, barHeight: 14, powerHeight: 3, castHeight: 8, gap: 2, nameFont: '700 10px system-ui, sans-serif', nameInside: false, healthText: true, border: 2 },
 };
 
 const THREAT_COLOR = '#ff2a1a';
@@ -60,6 +69,15 @@ const DEAD_COLOR = '#94a3b8';
 // Names in the side's colour, light enough to read on the dark outline.
 export const FACTION_NAME_COLORS: Record<Faction, string> = { alliance: '#6cb4ff', horde: '#ff6a5a' };
 const CREST_SIZE = 12;
+const DEBUFF_SIZE = 14;
+const DEBUFF_GAP = 2;
+const DEBUFF_ROW = DEBUFF_SIZE + 3;
+const MARKER_SIZE = 16;
+// A player's power bar, by power type (POWER_MANA 0, RAGE 1, FOCUS 2,
+// ENERGY 3, RUNIC_POWER 6).
+export const POWER_COLORS: Record<number, string> = {
+  0: '#3b82f6', 1: '#ef4444', 2: '#f97316', 3: '#facc15', 6: '#22d3ee',
+};
 
 // The level's colour by how it compares with the party's, as the client
 // colours it: grey far below, green below, yellow close, orange and red above.
@@ -91,7 +109,9 @@ export function plateBounds(style: PlateStyle, plate: Nameplate, scale: number):
 
 function plateHeight(theme: Theme, plate: Nameplate): number {
   if (!plate.alive) return 12;
-  const name = theme.nameInside ? 0 : 12 + theme.gap;
+  const debuffs = plate.debuffs?.length ? DEBUFF_ROW : 0;
+  const power = plate.power ? theme.powerHeight + 1 : 0;
+  const name = debuffs + power + (theme.nameInside ? 0 : 12 + theme.gap);
   const cast = plate.cast ? theme.gap + theme.castHeight + (theme.castHeight < 8 ? 11 : 0) : 0;
   const note = plate.note ? 13 : 0;
   return name + theme.barHeight + cast + note + 2;
@@ -118,17 +138,21 @@ export function drawNameplate(ctx: CanvasRenderingContext2D, style: PlateStyle, 
   const left = -theme.width / 2;
   const nameColor = faction ? FACTION_NAME_COLORS[faction] : '#ffffff';
   let top = 0;
+  if (plate.debuffs?.length) {
+    drawDebuffs(ctx, plate.debuffs, left, top);
+    top += DEBUFF_ROW;
+  }
   if (!theme.nameInside) {
     ctx.font = theme.nameFont;
     if (style === 'quatre') {
       ctx.textAlign = 'left';
       const nameLeft = faction ? left + CREST_SIZE + 3 : left;
-      if (faction) drawFactionCrest(ctx, faction, left + CREST_SIZE / 2, 6, CREST_SIZE, plate.factionIcon);
-      outlinedText(ctx, plate.name.toUpperCase(), nameLeft, 6, nameColor);
+      if (faction) drawFactionCrest(ctx, faction, left + CREST_SIZE / 2, top + 6, CREST_SIZE, plate.factionIcon);
+      outlinedText(ctx, plate.name.toUpperCase(), nameLeft, top + 6, nameColor);
     } else {
       ctx.textAlign = 'center';
-      outlinedText(ctx, plate.name, 0, 6, nameColor);
-      if (faction) drawFactionCrest(ctx, faction, -ctx.measureText(plate.name).width / 2 - CREST_SIZE * 0.75, 6, CREST_SIZE, plate.factionIcon);
+      outlinedText(ctx, plate.name, 0, top + 6, nameColor);
+      if (faction) drawFactionCrest(ctx, faction, -ctx.measureText(plate.name).width / 2 - CREST_SIZE * 0.75, top + 6, CREST_SIZE, plate.factionIcon);
     }
     top += 12 + theme.gap;
   } else if (faction) {
@@ -138,7 +162,20 @@ export function drawNameplate(ctx: CanvasRenderingContext2D, style: PlateStyle, 
   if (style === 'neon') drawNeonBar(ctx, theme, plate, left, top);
   else if (style === 'grey') drawGreyBar(ctx, theme, plate, left, top);
   else drawQuatreBar(ctx, theme, plate, left, top);
+  if (plate.marker) {
+    // Beside the bar; past the crest when the name is inside the bar.
+    const crestRoom = theme.nameInside && faction ? CREST_SIZE + 2 : 0;
+    ctx.drawImage(plate.marker, left - MARKER_SIZE - 4 - crestRoom, top + theme.barHeight / 2 - MARKER_SIZE / 2, MARKER_SIZE, MARKER_SIZE);
+  }
   top += theme.barHeight;
+  if (plate.power) {
+    top += 1;
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(left, top, theme.width, theme.powerHeight);
+    ctx.fillStyle = plate.power.color;
+    ctx.fillRect(left, top, theme.width * fraction(plate.power.pct), theme.powerHeight);
+    top += theme.powerHeight;
+  }
   if (plate.cast) {
     top += theme.gap;
     drawCastBar(ctx, style, theme, plate.cast, left, top);
@@ -246,6 +283,32 @@ function drawCastBar(ctx: CanvasRenderingContext2D, style: PlateStyle, theme: Th
     ctx.textAlign = style === 'quatre' ? 'left' : 'center';
     outlinedText(ctx, clip(ctx, cast.name, width - 6), style === 'quatre' ? left + 3 : 0, top + height / 2 + 0.5, '#ffffff');
   }
+}
+
+// A row of debuff icons from the plate's left, each with its time left
+// (whole seconds, or minutes past one) and stacks above one.
+function drawDebuffs(ctx: CanvasRenderingContext2D, debuffs: NonNullable<Nameplate['debuffs']>, left: number, top: number): void {
+  debuffs.forEach((debuff, index) => {
+    const x = left + index * (DEBUFF_SIZE + DEBUFF_GAP);
+    if (debuff.icon) ctx.drawImage(debuff.icon, x, top, DEBUFF_SIZE, DEBUFF_SIZE);
+    else {
+      ctx.fillStyle = 'rgba(127,29,29,0.85)';
+      ctx.fillRect(x, top, DEBUFF_SIZE, DEBUFF_SIZE);
+    }
+    ctx.strokeStyle = '#000000';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x - 0.5, top - 0.5, DEBUFF_SIZE + 1, DEBUFF_SIZE + 1);
+    ctx.font = '700 8px system-ui, sans-serif';
+    if (debuff.remainingMs !== null) {
+      const seconds = Math.ceil(debuff.remainingMs / 1000);
+      ctx.textAlign = 'center';
+      outlinedText(ctx, seconds >= 60 ? `${Math.ceil(seconds / 60)}m` : String(seconds), x + DEBUFF_SIZE / 2, top + DEBUFF_SIZE + 1, '#ffffff');
+    }
+    if (debuff.stacks > 1) {
+      ctx.textAlign = 'right';
+      outlinedText(ctx, String(debuff.stacks), x + DEBUFF_SIZE + 1, top + 4, '#fde047');
+    }
+  });
 }
 
 function drawLevel(ctx: CanvasRenderingContext2D, plate: Nameplate, x: number, y: number, font: string, align: CanvasTextAlign): void {

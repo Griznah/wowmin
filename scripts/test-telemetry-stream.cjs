@@ -19,7 +19,7 @@ function loadModule(relativePath) {
 }
 
 const {
-  parseBotDatagram, parseCombatEventDatagram, parseCreatureDatagram, parseGameObjectDatagram, parsePassengerDatagram, parsePathDatagram, parseStreamDatagram, parseUnitAuraDatagram,
+  parseBotDatagram, parseCombatEventDatagram, parseCreatureDatagram, parseDebuffDatagram, parseGameObjectDatagram, parseMarkerDatagram, parsePassengerDatagram, parsePathDatagram, parseStreamDatagram, parseUnitAuraDatagram,
 } = loadModule('../src/telemetry-stream.ts');
 const {
   LIVE_AURA_STALE_MS, LIVE_BOT_STALE_MS, LIVE_CREATURE_STALE_MS, LIVE_PATH_STALE_MS, LIVE_RENDER_DELAY_MS, LiveAuraStore, LiveBotStore,
@@ -548,4 +548,63 @@ test('parses game objects and forgets despawned ones', () => {
   store.push(parseGameObjectDatagram(gameObjectDatagram([{ ...banner, gone: true }])), 2000);
   assert.deepEqual(JSON.parse(JSON.stringify(store.all(2500).map((object) => object.guid))), [51]);
   assert.equal(store.all(1000 + LIVE_GAMEOBJECT_STALE_MS + 1).length, 0);
+});
+
+// Builds a WMD1/WMR1 datagram as WowMinTelemetry.cpp does.
+function entriesDatagram(magic, entries) {
+  const header = Buffer.alloc(24);
+  header.write(magic, 0, 'latin1');
+  header.writeUInt8(1, 4);
+  header.writeUInt32LE(533, 8);
+  header.writeUInt32LE(3, 12);
+  header.writeUInt32LE(5000, 16);
+  header.writeUInt16LE(entries.length, 20);
+  return Buffer.concat([header, ...entries]);
+}
+
+test('parses debuffs and counts their time down', () => {
+  const unit = Buffer.alloc(8 + 32);
+  unit.writeUInt32LE(900, 0);
+  unit.writeUInt8(1, 4);
+  unit.writeUInt8(2, 5);
+  // Corruption, 5 s left of 18, from a player; a lasting debuff, 3 stacks.
+  unit.writeUInt32LE(47813, 8); unit.writeUInt32LE(5000, 12); unit.writeUInt32LE(18000, 16); unit.writeUInt8(1, 20); unit.writeUInt8(1, 21);
+  unit.writeUInt32LE(58567, 24); unit.writeUInt32LE(0, 28); unit.writeUInt32LE(0, 32); unit.writeUInt8(3, 36);
+  const parsed = parseDebuffDatagram(entriesDatagram('WMD1', [unit]));
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.units[0])), { guid: 900, creature: true, debuffs: [
+    { spellId: 47813, remainingMs: 5000, durationMs: 18000, stacks: 1, fromPlayer: true },
+    { spellId: 58567, remainingMs: 0, durationMs: 0, stacks: 3, fromPlayer: false },
+  ] });
+  assert.equal(parseDebuffDatagram(entriesDatagram('WMD1', [unit.subarray(0, 20)])), null);
+
+  const { LiveDebuffStore } = loadModule('../renderer/scripts/utils/live-positions.ts');
+  const store = new LiveDebuffStore();
+  store.push(parsed, 1000);
+  assert.deepEqual(JSON.parse(JSON.stringify(store.get('c900', 4000))), [
+    { spellId: 47813, remainingMs: 2000, stacks: 1, fromPlayer: true },
+    { spellId: 58567, remainingMs: null, stacks: 3, fromPlayer: false },
+  ]);
+  // Run out: only the lasting one is left.
+  assert.equal(store.get('c900', 7000).length, 1);
+});
+
+test('parses raid markers, and an empty list clears them', () => {
+  const marker = (icon, creature, guid) => {
+    const entry = Buffer.alloc(8);
+    entry.writeUInt8(icon, 0); entry.writeUInt8(creature ? 1 : 0, 1); entry.writeUInt32LE(guid, 4);
+    return entry;
+  };
+  const parsed = parseMarkerDatagram(entriesDatagram('WMR1', [marker(7, true, 900), marker(6, false, 3)]));
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed.markers)), [
+    { icon: 7, creature: true, guid: 900 }, { icon: 6, creature: false, guid: 3 },
+  ]);
+  const { LiveMarkerStore, LIVE_MARKER_STALE_MS } = loadModule('../renderer/scripts/utils/live-positions.ts');
+  const store = new LiveMarkerStore();
+  store.push(parsed, 1000);
+  assert.equal(store.get('c900', 1500), 7);
+  assert.equal(store.get('p3', 1500), 6);
+  store.push(parseMarkerDatagram(entriesDatagram('WMR1', [])), 2000);
+  assert.equal(store.get('c900', 2500), null);
+  store.push(parsed, 3000);
+  assert.equal(store.get('c900', 3000 + LIVE_MARKER_STALE_MS + 1), null);
 });

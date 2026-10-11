@@ -1,6 +1,6 @@
 import type {
   MapPlayerPosition, StreamAppearance, StreamAppearanceUpdate, StreamBotDecision, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame,
-  StreamGameObject, StreamGameObjectUpdate, StreamPassenger, StreamPassengerUpdate, StreamPath, StreamPathUpdate, StreamPlayerSample, StreamUnitAuraUpdate,
+  StreamDebuffUpdate, StreamGameObject, StreamGameObjectUpdate, StreamMarker, StreamMarkerUpdate, StreamPassenger, StreamPassengerUpdate, StreamPath, StreamPathUpdate, StreamPlayerSample, StreamUnitAuraUpdate,
 } from '../../../src/types/electron';
 
 // Buffers stream samples per player and interpolates between them, drawing a
@@ -334,6 +334,74 @@ export class LiveAuraStore {
       else current.set(key, entry.spellIds);
     }
     return current;
+  }
+}
+
+// A unit's debuffs are re-sent every 3 s while it has any; past this without
+// word, they're dropped.
+export const LIVE_DEBUFF_STALE_MS = 10_000;
+
+export interface LiveDebuff {
+  spellId: number;
+  // Time left now; null when it lasts until removed.
+  remainingMs: number | null;
+  stacks: number;
+  fromPlayer: boolean;
+}
+
+// The harmful auras on each unit, by unit key ('p<guid>' or 'c<guid>'),
+// counting down from when each list arrived.
+export class LiveDebuffStore {
+  private readonly units = new Map<string, { at: number; update: StreamDebuffUpdate['units'][number] }>();
+
+  push(update: StreamDebuffUpdate, receivedAt: number): void {
+    for (const unit of update.units) {
+      const key = `${unit.creature ? 'c' : 'p'}${unit.guid}`;
+      if (unit.debuffs.length) this.units.set(key, { at: receivedAt, update: unit });
+      else this.units.delete(key);
+    }
+  }
+
+  clear(): void {
+    this.units.clear();
+  }
+
+  get(key: string, now: number): LiveDebuff[] {
+    const entry = this.units.get(key);
+    if (!entry) return [];
+    if (now - entry.at > LIVE_DEBUFF_STALE_MS) {
+      this.units.delete(key);
+      return [];
+    }
+    return entry.update.debuffs.flatMap((debuff): LiveDebuff[] => {
+      if (!debuff.remainingMs) return [{ spellId: debuff.spellId, remainingMs: null, stacks: debuff.stacks, fromPlayer: debuff.fromPlayer }];
+      const remainingMs = debuff.remainingMs - (now - entry.at);
+      return remainingMs > 0 ? [{ spellId: debuff.spellId, remainingMs, stacks: debuff.stacks, fromPlayer: debuff.fromPlayer }] : [];
+    });
+  }
+}
+
+// Raid markers are re-sent every 2 s while any are set; past this without
+// word, they're dropped.
+export const LIVE_MARKER_STALE_MS = 6000;
+
+// The raid marker on each unit, by unit key.
+export class LiveMarkerStore {
+  private markers = new Map<string, number>();
+  private at = 0;
+
+  push(update: StreamMarkerUpdate, receivedAt: number): void {
+    this.markers = new Map(update.markers.map((marker: StreamMarker) => [`${marker.creature ? 'c' : 'p'}${marker.guid}`, marker.icon]));
+    this.at = receivedAt;
+  }
+
+  clear(): void {
+    this.markers.clear();
+  }
+
+  get(key: string, now: number): number | null {
+    if (now - this.at > LIVE_MARKER_STALE_MS) this.markers.clear();
+    return this.markers.get(key) ?? null;
   }
 }
 

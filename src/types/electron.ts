@@ -388,6 +388,46 @@ export interface StreamPassengerUpdate {
   passengers: StreamPassenger[];
 }
 
+// A harmful aura on a unit, for its nameplate.
+export interface StreamDebuff {
+  spellId: number;
+  // At the time it was sent; 0 when it lasts until removed.
+  remainingMs: number;
+  durationMs: number;
+  stacks: number;
+  // Cast by a player (else by a creature).
+  fromPlayer: boolean;
+}
+
+export interface StreamUnitDebuffs {
+  guid: number;
+  creature: boolean;
+  debuffs: StreamDebuff[];
+}
+
+export interface StreamDebuffUpdate {
+  mapId: number;
+  instanceId: number;
+  serverTimeMs: number;
+  units: StreamUnitDebuffs[];
+}
+
+// A raid marker a group has set: 0 star, 1 circle, 2 diamond, 3 triangle,
+// 4 moon, 5 square, 6 cross, 7 skull.
+export interface StreamMarker {
+  icon: number;
+  creature: boolean;
+  guid: number;
+}
+
+// Every marker set (empty when all are cleared).
+export interface StreamMarkerUpdate {
+  mapId: number;
+  instanceId: number;
+  serverTimeMs: number;
+  markers: StreamMarker[];
+}
+
 // A spawned game object with a model (a battleground banner or flag, a
 // door, a chest), from the module's game object lists.
 export interface StreamGameObject {
@@ -433,6 +473,8 @@ export interface StreamListeners {
   onUnitAuras?: (update: StreamUnitAuraUpdate) => void;
   onPassengers?: (update: StreamPassengerUpdate) => void;
   onGameObjects?: (update: StreamGameObjectUpdate) => void;
+  onDebuffs?: (update: StreamDebuffUpdate) => void;
+  onMarkers?: (update: StreamMarkerUpdate) => void;
 }
 
 // creature_template details for labelling streamed creatures.
