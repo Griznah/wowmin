@@ -171,3 +171,12 @@ test('minimap tile projection aligns world coordinates with a cropped tile image
   assert.equal(topLeft.x, 0);
   assert.equal(topLeft.y, 0);
 });
+
+test('zoom stops at the flat map limit unless a closer one is allowed', () => {
+  const viewport = { x: 0, y: 0, width: 800, height: 600 };
+  assert.equal(zoomInstanceViewAt({ zoom: 5, panX: 0, panY: 0 }, viewport, 400, 300, 20).zoom, 6);
+  assert.equal(zoomInstanceViewAt({ zoom: 5, panX: 0, panY: 0 }, viewport, 400, 300, 20, 30).zoom, 20);
+  assert.equal(zoomInstanceViewAt({ zoom: 5, panX: 0, panY: 0 }, viewport, 400, 300, 40, 30).zoom, 30);
+  // A limit below the flat map's never makes zooming stop sooner.
+  assert.equal(zoomInstanceViewAt({ zoom: 5, panX: 0, panY: 0 }, viewport, 400, 300, 6, 2).zoom, 6);
+});

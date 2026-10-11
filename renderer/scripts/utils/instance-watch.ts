@@ -165,14 +165,18 @@ export function applyInstanceViewTransform(
   };
 }
 
+// The flat map's closest zoom; the 3D view may allow closer.
+export const INSTANCE_MAX_ZOOM = 6;
+
 export function zoomInstanceViewAt(
   transform: InstanceViewTransform,
   viewport: InstanceProjectionViewport,
   anchorX: number,
   anchorY: number,
   zoom: number,
+  maxZoom = INSTANCE_MAX_ZOOM,
 ): InstanceViewTransform {
-  const nextZoom = Math.min(6, Math.max(1, zoom));
+  const nextZoom = Math.min(Math.max(INSTANCE_MAX_ZOOM, maxZoom), Math.max(1, zoom));
   if (nextZoom === 1) return { zoom: 1, panX: 0, panY: 0 };
 
   const current = applyInstanceViewTransform(viewport, transform);

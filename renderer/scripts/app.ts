@@ -1,7 +1,7 @@
 /// <reference path="./types/window.d.ts" />
 import { ts, escapeHtml, showResult, debounce, getMapName, CLASS_COLORS, RACE_NAMES, CLASS_NAMES } from './utils/helpers';
 import { parseOnlineList, playersFromDatabase } from './utils/online-players';
-import { type ActiveInstanceSession, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getInstanceCoordinateBounds, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, groupActiveInstanceSessions, parseInstanceSessionKey, zoomInstanceViewAt } from './utils/instance-watch';
+import { type ActiveInstanceSession, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getInstanceCoordinateBounds, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, groupActiveInstanceSessions, INSTANCE_MAX_ZOOM, parseInstanceSessionKey, zoomInstanceViewAt } from './utils/instance-watch';
 import { clampIsoPitch, createFlatProjection, createIsoView, DEFAULT_ISO_YAW, type FadeSettings, getFadeVolumes, getHeightBand, getIsoPanForCenter, getNextQuarterTurn, ISO_PITCH, type IsoView, type MapProjection, resolveMinimapTileProjection, type SceneBox } from './utils/map-projection';
 import { InstanceSceneView } from './instance-scene/scene-view';
 import type { UnitModelPose } from './instance-scene/unit-models';
@@ -7178,27 +7178,38 @@ function drawInstanceCombatNumbers(
 }
 
 // Nameplates stack upward out of each other's way, the most important placed
-// first and drawn last (on top).
+// first and drawn last (on top). Plates for players, bosses, and mobs in a
+// fight (`keep`) always show; an idle mob's is left out when it can't find
+// room close to its unit.
+const INSTANCE_PLATE_MOB_NUDGES = 2;
+
 function drawInstancePlates(
   ctx: CanvasRenderingContext2D,
   style: PlateStyle,
-  plates: { plate: Nameplate; x: number; y: number; priority: number }[],
+  plates: { plate: Nameplate; x: number; y: number; priority: number; keep: boolean }[],
   scale: number,
 ): void {
-  const ordered = [...plates].sort((left, right) => right.priority - left.priority);
+  const ordered = [...plates].sort((left, right) => Number(right.keep) - Number(left.keep) || right.priority - left.priority);
   const placed: { left: number; right: number; top: number; bottom: number }[] = [];
+  const shown: typeof plates = [];
   for (const entry of ordered) {
     const bounds = plateBounds(style, entry.plate, scale);
     const rectAt = (y: number) => ({ left: entry.x + bounds.left, right: entry.x + bounds.right, top: y + bounds.top, bottom: y + bounds.bottom });
-    for (let attempt = 0; attempt < 8; attempt += 1) {
-      const rect = rectAt(entry.y);
-      const hit = placed.find((used) => rect.left < used.right && rect.right > used.left && rect.top < used.bottom && rect.bottom > used.top);
+    const overlap = (y: number) => {
+      const rect = rectAt(y);
+      return placed.find((used) => rect.left < used.right && rect.right > used.left && rect.top < used.bottom && rect.bottom > used.top);
+    };
+    const nudges = entry.keep ? 8 : INSTANCE_PLATE_MOB_NUDGES;
+    for (let attempt = 0; attempt < nudges; attempt += 1) {
+      const hit = overlap(entry.y);
       if (!hit) break;
       entry.y = hit.top - 1 - bounds.bottom;
     }
+    if (!entry.keep && overlap(entry.y)) continue;
     placed.push(rectAt(entry.y));
+    shown.push(entry);
   }
-  for (const entry of ordered.reverse()) drawNameplate(ctx, style, entry.plate, entry.x, entry.y, scale);
+  for (const entry of shown.reverse()) drawNameplate(ctx, style, entry.plate, entry.x, entry.y, scale);
 }
 
 function drawInstanceCreature(
@@ -7337,12 +7348,15 @@ function updateInstanceOrbit(event: PointerEvent): void {
 
 // Draws the 3D scene under the overlay and returns its projection, or null
 // when the flat view should be used (no scene, 3D off, still loading, no WebGL).
+// The scene shows around the party and around `landmarks` (bosses, which are
+// always drawn), but is framed on the party.
 function renderInstanceScene(
   session: ActiveInstanceSession,
   asset: LoadedInstanceMapAsset | null,
   floor: DungeonMapFloor | null,
   width: number,
   height: number,
+  landmarks: Point3[] = [],
 ): IsoView | null {
   const scene = asset?.metadata.scene;
   const url = getInstanceSceneUrl(session.mapId, asset);
@@ -7357,7 +7371,10 @@ function renderInstanceScene(
     ? session.players.filter((player) => getParticipantDungeonFloor(player, asset.metadata.floors ?? [])?.id === floor.id)
     : session.players;
   const fade: FadeSettings = { height: instanceFadeRange, horizontal: instanceHorizontalFade || null };
-  const volumes = getFadeVolumes(floorPlayers.map((player) => [player.position_x, player.position_y, player.position_z]), fade);
+  const volumes = getFadeVolumes([
+    ...floorPlayers.map((player): Point3 => [player.position_x, player.position_y, player.position_z]),
+    ...landmarks,
+  ], fade);
   const band = getHeightBand(floorPlayers.map((player) => player.position_z));
   let fitBox: SceneBox = floor && floorHeights
     ? { ...floor.bounds, minZ: floorHeights.minZ, maxZ: floorHeights.maxZ }
@@ -7562,6 +7579,18 @@ function fitSelectedInstanceView(): void {
   renderInstanceCanvas();
 }
 
+// The 3D view can zoom in until the canvas's shorter side spans this many
+// yards, close enough to watch a unit's model; the flat map stops sooner.
+const INSTANCE_CLOSEST_YARDS = 12;
+
+function getInstanceMaxZoom(): number {
+  const context = instanceIsoContext;
+  const zoom = getInstanceViewTransform().zoom;
+  if (!context || context.view.pixelsPerUnit <= 0 || zoom <= 0) return INSTANCE_MAX_ZOOM;
+  const pixelsPerYardAtFit = context.view.pixelsPerUnit / zoom;
+  return Math.max(INSTANCE_MAX_ZOOM, Math.min(context.width, context.height) / INSTANCE_CLOSEST_YARDS / pixelsPerYardAtFit);
+}
+
 function adjustInstanceZoom(multiplier: number, anchorX?: number, anchorY?: number): void {
   if (!instanceBaseViewport) return;
   const transform = getInstanceViewTransform();
@@ -7573,6 +7602,7 @@ function adjustInstanceZoom(multiplier: number, anchorX?: number, anchorY?: numb
     x,
     y,
     transform.zoom * multiplier,
+    getInstanceMaxZoom(),
   ));
   renderInstanceCanvas();
 }
@@ -7973,7 +8003,15 @@ function drawInstanceCanvas(followPass: boolean): void {
     : new Set<string>();
   const effectsDrawn = sceneView?.setEffects(live && instanceView3d ? instanceCombatEffects : null, combatPositions, liveNow,
     live ? instanceLiveAuras.all(liveNow) : undefined) ?? 0;
-  const isoView = renderInstanceScene(session, loadedAsset, floor, width, height);
+  const bossPositions = creatures
+    .filter((creature) => isBossCreature(creature, instanceCreatureInfo.get(creature.entry)))
+    .map((creature): Point3 => [creature.x, creature.y, creature.z]);
+  const isoView = renderInstanceScene(session, loadedAsset, floor, width, height, bossPositions);
+  // The flat map stops at its own closest zoom, which the 3D view can pass.
+  if (!isoView && getInstanceViewTransform().zoom > INSTANCE_MAX_ZOOM) {
+    const flatViewport = aspectRatio ? getInstanceProjectionViewport(width, height, aspectRatio) : { x: 0, y: 0, width, height };
+    setInstanceViewTransform(zoomInstanceViewAt(getInstanceViewTransform(), flatViewport, width / 2, height / 2, INSTANCE_MAX_ZOOM));
+  }
   const modelShown = (id: string) => Boolean(isoView) && modelIds.has(id);
   // Read after the scene, which may reset it when it reframes.
   const viewTransform = getInstanceViewTransform();
@@ -8016,7 +8054,7 @@ function drawInstanceCanvas(followPass: boolean): void {
   const markerScale = getCanvasPlayerIconScale(viewTransform.zoom);
   // In 3D, nameplates take the labels' place; (x, y) is over the unit's head.
   const plateStyle = isoView && instancePlatesMode !== 'labels' ? instancePlatesMode : null;
-  const pendingPlates: { plate: Nameplate; x: number; y: number; priority: number }[] = [];
+  const pendingPlates: { plate: Nameplate; x: number; y: number; priority: number; keep: boolean }[] = [];
   const partyLevel = Math.max(1, ...visiblePlayers.map((player) => player.level || 1));
   const activeCasts = new Map<UnitKey, { spellId: number; startAt: number; endAt: number; channeled: boolean }>();
   if (plateStyle && live) {
@@ -8122,6 +8160,7 @@ function drawInstanceCanvas(followPass: boolean): void {
             x: point.x,
             y: plateY,
             priority: boss ? 1 : creature.inCombat ? 0 : -1,
+            keep: boss || creature.inCombat,
           });
         }
       } else if (info && creature.alive && (boss || viewTransform.zoom >= INSTANCE_MOB_LABEL_ZOOM)) {
@@ -8217,6 +8256,7 @@ function drawInstanceCanvas(followPass: boolean): void {
         x: point.x,
         y: model ? top - 2 : point.y - markerRadius - 4,
         priority: (player.name === selectedInstancePlayerName ? 4 : 0) + (!player.isBot ? 2 : 0) + (player.inCombat ? 1 : 0),
+        keep: true,
       });
     } else if (visiblePlayers.length <= 60) {
       const labelY = model ? top - 1 : point.y - markerRadius - 1;
