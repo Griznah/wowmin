@@ -185,6 +185,11 @@ export function chunkInArea(position, area) {
   return boxes.some((box) => north >= box.minX && north - CHUNK_SIZE <= box.maxX && west >= box.minY && west - CHUNK_SIZE <= box.maxY);
 }
 
+// Whether a point ([north, west, ...]) lies in `area`, a list of boxes.
+export function pointInArea([north, west], area) {
+  return area.some((box) => north >= box.minX && north <= box.maxX && west >= box.minY && west <= box.maxY);
+}
+
 // One tile's terrain, cropped to `area`: merged positions, normals, colours,
 // and triangle indices of its kept chunks, with their bounds; per vertex its
 // chunk's four layer textures (`textureIndex(name)`, -1 for none) and its

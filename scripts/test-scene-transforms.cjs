@@ -249,6 +249,13 @@ test('crops terrain to the play area and spots placeholder tiles', async () => {
   // Between the two floors' boxes.
   assert.ok(!chunkInArea([150 + CHUNK_SIZE / 2, 0], area));
   assert.ok(chunkInArea([250, 0], area));
+  // Props: a point inside one of the boxes.
+  const { pointInArea } = await load('terrain.mjs');
+  assert.ok(pointInArea([105, 0, 9], area));
+  assert.ok(pointInArea([250, 15, 0], area));
+  assert.ok(!pointInArea([150, 0, 0], area));
+  assert.ok(!pointInArea([250, 25, 0], area));
+  assert.ok(!pointInArea([0, 0, 0], []));
   assert.ok(chunkInArea([999, 999], null));
   const chunk = (z, heights, layers = []) => ({ position: [0, 0, z], vertexHeights: heights, layers });
   assert.ok(isPlaceholderArea({ chunks: [chunk(0, [0, 0]), chunk(0, [0, 0])] }));
@@ -457,4 +464,16 @@ test('reads MH2O layers: their part of the chunk, exists mask, and flat depth-on
   mh2o.writeUInt16LE(2, layer + 2);
   const flat = adtLiquidSurfaces(Buffer.concat([chunk('MH2O', mh2o), mcnkWithLiquid({ position: [100, 200, 0], ground: 0 })])).get(5);
   assert.ok([...flat.positions].filter((_, index) => index % 3 === 2).every((z) => z === 7));
+});
+
+test('takes the box the buildings in the play area fill', async () => {
+  const { buildingReach } = await load('export-scene.mjs');
+  const group = (x, minZ, maxZ) => ({ minX: x, maxX: x + 10, minY: 0, maxY: 10, minZ, maxZ });
+  const groups = [group(0, -5, 20), group(50, 0, 40), group(500, -100, 300)];
+  // The far group (a distant tower) is outside the area.
+  assert.deepEqual(buildingReach(groups, [{ minX: -10, maxX: 100, minY: -10, maxY: 20 }]),
+    { minX: 0, maxX: 60, minY: 0, maxY: 10, minZ: -5, maxZ: 40 });
+  assert.deepEqual(buildingReach(groups, []), { minX: 0, maxX: 510, minY: 0, maxY: 10, minZ: -100, maxZ: 300 });
+  assert.equal(buildingReach([], []), null);
+  assert.equal(buildingReach(groups, [{ minX: 1000, maxX: 1100, minY: 0, maxY: 10 }]), null);
 });

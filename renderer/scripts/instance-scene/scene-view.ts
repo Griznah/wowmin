@@ -83,6 +83,8 @@ const HEAD_HEIGHT = 0.9;
 // dithered with a 4x4 ordered pattern rather than alpha-blended, so solid
 // walls keep writing depth and need no back-to-front sorting. Positions are in
 // server coordinates; three.js is Y-up, so server (x, y, z) is (x, -z, y) here.
+// The reach uniforms' values when there is none (floats, so not Infinity).
+const NO_REACH = 1e9;
 const FADE_VERTEX_DECLARATIONS = 'varying vec3 vWowPosition;\n';
 const FADE_VERTEX = `
 vec4 wowWorld = modelMatrix * vec4(transformed, 1.0);
@@ -95,6 +97,8 @@ uniform vec3 wowVolumeMax[WOW_MAX_VOLUMES];
 uniform int wowVolumeCount;
 uniform float wowHeightRange;
 uniform float wowHorizontalRange;
+uniform vec3 wowReachMin;
+uniform vec3 wowReachMax;
 varying vec3 vWowPosition;
 float wowBayer4(vec2 position) {
   const float pattern[16] = float[16](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
@@ -110,6 +114,7 @@ float wowVolumeFade(int index) {
 }
 `;
 const FADE_FRAGMENT = `
+if (any(lessThan(vWowPosition, wowReachMin)) || any(greaterThan(vWowPosition, wowReachMax))) discard;
 float wowFade = wowVolumeCount == 0 ? 1.0 : 0.0;
 for (int index = 0; index < WOW_MAX_VOLUMES; index++) {
   if (index >= wowVolumeCount) break;
@@ -164,6 +169,8 @@ export class InstanceSceneView {
     wowVolumeCount: { value: 0 },
     wowHeightRange: { value: 1 },
     wowHorizontalRange: { value: 0 },
+    wowReachMin: { value: new Vector3(-NO_REACH, -NO_REACH, -NO_REACH) },
+    wowReachMax: { value: new Vector3(NO_REACH, NO_REACH, NO_REACH) },
   };
   private readonly loader = new GLTFLoader();
   private readonly roots = new Map<string, Object3D>();
@@ -352,7 +359,7 @@ export class InstanceSceneView {
       url, width, height, view.pixelsPerUnit.toFixed(4),
       ...view.center.map((value) => value.toFixed(3)),
       ...view.basis.toCamera.map((value) => value.toFixed(5)),
-      fade.height, fade.horizontal ?? 0,
+      fade.height, fade.horizontal ?? 0, ...(fade.reach ? [fade.reach.minX, fade.reach.maxX, fade.reach.minY, fade.reach.maxY, fade.reach.minZ, fade.reach.maxZ] : ['none']),
       ...active.flatMap((volume) => [volume.minX, volume.maxX, volume.minY, volume.maxY, volume.minZ, volume.maxZ]
         .map((value) => Math.round(value))),
     ].join('|');
@@ -377,12 +384,19 @@ export class InstanceSceneView {
     this.fadeUniforms.wowVolumeCount.value = active.length;
     this.fadeUniforms.wowHeightRange.value = fade.height;
     this.fadeUniforms.wowHorizontalRange.value = fade.horizontal ?? 0;
+    const reachBox = fade.reach ?? {
+      minX: -NO_REACH, maxX: NO_REACH, minY: -NO_REACH, maxY: NO_REACH, minZ: -NO_REACH, maxZ: NO_REACH,
+    };
+    this.fadeUniforms.wowReachMin.value.set(reachBox.minX, reachBox.minY, reachBox.minZ);
+    this.fadeUniforms.wowReachMax.value.set(reachBox.maxX, reachBox.maxY, reachBox.maxZ);
     const reach = fade.horizontal ?? Infinity;
     for (const bounds of this.meshBounds.get(root) ?? []) {
-      bounds.mesh.visible = !active.length || active.some((volume) =>
+      bounds.mesh.visible = bounds.minZ <= reachBox.maxZ && bounds.maxZ >= reachBox.minZ
+        && bounds.minX <= reachBox.maxX && bounds.maxX >= reachBox.minX
+        && bounds.minY <= reachBox.maxY && bounds.maxY >= reachBox.minY && (!active.length || active.some((volume) =>
         bounds.maxZ > volume.minZ - fade.height && bounds.minZ < volume.maxZ + fade.height
         && bounds.maxX > volume.minX - reach && bounds.minX < volume.maxX + reach
-        && bounds.maxY > volume.minY - reach && bounds.minY < volume.maxY + reach);
+        && bounds.maxY > volume.minY - reach && bounds.minY < volume.maxY + reach));
     }
     this.renderer.setSize(width, height, false);
     applyIsoCamera(this.camera, view, width, height);

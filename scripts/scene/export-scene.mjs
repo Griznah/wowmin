@@ -1,6 +1,6 @@
 // Builds <mapId>.glb for one instance map: every placed WMO with its groups
-// and doodad set, doodads placed directly on ADT tiles, and the ADT terrain
-// of the area players use. Node transforms keep server world coordinates
+// and doodad set, and the doodads placed directly on ADT tiles and the ADT
+// terrain within the area players use. Node transforms keep server world coordinates
 // under a single Z-up to Y-up root, so the renderer can place telemetry
 // directly.
 
@@ -14,7 +14,7 @@ import { findChunk, readChunks } from './chunks.mjs';
 import { dedupeByUniqueId, readAdtPlacements, readWdt } from './placement.mjs';
 import { PNG } from 'pngjs';
 
-import { ATLAS_SIZE, buildTerrainTile, chunkInArea, playArea, WDT_FLAG_BIG_ALPHA } from './terrain.mjs';
+import { ATLAS_SIZE, buildTerrainTile, chunkInArea, playArea, pointInArea, WDT_FLAG_BIG_ALPHA } from './terrain.mjs';
 import { readDbc } from './dbc.mjs';
 import { adtLiquidSurfaces, firstTileType, liquidSurface, liquidTypeInfo, mapLiquidColours, wmoLiquidType } from './liquids.mjs';
 import { encodeTexture } from './textures.mjs';
@@ -63,6 +63,21 @@ export function transformBoundingBox([minX, minY, minZ, maxX, maxY, maxZ], { pos
     }
   }
   return bounds;
+}
+
+// The box the buildings in the play area (`area`, a list of boxes; empty
+// for all of them) take up: players don't get beyond the outermost
+// buildings, above the tallest roof, or below the lowest foundation, so the
+// viewer leaves out what lies beyond (the mountains around a battleground and
+// the flat ground past them). Null without buildings.
+export function buildingReach(groups, area) {
+  const inArea = (group) => !area.length || area.some((box) =>
+    group.minX <= box.maxX && group.maxX >= box.minX && group.minY <= box.maxY && group.maxY >= box.minY);
+  const kept = groups.filter(inArea);
+  if (!kept.length) return null;
+  const low = (key) => Math.min(...kept.map((group) => group[key]));
+  const high = (key) => Math.max(...kept.map((group) => group[key]));
+  return { minX: low('minX'), maxX: high('maxX'), minY: low('minY'), maxY: high('maxY'), minZ: low('minZ'), maxZ: high('maxZ') };
 }
 
 // A floor's height range is the union of its WMO groups' ranges. Groups shared
@@ -369,7 +384,14 @@ export async function exportMapScene({
     }
   }
 
-  for (const placement of doodadPlacements) {
+  // The area players use: each dungeon map floor, the world map bounds, or
+  // the buildings' area (see playArea). Loose props and the ground are
+  // cropped to it; with nothing to go by, props are all kept.
+  const area = wdt.wmoOnly ? [] : playArea(floors, worldMapBounds, undefined, groups);
+  const looseDoodads = area.length
+    ? doodadPlacements.filter((placement) => pointInArea(placement.position, area))
+    : doodadPlacements;
+  for (const placement of looseDoodads) {
     const mesh = builder.m2Mesh(placement.name);
     if (!mesh) continue;
     root.addChild(document.createNode(`doodad-${placement.uniqueId}`)
@@ -384,7 +406,6 @@ export async function exportMapScene({
   // Terrain, cropped to the area players use (placeholder tiles are skipped).
   // A map with no floors, world map bounds, or buildings to go by gets none.
   const terrain = { tiles: 0, chunks: 0, bounds: null };
-  const area = wdt.wmoOnly ? [] : playArea(floors, worldMapBounds, undefined, groups);
   if (area.length) {
     const bigAlpha = Boolean(findChunk(readChunks(wdtBuffer), 'MPHD').readUInt32LE(0) & WDT_FLAG_BIG_ALPHA);
     const buffer = document.getRoot().listBuffers()[0] ?? document.createBuffer();
@@ -473,7 +494,7 @@ export async function exportMapScene({
   fs.writeFileSync(path.join(outputDir, file), glb);
 
   // Scenes with only loose doodads have no group bounds; pad their positions.
-  const boundsSources = groups.length ? groups : doodadPlacements.map(({ position: [x, y, z] }) => ({
+  const boundsSources = groups.length ? groups : looseDoodads.map(({ position: [x, y, z] }) => ({
     minX: x - 50, maxX: x + 50, minY: y - 50, maxY: y + 50, minZ: z - 50, maxZ: z + 50,
   }));
   const bounds = boundsSources.reduce((total, group) => ({
@@ -488,6 +509,7 @@ export async function exportMapScene({
       bounds,
       groups: groups.map(({ wmoGroupId, exterior, minZ, maxZ }) => ({ wmoGroupId, exterior, minZ, maxZ })),
       floors: computeFloorHeights(floors, groups),
+      buildingReach: buildingReach(groups, area),
       ...(terrain.tiles ? { terrain: { tiles: terrain.tiles, chunks: terrain.chunks, bounds: terrain.bounds } } : {}),
     },
     stats: {

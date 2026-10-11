@@ -6474,6 +6474,7 @@ const $instanceView3dBtn = $<HTMLButtonElement>('instance-view-3d-btn');
 const $instanceFadeRange = $<HTMLInputElement>('instance-fade-range');
 const $instanceFadeRangeValue = $<HTMLOutputElement>('instance-fade-range-value');
 const $instanceHorizontalFade = $<HTMLInputElement>('instance-horizontal-fade');
+const $instanceFadesBtn = $<HTMLButtonElement>('instance-fades-btn');
 const $instanceHorizontalFadeValue = $<HTMLOutputElement>('instance-horizontal-fade-value');
 const $instanceFollowBtn = $<HTMLButtonElement>('instance-follow-btn');
 const $instancePathsBtn = $<HTMLButtonElement>('instance-paths-btn');
@@ -6521,7 +6522,14 @@ interface InstanceSceneMetadata {
   bounds: SceneBox;
   groups: Array<{ wmoGroupId: number; exterior: boolean; minZ: number; maxZ: number }>;
   floors: Array<{ id: number; minZ: number; maxZ: number }>;
+  // The box the buildings in the play area fill; absent in older scenes.
+  buildingReach?: SceneBox | null;
 }
+
+// The scene is cut off this far beyond the outermost buildings, above the
+// tallest roof, and below the lowest foundation in the play area: players
+// don't get beyond.
+const INSTANCE_REACH_PADDING = 20;
 
 interface LoadedInstanceMapAsset {
   metadata: InstanceMapAssetMetadata;
@@ -6627,6 +6635,10 @@ const INSTANCE_HORIZONTAL_FADE_STORAGE_KEY = 'wowmin.instanceHorizontalFade';
 const INSTANCE_HORIZONTAL_FADE_DEFAULT = 40;
 const INSTANCE_HORIZONTAL_FADE_MAX = 200;
 let instanceHorizontalFade = readStoredInstanceHorizontalFade();
+// Both fades on or off; off shows and frames the whole map (battlegrounds,
+// outdoor areas).
+const INSTANCE_FADES_STORAGE_KEY = 'wowmin.instanceFades';
+let instanceFades = readStoredInstanceFades();
 const INSTANCE_ROTATE_DURATION_MS = 220;
 const instanceViewYaws = new Map<string, number>();
 const instanceViewPitches = new Map<string, number>();
@@ -6902,6 +6914,27 @@ function readStoredInstanceModels(): boolean {
   } catch {
     return true;
   }
+}
+
+function readStoredInstanceFades(): boolean {
+  try {
+    return window.localStorage.getItem(INSTANCE_FADES_STORAGE_KEY) !== 'false';
+  } catch {
+    return true;
+  }
+}
+
+function setInstanceFades(enabled: boolean, render = true): void {
+  instanceFades = enabled;
+  $instanceFadesBtn?.setAttribute('aria-pressed', String(enabled));
+  if ($instanceFadeRange) $instanceFadeRange.disabled = !enabled;
+  if ($instanceHorizontalFade) $instanceHorizontalFade.disabled = !enabled;
+  try {
+    window.localStorage.setItem(INSTANCE_FADES_STORAGE_KEY, String(enabled));
+  } catch {
+    // Preference is per-session only when storage is unavailable.
+  }
+  if (render) renderInstanceCanvas();
 }
 
 function readStoredInstanceNumbers(): boolean {
@@ -7370,8 +7403,15 @@ function renderInstanceScene(
   const floorPlayers = floor
     ? session.players.filter((player) => getParticipantDungeonFloor(player, asset.metadata.floors ?? [])?.id === floor.id)
     : session.players;
-  const fade: FadeSettings = { height: instanceFadeRange, horizontal: instanceHorizontalFade || null };
-  const volumes = getFadeVolumes([
+  const buildings = scene.buildingReach;
+  const pad = INSTANCE_REACH_PADDING;
+  const reach: SceneBox | null = buildings ? {
+    minX: buildings.minX - pad, maxX: buildings.maxX + pad, minY: buildings.minY - pad, maxY: buildings.maxY + pad,
+    minZ: buildings.minZ - pad, maxZ: buildings.maxZ + pad,
+  } : null;
+  const fade: FadeSettings = { height: instanceFadeRange, horizontal: instanceHorizontalFade || null, reach };
+  // With the fades off nothing fades (no volumes) and the whole map is framed.
+  const volumes = !instanceFades ? [] : getFadeVolumes([
     ...floorPlayers.map((player): Point3 => [player.position_x, player.position_y, player.position_z]),
     ...landmarks,
   ], fade);
@@ -7383,7 +7423,7 @@ function renderInstanceScene(
   // bubble instead. The framing is captured, not live: it is taken on the
   // first view, on Fit view, and when the party changes floor, so the view
   // does not drift as the party moves (Follow handles tracking).
-  if (fade.horizontal && floorPlayers.length) {
+  if (instanceFades && fade.horizontal && floorPlayers.length) {
     const floorId = floor?.id ?? null;
     let framed = instanceSceneFrames.get(session.key);
     if (!framed || framed.floorId !== floorId) {
@@ -7403,9 +7443,17 @@ function renderInstanceScene(
     fitBox = framed.box;
   }
   // Frame only the heights that can still be seen.
-  const minZ = band ? Math.max(fitBox.minZ, band.minZ - instanceFadeRange) : fitBox.minZ;
-  const maxZ = band ? Math.min(fitBox.maxZ, band.maxZ + instanceFadeRange) : fitBox.maxZ;
-  const box: SceneBox = { ...fitBox, minZ: Math.min(minZ, maxZ - 1), maxZ };
+  const minZ = Math.max(band && instanceFades ? Math.max(fitBox.minZ, band.minZ - instanceFadeRange) : fitBox.minZ, reach?.minZ ?? -Infinity);
+  const maxZ = Math.min(band && instanceFades ? Math.min(fitBox.maxZ, band.maxZ + instanceFadeRange) : fitBox.maxZ, reach?.maxZ ?? Infinity);
+  // Nor beyond the reach of the buildings.
+  const clampAxis = (low: number, high: number, reachLow?: number, reachHigh?: number): [number, number] => {
+    const from = Math.max(low, reachLow ?? -Infinity);
+    const to = Math.min(high, reachHigh ?? Infinity);
+    return from < to ? [from, to] : [low, high];
+  };
+  const [minX, maxX] = clampAxis(fitBox.minX, fitBox.maxX, reach?.minX, reach?.maxX);
+  const [minY, maxY] = clampAxis(fitBox.minY, fitBox.maxY, reach?.minY, reach?.maxY);
+  const box: SceneBox = { minX, maxX, minY, maxY, minZ: Math.min(minZ, maxZ - 1), maxZ };
   const view = createIsoView(box, width, height, getInstanceViewYaw(), getInstanceViewPitch(), getInstanceViewTransform());
   if (!sceneView.render(url, view, width, height, volumes, fade)) return null;
   instanceIsoContext = { box, width, height, view };
@@ -8802,6 +8850,8 @@ setInstanceFadeRange(instanceFadeRange, false);
 $instanceFadeRange?.addEventListener('input', () => setInstanceFadeRange(Number($instanceFadeRange.value)));
 setInstanceHorizontalFade(instanceHorizontalFade, false);
 $instanceHorizontalFade?.addEventListener('input', () => setInstanceHorizontalFade(Number($instanceHorizontalFade.value)));
+setInstanceFades(instanceFades, false);
+$instanceFadesBtn?.addEventListener('click', () => setInstanceFades(!instanceFades));
 $instanceAutoRefresh?.addEventListener('change', () => {
   if ($instanceAutoRefresh.checked) {
     void refreshInstanceWatcher();

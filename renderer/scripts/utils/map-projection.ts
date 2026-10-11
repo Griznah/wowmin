@@ -201,6 +201,11 @@ export interface FadeSettings {
   // Horizontal reach in yards: solid out to half of it, gone at all of it.
   // Null turns the horizontal fade off.
   horizontal: number | null;
+  // Nothing in the scene outside this box (server coordinates) is drawn,
+  // whether fading or not: it cuts away what players can't reach, such as
+  // the mountains around a battleground and the flat ground beyond them.
+  // Null or absent for none.
+  reach?: SceneBox | null;
 }
 
 // The scene shader holds this many volumes.
