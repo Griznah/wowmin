@@ -1,4 +1,4 @@
-import type { MapBattlegroundState, MapPlayerPosition } from '../../../src/types/electron';
+import type { MapBattlegroundState, MapPlayerPosition } from '../../../src/types/api';
 import { getMapName } from './helpers';
 
 export interface ActiveInstanceSession {

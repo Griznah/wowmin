@@ -1,10 +1,11 @@
-import './main';
+import { APP_VERSION, initializeApiBackend } from './api-backend';
+import { apiRouter } from './api-router';
 import { createHash, timingSafeEqual } from 'crypto';
 import * as fs from 'fs';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import * as path from 'path';
-import { app, ipcMain } from 'electron';
 import { inspectLocalLogs, readLocalLogTail } from './local-logs';
+import { buildContentSecurityPolicy, deriveDungeonClearUrl, normalizeDungeonClearUrl } from './dungeon-clear-config';
 
 const host = process.env.WOWMIN_HOST || '127.0.0.1';
 const port = Number(process.env.WOWMIN_PORT || '3000');
@@ -13,6 +14,7 @@ const password = process.env.WOWMIN_PASSWORD || '';
 const projectRoot = path.resolve(__dirname, '..');
 const maxRequestBytes = 2 * 1024 * 1024;
 const managed = Boolean(process.env.WOWMIN_SOAP_USERNAME && process.env.WOWMIN_SOAP_PASSWORD && process.env.WOWMIN_DB_PASSWORD);
+const configuredDungeonClearUrl = normalizeDungeonClearUrl(process.env.WOWMIN_DUNGEON_CLEAR_URL);
 
 function managedConfig(channel: string, args: unknown[]): unknown[] {
   if (!managed) return args;
@@ -57,7 +59,18 @@ const mimeTypes: Record<string, string> = {
   '.txt': 'text/plain; charset=utf-8',
 };
 
-function setSecurityHeaders(response: ServerResponse): void {
+function requestScheme(request: IncomingMessage): 'http' | 'https' {
+  const forwarded = request.headers['x-forwarded-proto'];
+  const value = Array.isArray(forwarded) ? forwarded[0] : forwarded?.split(',')[0];
+  return value?.trim().toLowerCase() === 'https' ? 'https' : 'http';
+}
+
+function dungeonClearUrl(request: IncomingMessage): string {
+  return configuredDungeonClearUrl || deriveDungeonClearUrl(requestScheme(request), request.headers.host);
+}
+
+function setSecurityHeaders(request: IncomingMessage, response: ServerResponse): void {
+  response.setHeader('Content-Security-Policy', buildContentSecurityPolicy(dungeonClearUrl(request)));
   response.setHeader('X-Content-Type-Options', 'nosniff');
   response.setHeader('X-Frame-Options', 'DENY');
   response.setHeader('Referrer-Policy', 'same-origin');
@@ -146,11 +159,11 @@ function hasValidOrigin(request: IncomingMessage): boolean {
 }
 
 const server = createServer(async (request, response) => {
-  setSecurityHeaders(response);
+  setSecurityHeaders(request, response);
   const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
 
   if (url.pathname === '/healthz') {
-    sendJson(response, 200, { status: 'ok', version: app.getVersion() });
+    sendJson(response, 200, { status: 'ok', version: APP_VERSION });
     return;
   }
 
@@ -161,7 +174,7 @@ const server = createServer(async (request, response) => {
   }
 
   if (url.pathname === '/api/bootstrap') {
-    sendJson(response, 200, { managed, localLogs: managed });
+    sendJson(response, 200, { managed, localLogs: managed, dungeonClearUrl: dungeonClearUrl(request) });
     return;
   }
 
@@ -185,8 +198,8 @@ const server = createServer(async (request, response) => {
         sendJson(response, 400, { error: 'Expected channel and args.' });
         return;
       }
-      if (managed && (body.channel.startsWith('config:') || body.channel.startsWith('update:'))) {
-        sendJson(response, 403, { error: 'Profiles and upstream updates are disabled in managed web mode.' });
+      if (managed && body.channel.startsWith('config:')) {
+        sendJson(response, 403, { error: 'Profiles are disabled in managed web mode.' });
         return;
       }
       if (managed && body.channel === 'logs:inspect') {
@@ -197,8 +210,7 @@ const server = createServer(async (request, response) => {
         sendJson(response, 200, { ok: true, result: await readLocalLogTail(String(body.args[1]), Number(body.args[2])) });
         return;
       }
-      const webIpc = ipcMain as unknown as { invoke: (channel: string, args: unknown[]) => Promise<unknown> };
-      const result = await webIpc.invoke(body.channel, managedConfig(body.channel, body.args));
+      const result = await apiRouter.invoke(body.channel, managedConfig(body.channel, body.args));
       sendJson(response, 200, { ok: true, result });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -228,10 +240,9 @@ const server = createServer(async (request, response) => {
   serveFile(request, response, filePath);
 });
 
-app.whenReady().then(() => {
-  server.listen(port, host, () => {
-    console.log(`WoW Admin web service listening on http://${host}:${port}`);
-  });
+initializeApiBackend(process.env.WOWMIN_DATA_DIR || path.join(process.cwd(), '.wowmin-data'));
+server.listen(port, host, () => {
+  console.log(`WoW Admin web service listening on http://${host}:${port}`);
 });
 
 function shutdown(): void {

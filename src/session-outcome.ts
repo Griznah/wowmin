@@ -1,4 +1,4 @@
-import type { SessionBattlegroundOutcome } from './types/electron';
+import type { SessionBattlegroundOutcome } from './types/api';
 
 const PVP_TEAM_HORDE = 0;
 const PVP_TEAM_ALLIANCE = 1;

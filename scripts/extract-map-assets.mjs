@@ -15,6 +15,14 @@ import { PNG } from 'pngjs';
 const require = createRequire(import.meta.url);
 const { MpqArchive } = require('stormlib-js');
 
+const CLIENT_MAP_DIRECTORY_ALIASES = new Map([
+  [389, ['Ragefire']],
+]);
+
+export function getClientMapDirectoryAliases(mapId) {
+  return CLIENT_MAP_DIRECTORY_ALIASES.get(mapId) ?? [];
+}
+
 const CONTINENTS = [
   {
     mapId: 0,
@@ -750,6 +758,13 @@ function tryExtractMinimapsWithStormlib(
         const missing = requestedMapIds.filter((mapId) => !resolvedIds.has(mapId));
         if (missing.length > 0) throw new Error(`Map ID(s) not found in Map.dbc: ${missing.join(', ')}`);
       }
+    }
+
+    if (!mapDirOverride) {
+      targets = targets.map((target) => ({
+        ...target,
+        candidates: [...new Set([...getClientMapDirectoryAliases(target.mapId), ...target.candidates])],
+      }));
     }
 
     if (worldMapAreaDbcBuffer) {

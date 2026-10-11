@@ -1,8 +1,8 @@
-import { ElectronAPI } from '../../../src/preload';
+import type { WowminAPI } from './wowmin-api';
 
 declare global {
   interface Window {
-    electronAPI: ElectronAPI;
+    wowminAPI: WowminAPI;
   }
 }
 
