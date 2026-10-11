@@ -1,6 +1,6 @@
 import { Client, type ConnectConfig, type SFTPWrapper } from 'ssh2';
 import * as path from 'path';
-import { LogMonitorConfig, LogMonitorInspectionResult, LogMonitorAppenderInfo, LogMonitorFileInfo, LogMonitorFileTailResult, LogMonitorLoggerInfo } from './types/electron';
+import { LogMonitorConfig, LogMonitorInspectionResult, LogMonitorAppenderInfo, LogMonitorFileInfo, LogMonitorFileTailResult, LogMonitorLoggerInfo } from './types/api';
 
 const LOG_LEVEL_LABELS: Record<number, string> = {
   0: 'Disabled',

@@ -4,6 +4,12 @@ const { pathToFileURL } = require('node:url');
 const path = require('node:path');
 const extractor = import(pathToFileURL(path.join(__dirname, 'extract-map-assets.mjs')).href);
 
+test('resolves client artwork aliases missing from WorldMapArea', async () => {
+  const { getClientMapDirectoryAliases } = await extractor;
+  assert.deepEqual(getClientMapDirectoryAliases(389), ['Ragefire']);
+  assert.deepEqual(getClientMapDirectoryAliases(33), []);
+});
+
 test('lettered locale patches override numbered patches in order', async () => {
   const { archivePriority } = await extractor;
   const names = ['patch-enUS-N.MPQ', 'patch-3.MPQ', 'locale-enUS.MPQ', 'patch-enUS-M.MPQ'];

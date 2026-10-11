@@ -8,7 +8,7 @@ import { calculateSessionTotalsAt, formatSessionReplayTime, isSessionRouteDiscon
 import { getClassIconHtml, getClassIconImage, getPlayerStateIconsHtml, getPlayerStateIndicators, getRacePortraitHtml, getResponsivePlayerIconScale, getStateIconImage, loadPlayerIconManifest } from './utils/player-icons';
 import { formatBattlegroundOutcome } from '../../src/session-outcome';
 import { AppState, createInitialState, PlayerInfo } from './types/state';
-import type { ConnectionProfile, DbConfig, SoapConfig, UpdateCheckResult, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, MapBattlegroundState, MapInstanceDeath, MapInstanceState, MapPlayerPosition, MapBotWaypoint, CharacterInventoryResult, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow, SessionIndexEntry, SessionRecord, SessionRoutePoint } from '../../src/types/electron';
+import type { ConnectionProfile, DbConfig, SoapConfig, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, MapBattlegroundState, MapInstanceDeath, MapInstanceState, MapPlayerPosition, MapBotWaypoint, CharacterInventoryResult, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow, SessionIndexEntry, SessionRecord, SessionRoutePoint } from '../../src/types/api';
 import { bindInventoryTableTooltips, formatInventoryLocation, ITEM_QUALITY_COLOR } from './inventory/wow-item-tooltip';
 
 // ── Application State ────────────────────────────────────────────────────
@@ -91,13 +91,13 @@ const $output = $<HTMLElement>('output');
 const $form = $<HTMLFormElement>('command-form');
 const $cmdInput = $<HTMLInputElement>('command-input');
 const $btnSend = document.querySelector<HTMLButtonElement>('.btn-send');
-const $updateBanner = $<HTMLElement>('update-banner');
-const $appVersion = $<HTMLElement>('app-version');
-const $updateStatusText = $<HTMLElement>('update-status-text');
-const $btnCheckUpdates = $<HTMLButtonElement>('btn-check-updates');
-const $btnOpenUpdate = $<HTMLButtonElement>('btn-open-update');
-
-let latestReleaseUrl: string | null = null;
+const $dungeonClearFrame = $<HTMLIFrameElement>('dungeon-clear-frame');
+const $dungeonClearLoading = $<HTMLElement>('dungeon-clear-loading');
+const $dungeonClearStatus = $<HTMLElement>('dungeon-clear-status');
+const $dungeonClearReload = $<HTMLButtonElement>('dungeon-clear-reload');
+const $dungeonClearOpen = $<HTMLButtonElement>('dungeon-clear-open');
+let dungeonClearUrl: string | null = null;
+let dungeonClearInitialized = false;
 
 const DEFAULT_SOAP_PROFILE_CONFIG: SoapConfig = {
   host: '127.0.0.1',
@@ -339,7 +339,7 @@ function setConnected(connected: boolean): void {
 async function exec(cmd: string): Promise<{ success: boolean; message: string }> {
   if (!state.connected) return { success: false, message: 'Not connected.' };
   try {
-    return await window.electronAPI.soap.command(cmd);
+    return await window.wowminAPI.soap.command(cmd);
   } catch (e) {
     const errorMessage = e instanceof Error ? e.message : String(e);
     return { success: false, message: errorMessage };
@@ -358,29 +358,6 @@ function logActivity(cmd: string, msg: string, ok: boolean): void {
   // Keep max 100 entries
   while ($activityLog && $activityLog.children.length > 100) {
     $activityLog.lastChild?.remove();
-  }
-}
-
-function renderUpdateStatus(result: UpdateCheckResult): void {
-  latestReleaseUrl = result.releaseUrl;
-
-  if ($appVersion) {
-    $appVersion.textContent = `v${result.currentVersion}`;
-  }
-
-  if ($updateBanner) {
-    $updateBanner.dataset.status = result.status;
-  }
-
-  if ($updateStatusText) {
-    const latestLabel = result.latestVersion ? ` Latest: v${result.latestVersion}.` : '';
-    $updateStatusText.textContent = `${result.message}${latestLabel}`;
-    $updateStatusText.title = $updateStatusText.textContent;
-  }
-
-  if ($btnOpenUpdate) {
-    const showOpenButton = Boolean(result.releaseUrl) && (result.updateAvailable || result.status === 'error');
-    $btnOpenUpdate.classList.toggle('hidden', !showOpenButton);
   }
 }
 
@@ -578,43 +555,8 @@ function resetLogMonitorView(message = 'Scan a server to see readable log files.
   }
 }
 
-async function refreshUpdateStatus(force = false): Promise<void> {
-  if ($updateBanner) {
-    $updateBanner.dataset.status = 'checking';
-  }
-  if ($updateStatusText) {
-    $updateStatusText.textContent = 'Checking GitHub for updates…';
-  }
-  if ($btnCheckUpdates) {
-    $btnCheckUpdates.disabled = true;
-  }
-
-  try {
-    if ($appVersion && $appVersion.textContent === 'v--') {
-      const currentVersion = await window.electronAPI.app.getVersion();
-      $appVersion.textContent = `v${currentVersion}`;
-    }
-
-    const result = await window.electronAPI.update.check(force);
-    renderUpdateStatus(result);
-  } catch (error) {
-    if ($updateBanner) {
-      $updateBanner.dataset.status = 'error';
-    }
-    if ($updateStatusText) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      $updateStatusText.textContent = `Unable to check for updates right now: ${errorMessage}`;
-      $updateStatusText.title = $updateStatusText.textContent;
-    }
-  } finally {
-    if ($btnCheckUpdates) {
-      $btnCheckUpdates.disabled = false;
-    }
-  }
-}
-
 // ── Main tab navigation ─────────────────────────────────────────────────────
-const MAIN_TAB_ORDER = ['dashboard', 'players', 'accounts', 'tickets', 'database', 'map', 'instances', 'history', 'economy', 'logs', 'console'] as const;
+const MAIN_TAB_ORDER = ['dashboard', 'players', 'accounts', 'tickets', 'database', 'map', 'instances', 'dungeon-clear', 'history', 'economy', 'logs', 'console'] as const;
 type MainTabId = (typeof MAIN_TAB_ORDER)[number];
 
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -636,8 +578,30 @@ function getActiveMainTabId(): MainTabId {
   return 'dashboard';
 }
 
+async function initializeDungeonClear(): Promise<void> {
+  if (dungeonClearInitialized) return;
+  dungeonClearInitialized = true;
+  try {
+    const bootstrap = await window.wowminAPI.app.getBootstrap();
+    dungeonClearUrl = bootstrap.dungeonClearUrl;
+    if ($dungeonClearStatus) $dungeonClearStatus.textContent = `Loading ${dungeonClearUrl}`;
+    if ($dungeonClearFrame) {
+      $dungeonClearFrame.hidden = false;
+      $dungeonClearFrame.src = dungeonClearUrl;
+    }
+  } catch (error) {
+    dungeonClearInitialized = false;
+    const message = error instanceof Error ? error.message : String(error);
+    if ($dungeonClearStatus) $dungeonClearStatus.textContent = `Unable to load configuration: ${message}`;
+    if ($dungeonClearLoading) {
+      $dungeonClearLoading.innerHTML = `<strong>Dungeon Clear is unavailable</strong><span>${escapeHtml(message)}</span>`;
+    }
+  }
+}
+
 function onMainTabActivated(tabId: MainTabId): void {
   if (tabId === 'dashboard' && state.connected) void refreshDashboard();
+  if (tabId === 'dungeon-clear') void initializeDungeonClear();
   if (tabId === 'players' && (state.connected || state.mapDbConnected)) void refreshPlayers();
   if (tabId === 'economy' && economyState.connected) void refreshEconomyData();
   if (tabId === 'history') void refreshSessionHistory();
@@ -662,6 +626,7 @@ function onMainTabActivated(tabId: MainTabId): void {
 function activateMainTab(tabId: string, options?: { focusTab?: boolean }): void {
   if (!(MAIN_TAB_ORDER as readonly string[]).includes(tabId)) return;
   const typed = tabId as MainTabId;
+  document.body.classList.toggle('dungeon-clear-active', typed === 'dungeon-clear');
   const buttons = getMainTabBarButtons();
   const panels = $$<HTMLElement>('.tab-content');
 
@@ -696,6 +661,36 @@ getMainTabBarButtons().forEach((btn) => {
   });
 });
 
+$dungeonClearFrame?.addEventListener('load', () => {
+  if ($dungeonClearLoading) $dungeonClearLoading.hidden = true;
+  if ($dungeonClearStatus && dungeonClearUrl) $dungeonClearStatus.textContent = dungeonClearUrl;
+});
+
+$dungeonClearFrame?.addEventListener('error', () => {
+  if ($dungeonClearLoading) {
+    $dungeonClearLoading.hidden = false;
+    $dungeonClearLoading.innerHTML = '<strong>Unable to load DC Test Deck</strong><span>Check the configured URL and Test Deck allowed_frame_ancestors setting.</span>';
+  }
+  if ($dungeonClearStatus) $dungeonClearStatus.textContent = 'DC Test Deck failed to load.';
+});
+
+$dungeonClearReload?.addEventListener('click', () => {
+  if (!dungeonClearUrl || !$dungeonClearFrame) {
+    void initializeDungeonClear();
+    return;
+  }
+  const reloadUrl = new URL(dungeonClearUrl);
+  reloadUrl.searchParams.set('_wowminReload', String(Date.now()));
+  if ($dungeonClearLoading) $dungeonClearLoading.hidden = false;
+  if ($dungeonClearStatus) $dungeonClearStatus.textContent = `Reloading ${dungeonClearUrl}`;
+  $dungeonClearFrame.src = reloadUrl.toString();
+});
+
+$dungeonClearOpen?.addEventListener('click', () => {
+  if (dungeonClearUrl) void window.wowminAPI.app.openExternal(dungeonClearUrl);
+  else void initializeDungeonClear();
+});
+
 document.getElementById('tab-bar')?.addEventListener('keydown', (e) => {
   if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'Home' && e.key !== 'End') return;
   const idx = MAIN_TAB_ORDER.indexOf(getActiveMainTabId());
@@ -719,10 +714,6 @@ document.addEventListener('keydown', (e) => {
   activateMainTab(MAIN_TAB_ORDER[digit - 1], { focusTab: true });
 });
 
-window.electronAPI.app.onNavigateTab((tabId) => {
-  activateMainTab(tabId, { focusTab: true });
-});
-
 // ── Connection Handlers ────────────────────────────────────────────────────
 $btnConnect?.addEventListener('click', async () => {
   const config = {
@@ -743,7 +734,7 @@ $btnConnect?.addEventListener('click', async () => {
   }
   if ($btnConnect) $btnConnect.disabled = true;
 
-  const result = await window.electronAPI.soap.connect(config);
+  const result = await window.wowminAPI.soap.connect(config);
 
   if (result.success) {
     setConnected(true);
@@ -766,7 +757,7 @@ $btnConnect?.addEventListener('click', async () => {
 });
 
 $btnDisconnect?.addEventListener('click', async () => {
-  await window.electronAPI.soap.disconnect();
+  await window.wowminAPI.soap.disconnect();
   setConnected(false);
   stopDashboardAutoRefresh();
   stopPlayersAutoRefresh();
@@ -863,21 +854,6 @@ appendOutput(
     `</div>`
 );
 
-$btnCheckUpdates?.addEventListener('click', () => {
-  void refreshUpdateStatus(true);
-});
-
-$btnOpenUpdate?.addEventListener('click', async () => {
-  const result = await window.electronAPI.update.openReleasePage(latestReleaseUrl ?? undefined);
-  if (!result.success && $updateStatusText) {
-    $updateStatusText.textContent = result.message;
-    $updateStatusText.title = result.message;
-    $updateBanner?.setAttribute('data-status', 'error');
-  }
-});
-
-void refreshUpdateStatus();
-
 // ── Dashboard ──────────────────────────────────────────────────────────────
 function resetDashboard(): void {
   if ($dashServerInfo) $dashServerInfo.innerHTML = '<p class="placeholder">Connect to view server information</p>';
@@ -899,7 +875,7 @@ async function refreshDashboard(): Promise<void> {
     if ($uptimeValue) $uptimeValue.textContent = info.success ? getServerUptime(info.message) || '--' : '--';
 
     try {
-      const counts = await window.electronAPI.map.getOnlineCounts();
+      const counts = await window.wowminAPI.map.getOnlineCounts();
       if ($playersCount) $playersCount.textContent = String(counts.players);
       if ($botsCount) $botsCount.textContent = String(counts.bots);
       if ($totalCount) $totalCount.textContent = String(counts.total);
@@ -1215,7 +1191,7 @@ async function refreshPlayers(): Promise<void> {
   playersRefreshInFlight = true;
   try {
     try {
-      state.allPlayers = playersFromDatabase(await window.electronAPI.players.getOnline());
+      state.allPlayers = playersFromDatabase(await window.wowminAPI.players.getOnline());
     } catch (error) {
       if (!state.connected) throw error;
       const result = await exec('account onlinelist');
@@ -1224,7 +1200,7 @@ async function refreshPlayers(): Promise<void> {
     }
     if (state.connected) {
       try {
-        const liveSnapshot = await window.electronAPI.map.getPlayerPositions();
+        const liveSnapshot = await window.wowminAPI.map.getPlayerPositions();
         playersLiveStates = new Map(liveSnapshot.players.map((player) => [player.name, player]));
       } catch {
         playersLiveStates.clear();
@@ -1426,7 +1402,7 @@ async function openPlayerInventory(charName: string): Promise<void> {
   panel.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 
   try {
-    const r = await window.electronAPI.inventory.getCharacterInventory(charName);
+    const r = await window.wowminAPI.inventory.getCharacterInventory(charName);
     if (!r.success) {
       inventoryTooltipCleanup?.();
       inventoryTooltipCleanup = null;
@@ -1461,7 +1437,7 @@ $<HTMLElement>('wow-tooltip')?.addEventListener('click', (e) => {
   const a = (e.target as HTMLElement).closest<HTMLAnchorElement>('a[data-external-url]');
   if (!a?.dataset.externalUrl) return;
   e.preventDefault();
-  void window.electronAPI.app.openExternal(a.dataset.externalUrl);
+  void window.wowminAPI.app.openExternal(a.dataset.externalUrl);
 });
 
 // ── Event delegation for player table action buttons ───────────────────────
@@ -1650,7 +1626,7 @@ $('btn-online-accounts')?.addEventListener('click', async () => {
   try {
     let players: PlayerInfo[];
     try {
-      players = playersFromDatabase(await window.electronAPI.players.getOnline());
+      players = playersFromDatabase(await window.wowminAPI.players.getOnline());
     } catch (error) {
       if (!state.connected) throw error;
       const response = await exec('account onlinelist');
@@ -2159,8 +2135,8 @@ $('btn-ticket-toggle')?.addEventListener('click', async () => {
 // ── Profile Management ─────────────────────────────────────────────────────
 async function loadProfiles(): Promise<void> {
   try {
-    state.profiles = await window.electronAPI.config.getProfiles();
-    state.activeProfileId = await window.electronAPI.config.getActiveProfileId();
+    state.profiles = await window.wowminAPI.config.getProfiles();
+    state.activeProfileId = await window.wowminAPI.config.getActiveProfileId();
     renderProfiles();
   } catch (e) {
     console.error('Failed to load profiles:', e);
@@ -2208,7 +2184,7 @@ $profileSelect?.addEventListener('change', async () => {
   const profile = state.profiles.find((p) => p.id === id);
   if (profile) {
     loadProfileConfig(profile);
-    await window.electronAPI.config.setActiveProfile(id);
+    await window.wowminAPI.config.setActiveProfile(id);
     state.activeProfileId = id;
   }
 });
@@ -2222,7 +2198,7 @@ $btnSaveProfile?.addEventListener('click', async () => {
   
   if (!name || typeof name !== 'string' || !name.trim()) return;
   
-  const profile = await window.electronAPI.config.addProfile({
+  const profile = await window.wowminAPI.config.addProfile({
     name: name.trim(),
     type: 'soap',
     config: getCurrentSoapProfileConfig(),
@@ -2235,7 +2211,7 @@ $btnSaveProfile?.addEventListener('click', async () => {
   
   state.profiles.push(profile);
   state.activeProfileId = profile.id;
-  await window.electronAPI.config.setActiveProfile(profile.id);
+  await window.wowminAPI.config.setActiveProfile(profile.id);
   renderProfiles();
 });
 
@@ -2243,7 +2219,7 @@ $btnUpdateProfile?.addEventListener('click', async () => {
   const id = $profileSelect?.value;
   if (!id) return;
 
-  const updatedProfile = await window.electronAPI.config.updateProfile(id, {
+  const updatedProfile = await window.wowminAPI.config.updateProfile(id, {
     config: getCurrentSoapProfileConfig(),
     soapConfig: getCurrentSoapProfileConfig(),
     databaseConfig: getCurrentDatabaseProfileConfig(),
@@ -2256,7 +2232,7 @@ $btnUpdateProfile?.addEventListener('click', async () => {
 
   state.profiles = state.profiles.map((profile) => (profile.id === id ? updatedProfile : profile));
   state.activeProfileId = id;
-  await window.electronAPI.config.setActiveProfile(id);
+  await window.wowminAPI.config.setActiveProfile(id);
   renderProfiles();
 });
 
@@ -2271,7 +2247,7 @@ $btnDeleteProfile?.addEventListener('click', async () => {
   
   if (!confirmed) return;
   
-  await window.electronAPI.config.deleteProfile(id);
+  await window.wowminAPI.config.deleteProfile(id);
   state.profiles = state.profiles.filter((p) => p.id !== id);
   if (state.activeProfileId === id) {
     state.activeProfileId = null;
@@ -2539,7 +2515,7 @@ async function loadLogPreview(filePath: string, options: { silent?: boolean } = 
   if ($logRefreshPreviewBtn) $logRefreshPreviewBtn.disabled = true;
 
   try {
-    const result = await window.electronAPI.logs.readTail(config, filePath, 48 * 1024);
+    const result = await window.wowminAPI.logs.readTail(config, filePath, 48 * 1024);
     if (requestToken !== logMonitorState.previewRequestToken) {
       return;
     }
@@ -2581,7 +2557,7 @@ async function scanRemoteLogs(): Promise<void> {
   if ($logRefreshPreviewBtn) $logRefreshPreviewBtn.disabled = true;
   showResult($logStatus, false, 'Scanning remote worldserver.conf and log paths…');
 
-  const result = await window.electronAPI.logs.inspect(config);
+  const result = await window.wowminAPI.logs.inspect(config);
   logMonitorState.inspection = result;
   renderLogInspection(result);
   showResult($logStatus, result.success, result.message);
@@ -2800,7 +2776,7 @@ $dbConnectBtn?.addEventListener('click', async () => {
     $dbStatusText!.textContent = 'Connecting...';
     $dbStatusText!.className = 'text-status-accent';
     
-    const result = await window.electronAPI.db.connect(config);
+    const result = await window.wowminAPI.db.connect(config);
     
     if (result.connected) {
       dbState.connected = true;
@@ -2833,7 +2809,7 @@ $dbConnectBtn?.addEventListener('click', async () => {
 // Database disconnect
 $dbDisconnectBtn?.addEventListener('click', async () => {
   try {
-    await window.electronAPI.db.disconnect();
+    await window.wowminAPI.db.disconnect();
     dbState.connected = false;
     dbState.database = null;
     dbState.tables = [];
@@ -2862,7 +2838,7 @@ async function loadDatabaseTables(): Promise<void> {
   if (!dbState.connected) return;
   
   try {
-    const tables = await window.electronAPI.db.getTables();
+    const tables = await window.wowminAPI.db.getTables();
     dbState.tables = tables;
     renderTableList(tables);
   } catch (err) {
@@ -2907,7 +2883,7 @@ async function selectTable(tableName: string): Promise<void> {
   
   // Load table schema
   try {
-    const schema = await window.electronAPI.db.getSchema(tableName);
+    const schema = await window.wowminAPI.db.getSchema(tableName);
     dbState.tableSchema = schema.map(field => ({
       name: field.name,
       type: field.type,
@@ -2932,11 +2908,11 @@ async function loadTableData(): Promise<void> {
   const dataQuery = `SELECT * FROM \`${dbState.currentTable}\` LIMIT ${dbState.rowsPerPage} OFFSET ${offset}`;
   
   try {
-    const countResult = await window.electronAPI.db.query<{ count: number }>(countQuery);
+    const countResult = await window.wowminAPI.db.query<{ count: number }>(countQuery);
     dbState.totalRows = countResult.rows?.[0]?.count || 0;
     dbState.totalPages = Math.ceil(dbState.totalRows / dbState.rowsPerPage);
     
-    const dataResult = await window.electronAPI.db.query(dataQuery);
+    const dataResult = await window.wowminAPI.db.query(dataQuery);
     dbState.tableData = dataResult.rows || [];
     
     renderTableEditor();
@@ -3097,9 +3073,9 @@ async function executeSqlQuery(sql: string): Promise<void> {
     let result;
     
     if (isSelect) {
-      result = await window.electronAPI.db.query(sql);
+      result = await window.wowminAPI.db.query(sql);
     } else {
-      result = await window.electronAPI.db.execute(sql);
+      result = await window.wowminAPI.db.execute(sql);
     }
     
     const duration = Date.now() - startTime;
@@ -3701,7 +3677,7 @@ async function runSelectorSearch(term: string): Promise<void> {
         ? ', `minlevel`, `maxlevel`, `rank`'
         : ', `QuestLevel`, `MinLevel`';
 
-    const result = await window.electronAPI.db.query<Record<string, unknown>>(
+    const result = await window.wowminAPI.db.query<Record<string, unknown>>(
       `SELECT \`${config.primaryKey}\`, \`${config.nameField}\`${extraColumns} FROM \`${config.table}\` WHERE CAST(\`${config.primaryKey}\` AS CHAR) LIKE ? OR \`${config.nameField}\` LIKE ? ORDER BY \`${config.primaryKey}\` LIMIT 40`,
       [idLike, nameLike],
     );
@@ -3878,7 +3854,7 @@ function requestEntityMediaPreview(entityType: string, entity: Record<string, un
   dbState.entityMediaMessage = 'Fetching live reference media…';
   const token = ++dbState.entityMediaToken;
 
-  void window.electronAPI.app.getEntityMediaPreview({
+  void window.wowminAPI.app.getEntityMediaPreview({
     entityType,
     id: entityId,
     displayIds: getEntityMediaDisplayIds(entityType, entity),
@@ -4146,9 +4122,9 @@ async function loadEntityRelations(): Promise<void> {
   try {
     if (entityType === 'creature') {
       const [vendorRows, lootRows, saiRows] = await Promise.all([
-        window.electronAPI.db.query<Record<string, unknown>>("SELECT nv.item, it.name AS ItemName, it.Quality, nv.maxcount, nv.incrtime, nv.ExtendedCost, 'item' AS _loadEntityType, nv.item AS _loadEntityId FROM `npc_vendor` nv LEFT JOIN `item_template` it ON it.entry = nv.item WHERE nv.`entry` = ? ORDER BY nv.`item` LIMIT 25", [entityId]),
-        window.electronAPI.db.query<Record<string, unknown>>("SELECT clt.Item, it.name AS ItemName, it.Quality, clt.ChanceOrQuestChance, clt.GroupId, clt.MinCount, clt.MaxCount, clt.Reference, 'item' AS _loadEntityType, clt.Item AS _loadEntityId FROM `creature_loot_template` clt LEFT JOIN `item_template` it ON it.entry = clt.Item WHERE clt.`Entry` = ? ORDER BY clt.`GroupId`, clt.`Item` LIMIT 25", [entityId]),
-        window.electronAPI.db.query<Record<string, unknown>>('SELECT id, event_type, action_type, target_type, comment FROM `smart_scripts` WHERE `entryorguid` = ? ORDER BY `id` LIMIT 20', [entityId]),
+        window.wowminAPI.db.query<Record<string, unknown>>("SELECT nv.item, it.name AS ItemName, it.Quality, nv.maxcount, nv.incrtime, nv.ExtendedCost, 'item' AS _loadEntityType, nv.item AS _loadEntityId FROM `npc_vendor` nv LEFT JOIN `item_template` it ON it.entry = nv.item WHERE nv.`entry` = ? ORDER BY nv.`item` LIMIT 25", [entityId]),
+        window.wowminAPI.db.query<Record<string, unknown>>("SELECT clt.Item, it.name AS ItemName, it.Quality, clt.ChanceOrQuestChance, clt.GroupId, clt.MinCount, clt.MaxCount, clt.Reference, 'item' AS _loadEntityType, clt.Item AS _loadEntityId FROM `creature_loot_template` clt LEFT JOIN `item_template` it ON it.entry = clt.Item WHERE clt.`Entry` = ? ORDER BY clt.`GroupId`, clt.`Item` LIMIT 25", [entityId]),
+        window.wowminAPI.db.query<Record<string, unknown>>('SELECT id, event_type, action_type, target_type, comment FROM `smart_scripts` WHERE `entryorguid` = ? ORDER BY `id` LIMIT 20', [entityId]),
       ]);
 
       sections.push(
@@ -4158,9 +4134,9 @@ async function loadEntityRelations(): Promise<void> {
       );
     } else if (entityType === 'item') {
       const [vendorRows, lootRows, rewardRows] = await Promise.all([
-        window.electronAPI.db.query<Record<string, unknown>>("SELECT nv.entry, ct.name AS CreatureName, nv.maxcount, nv.incrtime, nv.ExtendedCost, 'creature' AS _loadEntityType, nv.entry AS _loadEntityId FROM `npc_vendor` nv LEFT JOIN `creature_template` ct ON ct.entry = nv.entry WHERE nv.`item` = ? ORDER BY nv.`entry` LIMIT 25", [entityId]),
-        window.electronAPI.db.query<Record<string, unknown>>("SELECT clt.`Entry`, ct.name AS CreatureName, clt.ChanceOrQuestChance, clt.GroupId, clt.MinCount, clt.MaxCount, clt.Reference, 'creature' AS _loadEntityType, clt.`Entry` AS _loadEntityId FROM `creature_loot_template` clt LEFT JOIN `creature_template` ct ON ct.entry = clt.`Entry` WHERE clt.`Item` = ? ORDER BY clt.`Entry` LIMIT 25", [entityId]),
-        window.electronAPI.db.query<Record<string, unknown>>("SELECT ID, LogTitle, QuestLevel, 'quest' AS _loadEntityType, ID AS _loadEntityId FROM `quest_template` WHERE RewardItem1 = ? OR RewardItem2 = ? OR RewardItem3 = ? OR RewardItem4 = ? OR RewardChoiceItemId1 = ? OR RewardChoiceItemId2 = ? OR RewardChoiceItemId3 = ? OR RewardChoiceItemId4 = ? OR RewardChoiceItemId5 = ? OR RewardChoiceItemId6 = ? LIMIT 25", [entityId, entityId, entityId, entityId, entityId, entityId, entityId, entityId, entityId, entityId]),
+        window.wowminAPI.db.query<Record<string, unknown>>("SELECT nv.entry, ct.name AS CreatureName, nv.maxcount, nv.incrtime, nv.ExtendedCost, 'creature' AS _loadEntityType, nv.entry AS _loadEntityId FROM `npc_vendor` nv LEFT JOIN `creature_template` ct ON ct.entry = nv.entry WHERE nv.`item` = ? ORDER BY nv.`entry` LIMIT 25", [entityId]),
+        window.wowminAPI.db.query<Record<string, unknown>>("SELECT clt.`Entry`, ct.name AS CreatureName, clt.ChanceOrQuestChance, clt.GroupId, clt.MinCount, clt.MaxCount, clt.Reference, 'creature' AS _loadEntityType, clt.`Entry` AS _loadEntityId FROM `creature_loot_template` clt LEFT JOIN `creature_template` ct ON ct.entry = clt.`Entry` WHERE clt.`Item` = ? ORDER BY clt.`Entry` LIMIT 25", [entityId]),
+        window.wowminAPI.db.query<Record<string, unknown>>("SELECT ID, LogTitle, QuestLevel, 'quest' AS _loadEntityType, ID AS _loadEntityId FROM `quest_template` WHERE RewardItem1 = ? OR RewardItem2 = ? OR RewardItem3 = ? OR RewardItem4 = ? OR RewardChoiceItemId1 = ? OR RewardChoiceItemId2 = ? OR RewardChoiceItemId3 = ? OR RewardChoiceItemId4 = ? OR RewardChoiceItemId5 = ? OR RewardChoiceItemId6 = ? LIMIT 25", [entityId, entityId, entityId, entityId, entityId, entityId, entityId, entityId, entityId, entityId]),
       ]);
 
       sections.push(
@@ -4170,8 +4146,8 @@ async function loadEntityRelations(): Promise<void> {
       );
     } else if (entityType === 'quest') {
       const [starterRows, enderRows] = await Promise.all([
-        window.electronAPI.db.query<Record<string, unknown>>("SELECT cqs.id, ct.name AS CreatureName, 'creature' AS _loadEntityType, cqs.id AS _loadEntityId FROM `creature_queststarter` cqs LEFT JOIN `creature_template` ct ON ct.entry = cqs.id WHERE cqs.`quest` = ? LIMIT 25", [entityId]),
-        window.electronAPI.db.query<Record<string, unknown>>("SELECT cqe.id, ct.name AS CreatureName, 'creature' AS _loadEntityType, cqe.id AS _loadEntityId FROM `creature_questender` cqe LEFT JOIN `creature_template` ct ON ct.entry = cqe.id WHERE cqe.`quest` = ? LIMIT 25", [entityId]),
+        window.wowminAPI.db.query<Record<string, unknown>>("SELECT cqs.id, ct.name AS CreatureName, 'creature' AS _loadEntityType, cqs.id AS _loadEntityId FROM `creature_queststarter` cqs LEFT JOIN `creature_template` ct ON ct.entry = cqs.id WHERE cqs.`quest` = ? LIMIT 25", [entityId]),
+        window.wowminAPI.db.query<Record<string, unknown>>("SELECT cqe.id, ct.name AS CreatureName, 'creature' AS _loadEntityType, cqe.id AS _loadEntityId FROM `creature_questender` cqe LEFT JOIN `creature_template` ct ON ct.entry = cqe.id WHERE cqe.`quest` = ? LIMIT 25", [entityId]),
       ]);
 
       sections.push(
@@ -4199,7 +4175,7 @@ $entityPreviewContent?.addEventListener('click', async (event) => {
 
   target.disabled = true;
   const originalLabel = target.textContent;
-  const result = await window.electronAPI.app.openExternal(url);
+  const result = await window.wowminAPI.app.openExternal(url);
   target.textContent = result.success ? 'Opened ✓' : 'Open failed';
   setTimeout(() => {
     target.textContent = originalLabel;
@@ -4285,7 +4261,7 @@ const debouncedEntitySearch = debounce(async () => {
   if (!config) return;
 
   try {
-    const result = await window.electronAPI.db.query(
+    const result = await window.wowminAPI.db.query(
       `SELECT \`${config.primaryKey}\`, \`${config.nameField}\` FROM \`${config.table}\` WHERE \`${config.nameField}\` LIKE ? ORDER BY \`${config.nameField}\` LIMIT 25`,
       [`%${term}%`]
     );
@@ -4388,7 +4364,7 @@ $entityApplySqlBtn?.addEventListener('click', async () => {
   if (!sql || sql.startsWith('--') || !dbState.connected) return;
   try {
     $entityApplySqlBtn!.disabled = true;
-    await window.electronAPI.db.execute(sql);
+    await window.wowminAPI.db.execute(sql);
     const orig = $entityApplySqlBtn!.textContent;
     $entityApplySqlBtn!.textContent = '✓ Applied!';
     setTimeout(() => {
@@ -4715,7 +4691,7 @@ function renderSAIEditor(entity: Record<string, unknown>, _config: { primaryKey:
   // Reload all rows
   document.getElementById('sai-load-all-btn')?.addEventListener('click', async () => {
     try {
-      const res = await window.electronAPI.db.query(
+      const res = await window.wowminAPI.db.query(
         `SELECT * FROM \`smart_scripts\` WHERE \`entryorguid\` = ? AND \`source_type\` = ? ORDER BY \`id\``,
         [entryorguid, sourceType]
       );
@@ -4802,12 +4778,12 @@ function wireSAIHandlers(tbody: HTMLElement, _rows: Record<string, unknown>[]): 
       const sampleRow = rows[0];
       const entryorguid = sampleRow?.['entryorguid'];
       const sourceType  = sampleRow?.['source_type'] ?? 0;
-      await window.electronAPI.db.execute(`DELETE FROM \`smart_scripts\` WHERE \`entryorguid\` = ? AND \`source_type\` = ?`, [entryorguid, sourceType]);
+      await window.wowminAPI.db.execute(`DELETE FROM \`smart_scripts\` WHERE \`entryorguid\` = ? AND \`source_type\` = ?`, [entryorguid, sourceType]);
 
       for (const r of rows) {
         const cols = Object.keys(r).map(k => `\`${k}\``).join(', ');
         const vals = Object.keys(r).map(() => '?').join(', ');
-        await window.electronAPI.db.execute(`INSERT INTO \`smart_scripts\` (${cols}) VALUES (${vals})`, Object.values(r));
+        await window.wowminAPI.db.execute(`INSERT INTO \`smart_scripts\` (${cols}) VALUES (${vals})`, Object.values(r));
       }
 
       saveBtn.textContent = '✓ Saved';
@@ -4832,7 +4808,7 @@ async function loadEntityById(): Promise<void> {
 
   dbState.entityIsNew = false;
   try {
-    const result = await window.electronAPI.db.query(`SELECT * FROM \`${cfg.table}\` WHERE \`${cfg.primaryKey}\` = ?`, [entityId]);
+    const result = await window.wowminAPI.db.query(`SELECT * FROM \`${cfg.table}\` WHERE \`${cfg.primaryKey}\` = ?`, [entityId]);
     if (result.rows && result.rows.length > 0) {
       renderEntityEditor(result.rows[0] as Record<string, unknown>, cfg);
       $entitySaveBtn!.disabled = false;
@@ -4890,7 +4866,7 @@ $entityNewBtn?.addEventListener('click', async () => {
   const cfg = ENTITY_TABLES[entityType];
   if (!cfg) return;
   try {
-    const schema = await window.electronAPI.db.getSchema(cfg.table);
+    const schema = await window.wowminAPI.db.getSchema(cfg.table);
     const emptyEntity: Record<string, unknown> = {};
     schema.forEach(f => { emptyEntity[f.name] = null; });
     dbState.entityIsNew = true;
@@ -4928,7 +4904,7 @@ $entitySaveBtn?.addEventListener('click', async () => {
       const setClauses = Object.keys(fields).filter(f => f !== cfg.primaryKey).map(f => `\`${f}\` = ?`).join(', ');
       const vals = Object.keys(fields).filter(f => f !== cfg.primaryKey).map(f => fields[f]);
       vals.push(entityId);
-      await window.electronAPI.db.execute(`UPDATE \`${cfg.table}\` SET ${setClauses} WHERE \`${cfg.primaryKey}\` = ?`, vals);
+      await window.wowminAPI.db.execute(`UPDATE \`${cfg.table}\` SET ${setClauses} WHERE \`${cfg.primaryKey}\` = ?`, vals);
       dbState.entityCurrentData = { ...fields, [cfg.primaryKey]: entityId };
       dbState.entityOriginalData = { ...fields, [cfg.primaryKey]: entityId };
       updateSQLPanel();
@@ -4944,7 +4920,7 @@ $entitySaveBtn?.addEventListener('click', async () => {
     } else {
       const cols = Object.keys(fields).map(f => `\`${f}\``).join(', ');
       const placeholders = Object.keys(fields).map(() => '?').join(', ');
-      const res = await window.electronAPI.db.execute(`INSERT INTO \`${cfg.table}\` (${cols}) VALUES (${placeholders})`, Object.values(fields));
+      const res = await window.wowminAPI.db.execute(`INSERT INTO \`${cfg.table}\` (${cols}) VALUES (${placeholders})`, Object.values(fields));
       if (res.insertId && $entityId) $entityId.value = String(res.insertId);
       if (res.insertId && !fields[cfg.primaryKey]) fields[cfg.primaryKey] = res.insertId;
       dbState.entityCurrentData = { ...fields };
@@ -4975,7 +4951,7 @@ $entityDeleteBtn?.addEventListener('click', async () => {
   const confirmed = await showModal({ title: 'Delete Entity', message: `Are you sure you want to delete this ${entityType} (ID: ${entityId})?` });
   if (!confirmed) return;
   try {
-    await window.electronAPI.db.execute(`DELETE FROM \`${cfg.table}\` WHERE \`${cfg.primaryKey}\` = ?`, [entityId]);
+    await window.wowminAPI.db.execute(`DELETE FROM \`${cfg.table}\` WHERE \`${cfg.primaryKey}\` = ?`, [entityId]);
     $entityEditorContent!.innerHTML = `<p class="text-app-success text-sm p-4">✓ Entity deleted successfully.</p>`;
     $entitySqlCode!.textContent = `DELETE FROM \`${cfg.table}\` WHERE \`${cfg.primaryKey}\` = ${entityId};`;
     $entitySaveBtn!.disabled = true;
@@ -5006,7 +4982,7 @@ document.getElementById('table-save-btn')?.addEventListener('click', async () =>
       const setClauses = Object.keys(row).filter(k => k !== pk).map(k => `\`${k}\` = ?`).join(', ');
       const values: unknown[] = Object.keys(row).filter(k => k !== pk).map(k => row[k]);
       values.push(pkVal);
-      await window.electronAPI.db.execute(`UPDATE \`${dbState.currentTable}\` SET ${setClauses} WHERE \`${pk}\` = ?`, values);
+      await window.wowminAPI.db.execute(`UPDATE \`${dbState.currentTable}\` SET ${setClauses} WHERE \`${pk}\` = ?`, values);
       saved++;
     }
     dbState.modifiedRows.clear();
@@ -5279,9 +5255,9 @@ async function refreshEconomyData(): Promise<void> {
 
   try {
     const [overview, marketSummary, auctions] = await Promise.all([
-      window.electronAPI.economy.getOverview(),
-      window.electronAPI.economy.getMarketSummary(searchTerm, limit),
-      window.electronAPI.economy.searchAuctions(searchTerm, limit),
+      window.wowminAPI.economy.getOverview(),
+      window.wowminAPI.economy.getMarketSummary(searchTerm, limit),
+      window.wowminAPI.economy.searchAuctions(searchTerm, limit),
     ]);
 
     renderEconomyOverview(overview);
@@ -5303,7 +5279,7 @@ async function connectEconomyDb(): Promise<void> {
   showResult($economyDbStatus, false, 'Connecting…');
 
   try {
-    const result = await window.electronAPI.economy.connect(config);
+    const result = await window.wowminAPI.economy.connect(config);
     if (!result.connected) {
       economyState.connected = false;
       showResult($economyDbStatus, false, result.error || 'Connection failed');
@@ -5330,7 +5306,7 @@ async function connectEconomyDb(): Promise<void> {
 async function disconnectEconomyDb(): Promise<void> {
   if (economyRefreshTimer) clearInterval(economyRefreshTimer);
   economyRefreshTimer = null;
-  await window.electronAPI.economy.disconnect();
+  await window.wowminAPI.economy.disconnect();
   economyState.connected = false;
   if ($economyDbDisconnectBtn) $economyDbDisconnectBtn.disabled = true;
   if ($economyDbConnectBtn) $economyDbConnectBtn.disabled = false;
@@ -5368,7 +5344,7 @@ $('economy-character-form')?.addEventListener('submit', async (event) => {
 
   showResult($economyCharacterResult, true, 'Loading character gold…');
   try {
-    const result = await window.electronAPI.economy.getCharacterGold(characterName);
+    const result = await window.wowminAPI.economy.getCharacterGold(characterName);
     renderEconomyCharacterResult(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -5504,7 +5480,7 @@ async function refreshSelectedBotWaypoint(): Promise<void> {
   renderMapSelectedPanel();
 
   try {
-    mapSelectedBotWaypoint = await window.electronAPI.map.getBotWaypoint({
+    mapSelectedBotWaypoint = await window.wowminAPI.map.getBotWaypoint({
       charName: player.name,
       map: player.map,
       position_x: player.position_x,
@@ -5774,7 +5750,7 @@ async function connectMapDb(): Promise<void> {
   if ($mapDbStatus) showResult($mapDbStatus, false, 'Connecting…');
   if ($mapDbConnectBtn) $mapDbConnectBtn.disabled = true;
 
-  const result = await window.electronAPI.map.connect({ host, port, username: user, password: pass, database: db });
+  const result = await window.wowminAPI.map.connect({ host, port, username: user, password: pass, database: db });
 
   if (result.connected) {
     state.mapDbConnected = true;
@@ -5790,7 +5766,7 @@ async function connectMapDb(): Promise<void> {
 }
 
 async function disconnectMapDb(): Promise<void> {
-  await window.electronAPI.map.disconnect();
+  await window.wowminAPI.map.disconnect();
   state.mapDbConnected = false;
   stopMapAutoRefresh();
   if ($mapAutoRefresh) $mapAutoRefresh.checked = false;
@@ -5815,7 +5791,7 @@ async function refreshMapPositions(): Promise<void> {
   try {
     try {
       const previousPlayers = new Map(mapAllPlayers.map((player) => [player.name, player]));
-      const snapshot = await window.electronAPI.map.getPlayerPositions(state.mapSelectedContinent);
+      const snapshot = await window.wowminAPI.map.getPlayerPositions(state.mapSelectedContinent);
       mapPreviousPositions = new Map();
       mapMovingPlayers = new Set();
       for (const player of snapshot.players) {
@@ -7097,7 +7073,7 @@ async function refreshInstanceWatcher(forceDiscovery = false): Promise<void> {
     let isDiscovery = forceDiscovery
       || !selectedFilter
       || Date.now() - instanceLastDiscoveryAt >= INSTANCE_DISCOVERY_INTERVAL_MS;
-    let snapshot = await window.electronAPI.map.getPlayerPositions(
+    let snapshot = await window.wowminAPI.map.getPlayerPositions(
       isDiscovery ? undefined : selectedFilter?.mapId,
       isDiscovery ? undefined : selectedFilter?.instanceId,
     );
@@ -7110,7 +7086,7 @@ async function refreshInstanceWatcher(forceDiscovery = false): Promise<void> {
           session.key === updatedSession.key ? updatedSession : session);
       } else {
         isDiscovery = true;
-        snapshot = await window.electronAPI.map.getPlayerPositions();
+        snapshot = await window.wowminAPI.map.getPlayerPositions();
       }
     }
 
@@ -7360,7 +7336,7 @@ function renderSessionHistoryList(): void {
 async function refreshSessionHistory(): Promise<void> {
   if ($sessionHistoryStatus) $sessionHistoryStatus.textContent = 'Loading persistent session index…';
   try {
-    sessionHistoryEntries = await window.electronAPI.sessions.list();
+    sessionHistoryEntries = await window.wowminAPI.sessions.list();
     if (selectedSessionRecordId && !sessionHistoryEntries.some((entry) => entry.id === selectedSessionRecordId)) {
       stopSessionReplay();
       selectedSessionRecordId = null;
@@ -7386,7 +7362,7 @@ async function selectSessionRecord(id: string): Promise<void> {
   renderSessionHistoryList();
   if ($sessionHistoryStatus) $sessionHistoryStatus.textContent = 'Loading session record…';
   try {
-    selectedSessionRecord = await window.electronAPI.sessions.get(id);
+    selectedSessionRecord = await window.wowminAPI.sessions.get(id);
     sessionReplayPositionMs = 0;
     if (selectedSessionRecord && !instanceMapAssets.has(selectedSessionRecord.mapId)) {
       void loadInstanceMapAsset(selectedSessionRecord.mapId);
@@ -7735,7 +7711,7 @@ $sessionHistoryPurgeBtn?.addEventListener('click', async () => {
 
   $sessionHistoryPurgeBtn.disabled = true;
   try {
-    const purged = await window.electronAPI.sessions.purgeCompleted();
+    const purged = await window.wowminAPI.sessions.purgeCompleted();
     stopSessionReplay();
     selectedSessionRecordId = null;
     selectedSessionRecord = null;

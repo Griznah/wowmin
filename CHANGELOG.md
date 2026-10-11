@@ -15,11 +15,17 @@ and session recording built on the separate `mod-wowmin-telemetry` module.
 
 ### Added
 
+- Added a full-workspace **Dungeon Clear** tab that directly embeds DC Test Deck through its origin-allowlisted iframe support, with reload and direct-open fallbacks.
+- Added cross-platform setup and troubleshooting instructions plus an environment sample for the independent Test Deck service.
 - Paused Session Replay now shows a compact, human-readable recorded-information card when hovering a bot marker; clicking the bot pins the card until another replay element is clicked.
 - Session History now persists and prominently displays battleground outcomes. Warsong Gulch records the final flag score, Eye of the Storm records final resource points, and other battlegrounds and arenas identify the winner; replay logs include a match-result event.
 - Added protocol v6 player gender and compact taxi, mounted, sap, stun, and Spirit of Redemption state telemetry, plus protocol v7 authoritative Warsong/Silverwing/Netherstorm flag-carrier state. Shared race/gender portraits, class icons, and prioritized state indicators appear across Players, Live Map, Instance Watch, and replay.
 - Added `npm run extract:icons` to extract client-owned portrait, class, and state BLP artwork into gitignored local PNG assets; generic emoji remain the zero-setup fallback.
 - Added synchronized, persisted icon-size controls to Live Map and Instance Watch. Canvas markers now scale progressively with zoom, participant-list icons are larger, and pre-v6 telemetry uses extracted male race portraits instead of emoji when gender is unavailable.
+
+### Changed
+
+- WoWMin is now a web-only Node.js service; Electron entrypoints, packaging, desktop update checks, and platform installers were removed.
 
 ### Fixed
 

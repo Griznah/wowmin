@@ -1,5 +1,3 @@
-import { IpcMainInvokeEvent } from 'electron';
-
 // ── Database Types ────────────────────────────────────────────────────────
 
 export interface DbConfig {
@@ -500,17 +498,6 @@ export interface LogMonitorFileTailResult {
   message: string;
 }
 
-export interface UpdateCheckResult {
-  currentVersion: string;
-  latestVersion: string | null;
-  releaseName: string | null;
-  releaseUrl: string | null;
-  publishedAt: string | null;
-  updateAvailable: boolean;
-  status: 'idle' | 'checking' | 'up-to-date' | 'update-available' | 'error';
-  message: string;
-}
-
 export interface EntityMediaPreviewRequest {
   entityType: string;
   id: string;
@@ -543,20 +530,17 @@ export interface ConnectionProfile {
   updatedAt: string;
 }
 
-// ── IPC Channel Types ──────────────────────────────────────────────────────
+// ── API Channel Types ──────────────────────────────────────────────────────
 
-export type IpcChannels = {
+export type ApiChannels = {
   // SOAP operations
   'soap:connect': (config: SoapConfig) => SoapResult;
   'soap:command': (command: string) => SoapResult;
   'soap:disconnect': () => SoapResult;
   'logs:inspect': (config: LogMonitorConfig) => LogMonitorInspectionResult;
   'logs:readTail': (config: LogMonitorConfig, remotePath: string, maxBytes?: number) => LogMonitorFileTailResult;
-  'app:getVersion': () => string;
   'app:openExternal': (url: string) => SoapResult;
   'app:getEntityMediaPreview': (request: EntityMediaPreviewRequest) => EntityMediaPreviewResult;
-  'update:check': (force?: boolean) => UpdateCheckResult;
-  'update:openReleasePage': (url?: string) => SoapResult;
   
   // Database operations
   'db:connect': (config: DbConfig) => DbConnectionState;
@@ -598,9 +582,3 @@ export type IpcChannels = {
   'config:deleteProfile': (id: string) => void;
   'config:setActiveProfile': (id: string) => void;
 };
-
-// Type-safe IPC handler type
-export type IpcHandler<K extends keyof IpcChannels> = (
-  event: IpcMainInvokeEvent,
-  ...args: Parameters<IpcChannels[K]>
-) => Promise<ReturnType<IpcChannels[K]>> | ReturnType<IpcChannels[K]>;

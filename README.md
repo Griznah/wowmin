@@ -1,10 +1,9 @@
 # WoW Admin – AzerothCore Admin Tool
 
-A server administration tool (Electron + Node.js + TypeScript) for an
+A web-based server administration tool (Node.js + TypeScript) for an
 [AzerothCore](https://www.azerothcore.org/) World of Warcraft server, using
-SOAP and direct database access. The same UI can run as a **native Node.js web
-service** in the browser (the primary, fully tested route) or as an Electron
-desktop app.
+SOAP and direct database access. It runs as a native Node.js service and is
+accessed from a browser.
 
 > This repository is a fork of
 > [scarecr0w12/wowmin](https://github.com/scarecr0w12/wowmin) ("WoW Admin",
@@ -84,6 +83,16 @@ desktop app.
   floor from WMO/height context and only that floor's markers and trails are
   shown
 
+### Dungeon Clear
+- Dedicated **Dungeon Clear** tab embeds the existing DC Test Deck from
+  `mod-dungeon-clear`
+- The deck runs independently and retains its own GM-account login, permissions,
+  audit logging, and live test workflow
+- The iframe URL is configurable with `WOWMIN_DUNGEON_CLEAR_URL` and otherwise
+  defaults to the current browser hostname on port `8790`
+- A reload control and direct-open fallback remain available when the deck is
+  unavailable or its iframe allowlist is not configured
+
 ### Session History & Replay (New in 3.0.0)
 - Completed instance, raid, battleground, and arena runs are recorded
   automatically to JSON files: participants, timestamped discrete events
@@ -136,16 +145,6 @@ desktop app.
 - Save remote log connection details and follow-mode settings as part of an existing connection profile
 - Works with password-based SSH/SFTP access today
 
-### App Updates
-- Electron desktop builds automatically check GitHub releases on startup for
-  newer app versions; the header status indicator shows current version, update
-  availability, or check errors
-- Manual **Check** button to refresh release status on demand; the **Open
-  Release** button opens the latest GitHub release page in the default browser
-  when an update is available
-- The native web service skips upstream release checks by default
-  (`WOWMIN_WEB_MODE=1`)
-
 ### Dashboard
 - Server info at a glance (uptime, online players, peak)
 - Quick actions for common server operations
@@ -172,6 +171,7 @@ desktop app.
 | **AzerothCore worldserver** | SOAP must be enabled (see below) |
 | **MySQL/MariaDB** | For database editing features |
 | **`mod-wowmin-telemetry`** | Optional but strongly recommended for live map/instance telemetry (see below) |
+| **DC Test Deck** | Optional; commit `cd74fa3` or newer is required for the embedded Dungeon Clear tab (setup below) |
 | **WoW 3.3.5a client files** | Only if you want map background artwork extracted locally |
 
 ### Live telemetry – `mod-wowmin-telemetry`
@@ -194,6 +194,7 @@ Once it is running, the module registers the administrator-only SOAP command:
 ```
 wowmin telemetry [mapId] [instanceId]
 ```
+There is no need to actually issue that command, WoWmin handles using it on it's own. 
 
 No worldserver configuration changes are required. Without the module, the
 Live Map falls back to saved database positions (stale between character
@@ -234,43 +235,36 @@ The **Economy** tab uses the `acore_characters` database for auction-house and c
 npm install
 
 # Build TypeScript and Tailwind CSS
-npm run build:ts
-npm run build:css
+npm run build
 
-# Run the test suite (no server or client required)
+# Run validation (no worldserver or client required)
+npm run typecheck
 npm test
 
-# Or build everything and start the desktop app
+# Configure the environment, then start the web service
 npm start
 ```
 
-> **Testing note:** the browser-based web service is the route that has been
-> fully exercised in practice. The Electron desktop build should work
-> identically (it shares the same main-process and renderer code), but it has
-> not been validated end-to-end on every platform; report issues if you rely
-> on it.
+## Web Service
 
-## Native Web Service
-
-The same UI can run in a browser without Docker or a graphical desktop. Build it,
-set HTTP Basic Authentication credentials, and start the Node.js service:
+Build the UI, set HTTP Basic Authentication credentials, and start the Node.js
+service:
 
 ```bash
 npm ci
-npm run build:ts
-npm run build:css
+npm run build
 
 export WOWMIN_HOST=0.0.0.0
 export WOWMIN_PORT=3000
 export WOWMIN_USERNAME=admin
 export WOWMIN_PASSWORD='replace-with-a-strong-password'
 export WOWMIN_DATA_DIR="$PWD/.wowmin-data"
-npm run start:web
+npm start
 ```
 
 Open `http://server-address:3000/` and sign in with the configured HTTP
-credentials. The browser UI keeps the desktop app's SOAP, database, map,
-economy, inventory, profile, and remote-log APIs. Because those APIs include raw
+credentials. The browser UI provides SOAP, database, map, economy, inventory,
+profile, and remote-log APIs. Because those APIs include raw
 SQL and server administration commands, do not expose the service without
 authentication; use a TLS reverse proxy when access crosses an untrusted
 network.
@@ -279,8 +273,8 @@ A hardened systemd unit template is provided at `deploy/wowmin.service.example` 
 `/etc/systemd/system/wowmin.service`, adjust the install path, and
 `systemctl daemon-reload`). It
 expects `/etc/wowmin.env` to define the variables above and stores profiles in
-`/var/lib/wowmin` when `WOWMIN_DATA_DIR=/var/lib/wowmin` is set. Set
-`WOWMIN_WEB_MODE=1` to disable upstream GitHub release checks in the service.
+`/var/lib/wowmin` when `WOWMIN_DATA_DIR=/var/lib/wowmin` is set. Start from
+[`deploy/wowmin.env.example`](deploy/wowmin.env.example).
 
 For server-managed connections, set all three of `WOWMIN_SOAP_USERNAME`,
 `WOWMIN_SOAP_PASSWORD`, and `WOWMIN_DB_PASSWORD` in the environment. The browser
@@ -299,6 +293,8 @@ WOWMIN_WORLD_DB=acore_world
 WOWMIN_CHARACTERS_DB=acore_characters
 WOWMIN_WORLD_CONFIG=/path/to/azerothcore/env/dist/etc/worldserver.conf
 WOWMIN_LOG_DIR=/path/to/azerothcore/env/dist/bin
+# Optional override; default is http(s)://<current-browser-host>:8790/
+WOWMIN_DUNGEON_CLEAR_URL=http://server-address:8790/
 ```
 
 Live telemetry and session recording settings (all optional):
@@ -317,8 +313,94 @@ under `$WOWMIN_DATA_DIR/sessions/`; only the explicit **Purge all** button in th
 Session history tab deletes them. Abandoned checkpoints from crashes are
 removed automatically at startup.
 
-Keep `/etc/wowmin.env` mode `0600` and restart the service after edits. Web
-mode disables upstream release checks; the Electron desktop build retains them.
+Keep `/etc/wowmin.env` mode `0600` and restart the service after edits.
+
+## Dungeon Clear / DC Test Deck setup
+
+WoWMin embeds the existing Test Deck; it does not install or start it. Test
+Deck remains a separate service from
+`azerothcore-wotlk/modules/mod-dungeon-clear/testdeck` and requires:
+
+- Python 3.9 or newer
+- a `mysql`/`mysql.exe` client
+- a built and running worldserver with `mod-dungeon-clear`
+- SOAP enabled in `worldserver.conf`
+- a dedicated SOAP bridge account with GM level 3
+- game accounts with GM level 1 or higher for Test Deck login
+
+Follow Test Deck's own README for the authoritative setup. Test Deck Setup is NOT covered here. 
+
+Test Deck commit `cd74fa3` or newer supports secure, opt-in direct iframe
+embedding. Keep its normal port `8790` and add the exact
+browser-visible WoWMin origin to the generated `testdeck.toml`:
+
+```toml
+[server]
+host = "0.0.0.0"
+port = 8790
+allowed_frame_ancestors = ["http://server-address:3000"]
+```
+
+An allowed origin has no trailing slash or path. Its scheme, hostname, and
+port must exactly match the address used to open WoWMin.
+
+If WoWMin is opened as
+`http://192.168.1.20:3000/`, for example, configure
+`"http://192.168.1.20:3000"`. 
+
+If WoWMin is opened as
+`http://127.0.0.1:3000/`, for example, configure
+`"http://127.0.0.1:3000"`.
+
+Multiple exact origins may be listed when needed.
+If Test Deck reports `forbidden: unexpected Host header` when reached through
+a hostname, add that hostname to `[server] allowed_hosts` as described in Test
+Deck's README.
+
+If users connect from another computer, allow TCP port `8790` through the host
+firewall. On Ubuntu with UFW use `sudo ufw allow 8790/tcp`; on a
+Fedora/RHEL-family host use `sudo firewall-cmd --permanent --add-port=8790/tcp`
+followed by `sudo firewall-cmd --reload`. On Windows, run this in an
+Administrator PowerShell:
+
+```powershell
+New-NetFirewallRule -DisplayName "DC Test Deck" `
+  -Direction Inbound -Protocol TCP -LocalPort 8790 `
+  -Action Allow -Profile Private
+```
+
+Verify the configured framing headers after restarting Test Deck:
+
+```bash
+# Linux / macOS
+curl -I http://127.0.0.1:8790/
+
+# Windows PowerShell or Command Prompt
+curl.exe -I http://127.0.0.1:8790/
+```
+
+The response must omit `X-Frame-Options` and its `Content-Security-Policy`
+`frame-ancestors` directive must contain the exact WoWMin origin. Open
+`http://server-address:8790/` directly to verify login, then open WoWMin's
+**Dungeon Clear** tab.
+
+If WoWMin uses HTTPS, Test Deck must also be served over HTTPS or the browser
+will block it as mixed content. Test Deck's `SameSite=Strict` login cookie also
+requires WoWMin and Test Deck to share a site; using the same hostname on ports
+`3000` and `8790` is the simplest setup. Set `WOWMIN_DUNGEON_CLEAR_URL` only
+when Test Deck is not available from the browser at the default
+`http(s)://<WoWMin-host>:8790/` URL.
+
+### Dungeon Clear troubleshooting
+
+| Symptom | What to check |
+|---|---|
+| Test Deck opens directly but the iframe is blank | Confirm `allowed_frame_ancestors` exactly matches the WoWMin address bar origin, has no trailing slash, and Test Deck was restarted after editing its configuration. |
+| The response still has `X-Frame-Options: DENY` | The allowlist is empty or the wrong Test Deck configuration file is being loaded. Run `python3 -m testdeck check` and restart it. |
+| Browser reports mixed content | WoWMin is HTTPS but Test Deck is HTTP. Serve Test Deck over HTTPS and set `WOWMIN_DUNGEON_CLEAR_URL` to that URL. |
+| Login succeeds and immediately returns to login | Open WoWMin and Test Deck with the same hostname/site, not `localhost` for one and a LAN address for the other. |
+| Test Deck reports an unexpected Host header | Add the browser-visible Test Deck hostname to `[server] allowed_hosts`, or use an address printed in its startup banner. |
+| Remote users cannot connect to `8790` | Check the firewall rule and confirm Test Deck is listening with `ss -ltnp` on Linux or `netstat -ano | findstr :8790` on Windows. |
 
 ## Usage
 
@@ -372,8 +454,22 @@ mode disables upstream release checks; the Electron desktop build retains them.
 5. Battlegrounds additionally show the match phase, team scores, alive counts, decoded objectives, resurrection state, and the server-selected bot strategy (read-only).
 6. The encounter card lists boss states and the session death history; the participant list shows faction, group/subgroup, LFG role, health and power, and target.
 
+### Dungeon Clear
+1. Add WoWMin's exact origin to Test Deck's
+   `[server] allowed_frame_ancestors`, then start Test Deck on its normal port
+   `8790`.
+2. Navigate to the **Dungeon Clear** tab. WoWMin hides its connection header and
+   gives the embedded deck the full workspace.
+3. Log in inside Test Deck with a game account whose GM level meets Test Deck's
+   `[auth] min_gmlevel` setting (default 1).
+4. Use Test Deck normally to launch, watch, stop, and review runs. WoWMin does
+   not replace Test Deck's authentication or command bridge.
+5. Use **Reload** after restarting Test Deck. Use **Open directly** when the
+   frame stays blank so the Test Deck or configuration error is visible in its
+   own tab.
+
 ### Session history & replay
-1. Navigate to the **Session history** tab (keyboard shortcut **Alt+8**). Completed runs from `$WOWMIN_DATA_DIR/sessions/` are loaded at startup and remain available without a SOAP, worldserver, or database connection.
+1. Navigate to the **Session history** tab (keyboard shortcut **Alt+9**). Completed runs from `$WOWMIN_DATA_DIR/sessions/` are loaded at startup and remain available without a SOAP, worldserver, or database connection.
 2. **Click a record** to load it into the embedded replay panel.
 3. Use **Play**, **Pause**, **Stop**, the seek slider, and the speed selector (0.5×–16×) to scrub through the run. Routes are drawn incrementally per participant, the event log follows the playhead, and the running totals reflect the seek position.
 4. **Purge all** permanently deletes every completed session record after a confirmation prompt; it does not affect in-progress recordings. Abandoned checkpoints are already removed automatically at startup.
@@ -418,12 +514,6 @@ mode disables upstream release checks; the Electron desktop build retains them.
 - Dynamic file appenders such as `gm_%s.log` are matched against the current contents of the resolved logs directory.
 - Logger-to-file matching is resolved in-app, so the live file picker only shows files currently associated with the selected logger instead of every readable file in the logs directory.
 - Live follow pauses automatically when you leave the **Logs** tab, so it does not keep polling in the background unnecessarily.
-
-### App Updates
-1. Launch the app normally.
-2. The header automatically checks GitHub for the latest release and shows your current version.
-3. If a newer release exists, the banner changes state and exposes an **Open Release** button.
-4. Use **Check** any time to manually refresh the release status.
 
 ### Extracting player and state icons
 
@@ -540,10 +630,10 @@ wow-admin/
 ├── tailwind.config.js      # Tailwind CSS configuration
 ├── esbuild.config.js       # Build configuration
 ├── src/
-│   ├── main.ts             # Electron main process (shared with web mode)
-│   ├── preload.ts          # Context bridge (IPC)
-│   ├── web-server.ts       # Native web service entry point (npm run start:web)
-│   ├── web-electron-shim.ts# Exposes the IPC surface to browser tabs
+│   ├── web-server.ts       # Authenticated HTTP service and static-file server
+│   ├── api-backend.ts      # SOAP, database, telemetry, and session API handlers
+│   ├── api-router.ts       # Internal API channel dispatcher
+│   ├── dungeon-clear-config.ts # Test Deck URL and CSP configuration
 │   ├── soap-client.ts      # SOAP/HTTP client for AzerothCore
 │   ├── live-map-telemetry.ts # WMAP protocol (v1–v7) parser + command builder
 │   ├── session-recorder.ts # Session recording, persistence, index, purge
@@ -552,7 +642,7 @@ wow-admin/
 │   ├── database/
 │   │   └── db-service.ts   # MySQL database service
 │   └── types/
-│       └── electron.ts     # TypeScript type definitions
+│       └── api.ts          # Shared API and domain types
 ├── renderer/
 │   ├── index.html          # App UI
 │   ├── styles.css          # Base styling
@@ -561,9 +651,10 @@ wow-admin/
 │   │   └── output.css      # Generated CSS
 │   └── scripts/
 │       ├── app.ts          # Main frontend logic (SOAP, DB, map, instances, replay)
-│       ├── web-api.ts      # Browser fetch implementation of the IPC surface
+│       ├── web-api.ts      # Browser fetch implementation of the API surface
 │       ├── types/
-│       │   └── state.ts    # Application state types
+│       │   ├── state.ts    # Application state types
+│       │   └── wowmin-api.ts # Browser API contract
 │       └── utils/
 │           ├── helpers.ts  # Utility functions
 │           ├── map-coords.ts # WoW coordinate conversion utilities
@@ -580,7 +671,8 @@ wow-admin/
 │   ├── extract-player-icons.mjs # WoW portrait/class/state icon extractor
 │   └── test-*.cjs          # Self-contained test suites (npm test)
 ├── deploy/
-│   └── wowmin.service.example # Hardened systemd unit template
+│   ├── wowmin.service.example # Hardened systemd unit template
+│   └── wowmin.env.example     # Environment configuration sample
 └── dist/                   # Compiled output
 ```
 
@@ -594,7 +686,7 @@ npm test          # runs all scripts/test-*.cjs with node:test
 npm run typecheck # tsc --noEmit over the whole project
 ```
 
-Coverage includes the telemetry protocol parser (versions 1–5, rejection of
+Coverage includes the telemetry protocol parser (versions 1–7, rejection of
 truncated/unknown snapshots), command building, session grouping and
 battleground decoding, map projection math (continents, calibrated
 battlegrounds, minimap tiles, dungeon floors, pan/zoom/fit), the session
@@ -613,30 +705,26 @@ npm run build:ts:watch
 # Build Tailwind CSS (watch mode)
 npm run build:css:watch
 
-# Development mode (Electron)
+# Build once and start the local web service
 npm run dev
 ```
 
-## Building for Distribution
+## Building for deployment
 
 ```bash
-# Build for current platform
+npm ci
 npm run build
-
-# Build for specific platforms
-npm run build:win    # Windows
-npm run build:mac    # macOS
-npm run build:linux  # Linux
-npm run build:all    # Windows + Linux
+npm run typecheck
+npm test
 ```
 
-On Windows, the packaging commands intentionally run through `scripts/package.js`,
-which disables Electron Builder's `signAndEditExecutable` step so non-elevated
-shells and CI jobs can still produce the NSIS/portable installers.
+Deploy the repository with production dependencies and the generated `dist/`
+files, then run `npm start`. Tagged GitHub releases use GitHub's automatic
+source archives; this project does not produce platform-specific installers.
 
 ## Technology Stack
 
-- **Electron** - Cross-platform desktop application
+- **Node.js HTTP server** - Authenticated web service
 - **TypeScript** - Type-safe JavaScript
 - **Tailwind CSS** - Utility-first CSS framework
 - **mysql2** - MySQL client with Promise support

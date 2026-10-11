@@ -12,7 +12,7 @@ import type {
   SessionRecord,
   SessionRoutePoint,
   SessionTotals,
-} from './types/electron';
+} from './types/api';
 import { formatBattlegroundOutcome } from './session-outcome';
 
 export { formatBattlegroundOutcome };

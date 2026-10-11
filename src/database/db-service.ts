@@ -1,6 +1,6 @@
 import * as mysql from 'mysql2/promise';
 import type { ExecuteValues } from 'mysql2';
-import { DbConfig, QueryResult, FieldInfo } from '../types/electron';
+import { DbConfig, QueryResult, FieldInfo } from '../types/api';
 
 /**
  * Database Service for MySQL connections to AzerothCore databases
