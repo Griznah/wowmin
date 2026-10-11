@@ -44,6 +44,8 @@ const staticFiles: Record<string, string> = {
   '/styles/output.css': path.join(projectRoot, 'renderer', 'styles', 'output.css'),
   '/dist/web-api.js': path.join(projectRoot, 'dist', 'web-api.js'),
   '/dist/renderer.js': path.join(projectRoot, 'dist', 'renderer.js'),
+  '/spell-preview': path.join(projectRoot, 'renderer', 'spell-preview.html'),
+  '/dist/spell-preview.js': path.join(projectRoot, 'dist', 'spell-preview.js'),
 };
 
 const mimeTypes: Record<string, string> = {

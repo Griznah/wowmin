@@ -27,6 +27,7 @@ import { type FadeSettings, type FadeVolume, type IsoView, MAX_FADE_VOLUMES } fr
 import type { CombatEffectStore, Point3, UnitKey } from '../utils/spell-events';
 import { applyIsoCamera } from './iso-camera';
 import { SpellEffectLayer, type UnitAnchorRole } from './spell-effects';
+import { SpellVisualLayer } from './spell-visual-layer';
 import { type UnitModelPose, UnitModelLayer } from './unit-models';
 
 type WowBlend = 'opaque' | 'alphaKey' | 'alpha' | 'add' | 'mod' | 'mod2x';
@@ -41,6 +42,7 @@ const BACKGROUND = 0x08111d;
 // point, as fractions of a standing height (yards).
 const DEFAULT_UNIT_HEIGHT = 2;
 const CHEST_HEIGHT = 0.6;
+const HEAD_HEIGHT = 0.9;
 
 // Party fade, matching getSceneFade() in map-projection.ts: each volume keeps
 // its surroundings solid, fading out over the height range above and below and
@@ -142,6 +144,8 @@ export class InstanceSceneView {
   private readonly units: UnitModelLayer;
   // Spell effects, drawn over everything.
   private readonly effects = new SpellEffectLayer();
+  // The client's own spell art, where a spell has it.
+  private readonly spellVisuals: SpellVisualLayer;
   private effectsShown = false;
   // What the canvas currently shows, to skip redrawing an unchanged frame.
   private lastFrameKey = '';
@@ -156,6 +160,11 @@ export class InstanceSceneView {
     });
     this.scene.add(this.units.group);
     this.scene.add(this.effects.group);
+    this.spellVisuals = new SpellVisualLayer(() => {
+      this.lastFrameKey = '';
+      this.onChange();
+    });
+    this.scene.add(this.spellVisuals.group);
     this.scene.add(new AmbientLight(0xffffff, 2.2));
     const sun = new DirectionalLight(0xffffff, 1.6);
     sun.position.set(0.4, 1, 0.6);
@@ -197,18 +206,27 @@ export class InstanceSceneView {
     const point = this.units.pointOf(unit, role);
     if (point) return point;
     const height = this.units.heightOf(unit) ?? DEFAULT_UNIT_HEIGHT;
-    return [feet[0], feet[1], feet[2] + (role === 'overhead' ? height + 0.3 : height * CHEST_HEIGHT)];
+    const up = role === 'overhead' ? height + 0.3 : role === 'head' ? height * HEAD_HEIGHT : height * CHEST_HEIGHT;
+    return [feet[0], feet[1], feet[2] + up];
   }
 
   // Places the store's live effects for the next render; call after
   // setUnits, so hand points follow this frame's animation.
   setEffects(store: CombatEffectStore | null, positions: ReadonlyMap<UnitKey, Point3>, now: number): number {
     if (this.lost) return 0;
-    const before = this.effects.count;
-    this.effects.update(store, now, (unit, role) => this.anchor(positions, unit, role));
+    const before = this.effects.count + this.spellVisuals.count;
+    const anchor = (unit: UnitKey, role: UnitAnchorRole) => this.anchor(positions, unit, role);
+    this.spellVisuals.update(store, now, anchor, (unit) => this.units.scaleOf(unit) ?? 1, this.camera);
+    this.effects.update(store, now, anchor, (entry) => this.spellVisuals.handles(entry));
+    const count = this.effects.count + this.spellVisuals.count;
     // One more frame after the last effect ends, to clear it.
-    this.effectsShown = this.effects.count > 0 || before > 0;
-    return this.effects.count;
+    this.effectsShown = count > 0 || before > 0;
+    return count;
+  }
+
+  // The client's spell art playing, and its live particles, for ?debug.
+  get spellArt(): { effects: number; particles: number } {
+    return { effects: this.spellVisuals.count, particles: this.spellVisuals.particles };
   }
 
   state(url: string): SceneLoadState | undefined {

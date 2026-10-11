@@ -13,8 +13,10 @@ import {
 
 import {
   type CombatEffectStore,
+  type Impact,
   IMPACT_LIFETIME_MS,
   type Point3,
+  type Projectile,
   type UnitKey,
 } from '../utils/spell-events';
 
@@ -24,7 +26,7 @@ import {
 // so walls never hide them.
 
 // Where on a unit an effect sits.
-export type UnitAnchorRole = 'handRight' | 'handLeft' | 'chest' | 'overhead' | 'feet';
+export type UnitAnchorRole = 'handRight' | 'handLeft' | 'chest' | 'head' | 'overhead' | 'feet';
 // A unit's anchor point in server coordinates, or null if it isn't shown.
 export type UnitAnchor = (unit: UnitKey, role: UnitAnchorRole) => Point3 | null;
 
@@ -81,8 +83,10 @@ export class SpellEffectLayer {
     return this.drawn;
   }
 
-  // Draws the store's effects, or none for a null store.
-  update(store: CombatEffectStore | null, now: number, anchor: UnitAnchor): void {
+  // Draws the store's effects, or none for a null store, except missiles and
+  // impacts `skip` says are drawn elsewhere (the client's own art).
+  update(store: CombatEffectStore | null, now: number, anchor: UnitAnchor,
+    skip: (entry: Projectile | Impact) => boolean = () => false): void {
     this.spritesUsed = 0;
     this.ringsUsed = 0;
     let drawn = 0;
@@ -122,7 +126,7 @@ export class SpellEffectLayer {
     }
 
     for (const projectile of effects.projectiles) {
-      if (projectile.startAt > now) continue;
+      if (projectile.startAt > now || skip(projectile)) continue;
       const from = anchor(projectile.source, 'handRight');
       const to = anchor(projectile.target, 'chest');
       if (!from || !to) continue;
@@ -143,7 +147,7 @@ export class SpellEffectLayer {
     }
 
     for (const impact of effects.impacts) {
-      if (impact.at > now) continue;
+      if (impact.at > now || skip(impact)) continue;
       const t = clamp01((now - impact.at) / IMPACT_LIFETIME_MS);
       const scale = impact.small ? 0.5 : 1;
       if (impact.heal) {

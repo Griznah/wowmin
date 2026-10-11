@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' blob:">
+  <title>Spell Preview</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: #0b1220; color: #e2e8f0; display: flex; flex-direction: column; height: 100vh; }
+    form { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; padding: 10px 16px; background: #111827; font-size: 14px; }
+    label { display: flex; gap: 6px; align-items: center; }
+    input[type=number] { width: 80px; background: #0b1220; color: inherit; border: 1px solid #334155; border-radius: 4px; padding: 3px 6px; }
+    button { background: #1e293b; color: inherit; border: 1px solid #334155; border-radius: 4px; padding: 4px 10px; cursor: pointer; }
+    #preview-status { margin-left: auto; color: #94a3b8; font-variant-numeric: tabular-nums; }
+    #preview-canvas { flex: 1; width: 100%; min-height: 0; display: block; }
+  </style>
+</head>
+<body>
+  <form id="preview-form">
+    <label>Spell <input name="spell" type="number" value="116"></label>
+    <label>Missile speed <input name="speed" type="number" value="28" step="any"></label>
+    <label>Cast ms <input name="cast" type="number" value="1500"></label>
+    <label><input name="heal" type="checkbox"> Heal (target an ally)</label>
+    <label>Speed <input name="rate" type="number" value="1" step="0.05" min="0.05"></label>
+    <label><input name="glows" type="checkbox" checked> Level 1 glows</label>
+    <button type="submit">Play</button>
+    <button type="button" data-preset="116,28,1500,0">Frostbolt</button>
+    <button type="button" data-preset="133,24,1500,0">Fireball</button>
+    <button type="button" data-preset="686,20,1500,0">Shadow Bolt</button>
+    <button type="button" data-preset="635,0,1500,1">Holy Light</button>
+    <span id="preview-status"></span>
+  </form>
+  <canvas id="preview-canvas"></canvas>
+  <script src="dist/spell-preview.js"></script>
+</body>
+</html>

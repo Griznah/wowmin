@@ -28,6 +28,7 @@ export interface CastGlow {
 export interface Projectile {
   source: UnitKey;
   target: UnitKey;
+  spellId: number;
   color: string;
   startAt: number;
   travelMs: number;
@@ -49,6 +50,8 @@ export interface Beam {
 
 export interface Impact {
   target: UnitKey;
+  // 0 for a white hit.
+  spellId: number;
   color: string;
   at: number;
   heal: boolean;
@@ -314,7 +317,7 @@ export class CombatEffectStore {
         this.numberList.push({ target, amount: event.value, color: numberColor, heal, periodic: event.periodic, at });
         // White hits already show as the swing.
         if (heal || event.spellId) {
-          this.impactList.push({ target, color: numberColor, at, heal, small: event.periodic });
+          this.impactList.push({ target, spellId: event.spellId, color: numberColor, at, heal, small: event.periodic });
         }
         return null;
       }
@@ -348,7 +351,7 @@ export class CombatEffectStore {
       const yards = distance(source, target!);
       if (yards !== null) {
         this.projectileList.push({
-          source, target: target!, color, startAt: at, travelMs: getTravelMs(yards, event.missileSpeed),
+          source, target: target!, spellId: event.spellId, color, startAt: at, travelMs: getTravelMs(yards, event.missileSpeed),
           streak: event.missileSpeed <= 0, physical,
         });
       }

@@ -2,16 +2,17 @@ import { fork, type ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 
-// Builds unit models (creatures, and characters with their gear) on demand
-// from the WoW client's Data directory, in a child process, and caches them
-// under assets/models/. Needs WOWMIN_CLIENT_DATA; without it only models
-// already in the cache are served.
+// Builds unit models (creatures, and characters with their gear), spell
+// effect models, and spell art lookups on demand from the WoW client's Data
+// directory, in a child process, and caches them under assets/models/. Needs
+// WOWMIN_CLIENT_DATA; without it only what is already cached is served.
 
 const BUILD_TIMEOUT_MS = 60000;
 // Bumped when the converter's output changes, so models are rebuilt: built
 // models live under v<version>/, and older ones are removed at startup.
 // 2: spell effect points (hands, chest, overhead).
-export const UNIT_MODEL_CACHE_VERSION = 2;
+// 3: a head point; spell effect models and spell art lookups.
+export const UNIT_MODEL_CACHE_VERSION = 3;
 // A look that could not be built is not retried for this long.
 const FAILURE_RETRY_MS = 10 * 60 * 1000;
 
@@ -21,7 +22,8 @@ interface PendingBuild {
 }
 
 export interface UnitModelRequest {
-  kind: 'creature' | 'character';
+  // 'effect' is a SpellVisualEffectName model; 'visual' a spell's art (JSON).
+  kind: 'creature' | 'character' | 'effect' | 'visual';
   key: string;
   params: Record<string, unknown>;
 }
@@ -37,6 +39,10 @@ export function parseUnitModelPath(urlPath: string): UnitModelRequest | null {
     const weapons = mainHand === undefined ? {} : { 15: Number(mainHand), 16: Number(offHand), 17: Number(ranged) };
     return { kind: 'creature', key, params: { displayId: Number(displayId), weapons } };
   }
+  const effect = urlPath.match(/^\/assets\/models\/effect\/(\d{1,7})\.glb$/);
+  if (effect) return { kind: 'effect', key: effect[1], params: { effectId: Number(effect[1]) } };
+  const visual = urlPath.match(/^\/assets\/models\/visual\/(\d{1,7})\.json$/);
+  if (visual) return { kind: 'visual', key: visual[1], params: { spellId: Number(visual[1]) } };
   const character = urlPath.match(/^\/assets\/models\/character\/([0-9][0-9.-]{0,199})\.glb$/);
   if (character) return { kind: 'character', key: character[1], params: { key: character[1] } };
   return null;
@@ -58,7 +64,8 @@ export class UnitModels {
   }
 
   pathFor(request: UnitModelRequest): string {
-    return path.join(this.cacheRoot, `v${UNIT_MODEL_CACHE_VERSION}`, request.kind, `${request.key}.glb`);
+    const extension = request.kind === 'visual' ? 'json' : 'glb';
+    return path.join(this.cacheRoot, `v${UNIT_MODEL_CACHE_VERSION}`, request.kind, `${request.key}.${extension}`);
   }
 
   // Only folders this cache made: older versions, and the unversioned

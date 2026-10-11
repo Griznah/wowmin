@@ -174,6 +174,7 @@ test('picks effect points from the attachment table, preferring spell hands', as
     { role: 'handRight', bone: 12, position: [22, 0, 0] },
     { role: 'handLeft', bone: 11, position: [2, 0, 0] },
     { role: 'chest', bone: 13, position: [15, 0, 0] },
+    { role: 'head', bone: 14, position: [11, 0, 0] },
     { role: 'overhead', bone: 14, position: [11, 0, 0] },
   ]);
   // Spiders and the like have no attachment points at all.
@@ -303,6 +304,11 @@ test('parses model URLs into build requests, rejecting anything else', () => {
   assert.deepEqual(JSON.parse(JSON.stringify(parseUnitModelPath('/assets/models/creature/23561-2806.0.5.glb').params.weapons)),
     { 15: 2806, 16: 0, 17: 5 });
   assert.equal(parseUnitModelPath('/assets/models/character/1-0-2-1-3-2-2-0-0.0.0.0.0.0.0.0.0.0.0.0.0.0.glb').kind, 'character');
+  assert.deepEqual(JSON.parse(JSON.stringify(parseUnitModelPath('/assets/models/effect/4807.glb'))),
+    { kind: 'effect', key: '4807', params: { effectId: 4807 } });
+  assert.deepEqual(JSON.parse(JSON.stringify(parseUnitModelPath('/assets/models/visual/116.json'))),
+    { kind: 'visual', key: '116', params: { spellId: 116 } });
+  assert.equal(parseUnitModelPath('/assets/models/visual/116.glb'), null);
   assert.equal(parseUnitModelPath('/assets/models/creature/../../.env.glb'), null);
   assert.equal(parseUnitModelPath('/assets/models/character/../x.glb'), null);
   assert.equal(parseUnitModelPath('/assets/models/other/1.glb'), null);

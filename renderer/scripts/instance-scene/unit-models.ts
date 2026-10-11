@@ -63,7 +63,7 @@ export interface UnitModelPose {
 }
 
 // Effect points the converter exports on the skeleton.
-export type UnitPointRole = 'handRight' | 'handLeft' | 'chest' | 'overhead';
+export type UnitPointRole = 'handRight' | 'handLeft' | 'chest' | 'head' | 'overhead';
 
 // The ring on the floor under a model, with a pointer the way it faces.
 export interface UnitMarkerStyle {
@@ -237,6 +237,13 @@ export class UnitModelLayer {
     if (!point) return null;
     const position = this.group.worldToLocal(point.getWorldPosition(new Vector3()));
     return [position.x, position.y, position.z];
+  }
+
+  // A drawn unit's overall scale (its display's times its own), or null.
+  scaleOf(id: string): number | null {
+    const unit = this.units.get(id);
+    if (!unit) return null;
+    return unit.root.scale.x * (unit.template.scene?.children[0]?.scale.x ?? 1);
   }
 
   // A drawn unit's standing height in yards, or null.

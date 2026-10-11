@@ -6589,7 +6589,7 @@ const instanceDebug = new URLSearchParams(window.location.search).has('debug');
 const INSTANCE_DEBUG_WINDOW_MS = 2000;
 const INSTANCE_DEBUG_INTERVAL_MS = 500;
 const instanceDebugEvents = new Map<string, Array<{ at: number; value: number }>>();
-let instanceDebugCounts = { players: 0, mobsShown: 0, mobsStreamed: 0, paths: 0, bots: 0, models: 0, effects: 0 };
+let instanceDebugCounts = { players: 0, mobsShown: 0, mobsStreamed: 0, paths: 0, bots: 0, models: 0, effects: 0, spellArt: 0, particles: 0 };
 let instanceDebugLastFrameAt = 0;
 let instanceDebugRenderedAt = 0;
 // Redraw cap while animating live positions.
@@ -8124,6 +8124,8 @@ function drawInstanceCanvas(followPass: boolean): void {
     bots: decisions.size,
     models: isoView ? modelIds.size : 0,
     effects: isoView ? effectsDrawn : 0,
+    spellArt: isoView ? sceneView?.spellArt.effects ?? 0 : 0,
+    particles: isoView ? sceneView?.spellArt.particles ?? 0 : 0,
   };
   if (liveNow - instanceBotCardRenderedAt >= INSTANCE_BOT_CARD_INTERVAL_MS) renderInstanceBotCard(session, liveNow);
 }
@@ -8293,7 +8295,7 @@ function renderInstanceDebugOverlay(now: number): void {
     `scene   ${scene}`,
     `stream  ${instanceLiveStream?.status ?? 'off'} · ${frames.rate.toFixed(1)} frames/s · gap max ${Math.round(frames.max)} ms`,
     `        per s: ${perSecond('paths')} paths · ${perSecond('creatures')} mobs · ${perSecond('bots')} bots · ${perSecond('combat')} combat events`,
-    `combat  ${counts.effects} effects drawn · ${instanceCombatEffects.dropped} events dropped by the server`,
+    `combat  ${counts.effects} effects drawn (${counts.spellArt} client art, ${counts.particles} particles) · ${instanceCombatEffects.dropped} events dropped by the server`,
     `shown   ${counts.players} players · ${counts.mobsShown}/${counts.mobsStreamed} mobs · ${counts.paths} paths · ${counts.bots} bots · ${counts.models} models`,
     `view    zoom ${transform.zoom.toFixed(2)} · yaw ${Math.round(getInstanceViewYaw() * 180 / Math.PI)}° · pitch ${Math.round(getInstanceViewPitch() * 180 / Math.PI)}°${floor ? ` · floor ${floor.floorIndex}` : ''}`,
   ];
