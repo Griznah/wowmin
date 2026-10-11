@@ -268,6 +268,11 @@ export WOWMIN_DATA_DIR="$PWD/.wowmin-data"
 npm run start:web
 ```
 
+Instead of exporting them, you can put these settings in a `.env` file in the
+project root (one `NAME=value` per line, kept out of git). The web service reads
+it at startup; variables already set in the environment take precedence. Keep
+it private (`chmod 600 .env`), as it holds passwords.
+
 Open `http://server-address:3000/` and sign in with the configured HTTP
 credentials. The browser UI keeps the desktop app's SOAP, database, map,
 economy, inventory, profile, and remote-log APIs. Because those APIs include raw
@@ -310,6 +315,16 @@ WOWMIN_TELEMETRY_POLL_MS=1000
 WOWMIN_SESSION_ROUTE_INTERVAL_MS=5000
 # How long a vanished session must stay absent before it is finalized (ms)
 WOWMIN_SESSION_COMPLETION_GRACE_MS=15000
+```
+
+To draw players and mobs in the 3D Instance Watch view with their game models
+(gear, druid forms, and simple fighting animations), point the web service at
+a WoW 3.3.5a client's `Data` folder. Each model is built from the client files
+the first time it is seen and cached under `assets/models/` (not in git). This
+needs the live position stream from mod-wowmin-telemetry.
+
+```ini
+WOWMIN_CLIENT_DATA=/path/to/WoW/Data
 ```
 
 Completed session records are kept indefinitely under

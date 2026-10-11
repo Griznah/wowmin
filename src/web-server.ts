@@ -1,3 +1,4 @@
+import './load-env';
 import { telemetryStream } from './main';
 import { createHash, timingSafeEqual } from 'crypto';
 import * as fs from 'fs';
@@ -5,6 +6,7 @@ import { createServer, IncomingMessage, ServerResponse } from 'http';
 import * as path from 'path';
 import { app, ipcMain } from 'electron';
 import { inspectLocalLogs, readLocalLogTail } from './local-logs';
+import { parseUnitModelPath, UnitModels } from './unit-models';
 
 const host = process.env.WOWMIN_HOST || '127.0.0.1';
 const port = Number(process.env.WOWMIN_PORT || '3000');
@@ -119,6 +121,10 @@ function resolveStaticFile(urlPath: string): string | null {
 }
 
 const assetsRoot = path.join(projectRoot, 'assets');
+const unitModels = new UnitModels(
+  path.join(assetsRoot, 'models'),
+  path.join(projectRoot, 'scripts', 'scene', 'unit-model-worker.mjs'),
+);
 
 function serveFile(request: IncomingMessage, response: ServerResponse, filePath: string): void {
   fs.stat(filePath, (statError, stats) => {
@@ -198,6 +204,7 @@ const server = createServer(async (request, response) => {
       onPaths: (update) => send('paths', update),
       onCreatures: (update) => send('creatures', update),
       onBots: (update) => send('bots', update),
+      onAppearances: (update) => send('appearances', update),
     });
     // Comment lines keep idle connections open through proxies.
     const keepAlive = setInterval(() => response.write(': keep-alive\n\n'), 15000);
@@ -266,6 +273,14 @@ const server = createServer(async (request, response) => {
     decodedPath = decodeURIComponent(url.pathname);
   } catch {
     sendJson(response, 400, { error: 'Invalid URL path' });
+    return;
+  }
+  // Unit models are built from the client's files the first time they are asked for.
+  const unitModel = parseUnitModelPath(decodedPath);
+  if (unitModel) {
+    const modelPath = await unitModels.ensure(unitModel);
+    if (modelPath) serveFile(request, response, modelPath);
+    else sendJson(response, 404, { error: 'No model' });
     return;
   }
   const filePath = resolveStaticFile(decodedPath);

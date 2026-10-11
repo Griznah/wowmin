@@ -504,7 +504,7 @@ function parseDungeonMapChunkDbc(buffer, floorsByMap) {
   }
 }
 
-function findMpqArchives(dataDir) {
+export function findMpqArchives(dataDir) {
   const archives = [];
   const entries = walkFiles(dataDir);
   for (const entry of entries) {
@@ -521,7 +521,7 @@ function findMpqArchives(dataDir) {
   return archives;
 }
 
-function extractMpqFile(archive, fileNames) {
+export function extractMpqFile(archive, fileNames) {
   for (const fileName of fileNames) {
     try {
       return archive.extractFile(fileName);

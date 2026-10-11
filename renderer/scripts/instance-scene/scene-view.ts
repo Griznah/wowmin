@@ -1,8 +1,10 @@
 import {
   AdditiveBlending,
+  AmbientLight,
   Box3,
   type BufferGeometry,
   Color,
+  DirectionalLight,
   DoubleSide,
   FrontSide,
   Material,
@@ -23,6 +25,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
 import { type FadeSettings, type FadeVolume, type IsoView, MAX_FADE_VOLUMES } from '../utils/map-projection';
 import { applyIsoCamera } from './iso-camera';
+import { type UnitModelPose, UnitModelLayer } from './unit-models';
 
 type WowBlend = 'opaque' | 'alphaKey' | 'alpha' | 'add' | 'mod' | 'mod2x';
 
@@ -129,6 +132,8 @@ export class InstanceSceneView {
   private readonly materials = new Map<string, Material>();
   private shown: Object3D | null = null;
   private lost = false;
+  // Player and creature models; lit, unlike the scene.
+  private readonly units: UnitModelLayer;
   // What the canvas currently shows, to skip redrawing an unchanged frame.
   private lastFrameKey = '';
 
@@ -136,6 +141,15 @@ export class InstanceSceneView {
     this.renderer = new WebGLRenderer({ canvas, antialias: true });
     this.renderer.setPixelRatio(window.devicePixelRatio || 1);
     this.renderer.setClearColor(BACKGROUND);
+    this.units = new UnitModelLayer(() => {
+      this.lastFrameKey = '';
+      this.onChange();
+    });
+    this.scene.add(this.units.group);
+    this.scene.add(new AmbientLight(0xffffff, 2.2));
+    const sun = new DirectionalLight(0xffffff, 1.6);
+    sun.position.set(0.4, 1, 0.6);
+    this.scene.add(sun);
     canvas.addEventListener('webglcontextlost', (event) => {
       event.preventDefault();
       this.lost = true;
@@ -154,6 +168,13 @@ export class InstanceSceneView {
 
   get available(): boolean {
     return !this.lost;
+  }
+
+  // Places the unit models for the next render; returns the IDs drawn as
+  // models (the rest still need markers).
+  setUnits(poses: UnitModelPose[], nowMs: number): Set<string> {
+    if (this.lost) return new Set();
+    return this.units.update(poses, nowMs);
   }
 
   state(url: string): SceneLoadState | undefined {
@@ -217,7 +238,8 @@ export class InstanceSceneView {
       ...active.flatMap((volume) => [volume.minX, volume.maxX, volume.minY, volume.maxY, volume.minZ, volume.maxZ]
         .map((value) => Math.round(value))),
     ].join('|');
-    if (frameKey === this.lastFrameKey) return true;
+    // Animated models need every frame.
+    if (frameKey === this.lastFrameKey && !this.units.count) return true;
     this.lastFrameKey = frameKey;
     if (this.shown !== root) {
       if (this.shown) this.scene.remove(this.shown);

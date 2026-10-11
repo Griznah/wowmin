@@ -260,6 +260,44 @@ export interface StreamBotDecision {
   actions: StreamBotAction[];
 }
 
+// How a player or creature looks, for drawing its model.
+export interface StreamAppearance {
+  guid: number;
+  creature: boolean;
+  helmHidden: boolean;
+  cloakHidden: boolean;
+  race: number;
+  gender: number;
+  classId: number;
+  skin: number;
+  face: number;
+  hairStyle: number;
+  hairColor: number;
+  facialStyle: number;
+  // 0 sheathed, 1 melee weapons drawn, 2 ranged weapon drawn.
+  sheathState: number;
+  // Object scale (1 is normal size), on top of the display's own scale.
+  scale: number;
+  displayId: number;
+  nativeDisplayId: number;
+  mountDisplayId: number;
+  // Item display IDs by equipment slot (0 head ... 18 tabard); 0 is empty.
+  items: number[];
+  // InventoryType and weapon subclass of the main hand, InventoryType of the
+  // off hand, and subclass of the ranged weapon (0: none), for attack poses.
+  mainHandType: number;
+  mainHandSubclass: number;
+  offHandType: number;
+  rangedSubclass: number;
+}
+
+export interface StreamAppearanceUpdate {
+  mapId: number;
+  instanceId: number;
+  serverTimeMs: number;
+  units: StreamAppearance[];
+}
+
 export interface StreamBotUpdate {
   mapId: number;
   instanceId: number;
@@ -273,6 +311,7 @@ export interface StreamListeners {
   onPaths?: (update: StreamPathUpdate) => void;
   onCreatures?: (update: StreamCreatureUpdate) => void;
   onBots?: (update: StreamBotUpdate) => void;
+  onAppearances?: (update: StreamAppearanceUpdate) => void;
 }
 
 // creature_template details for labelling streamed creatures.

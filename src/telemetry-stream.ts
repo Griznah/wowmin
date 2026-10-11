@@ -1,7 +1,7 @@
 import * as dgram from 'dgram';
 
 import type {
-  StreamBotDecision, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame, StreamListeners,
+  StreamAppearance, StreamAppearanceUpdate, StreamBotDecision, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame, StreamListeners,
   StreamPath, StreamPathUpdate, StreamPlayerSample, StreamStatus,
 } from './types/electron';
 
@@ -24,6 +24,7 @@ const MAGIC = 'WMS1';
 const PATH_MAGIC = 'WMP1';
 const CREATURE_MAGIC = 'WMC1';
 const BOT_MAGIC = 'WMB1';
+const APPEARANCE_MAGIC = 'WMA1';
 const VERSION = 1;
 const HEADER_SIZE = 28;
 const PLAYER_SIZE = 30;
@@ -33,6 +34,8 @@ const PATH_ENTRY_SIZE = 12;
 const CREATURE_SIZE = 36;
 const BOT_SIZE = 36;
 const BOT_ACTION_SIZE = 12;
+const APPEARANCE_SIZE = 108;
+const EQUIPMENT_SLOTS = 19;
 const BOT_STATES: StreamBotDecision['state'][] = ['combat', 'idle', 'dead'];
 const RENEW_INTERVAL_MS = 3000;
 // A frame this old means the module restarted or the stream lapsed, so accept
@@ -222,6 +225,43 @@ export function parseBotDatagram(buffer: Buffer): BotDatagram | null {
   return { mapId: header.mapId, instanceId: header.instanceId, serverTimeMs: header.serverTimeMs, bots };
 }
 
+export function parseAppearanceDatagram(buffer: Buffer): StreamAppearanceUpdate | null {
+  const header = readEntryHeader(buffer, APPEARANCE_MAGIC);
+  if (!header || buffer.length < PATH_HEADER_SIZE + header.count * APPEARANCE_SIZE) return null;
+  const units: StreamAppearance[] = [];
+  for (let index = 0; index < header.count; index += 1) {
+    const offset = PATH_HEADER_SIZE + index * APPEARANCE_SIZE;
+    const flags = buffer.readUInt8(offset + 4);
+    const items: number[] = [];
+    for (let slot = 0; slot < EQUIPMENT_SLOTS; slot += 1) items.push(buffer.readUInt32LE(offset + 28 + slot * 4));
+    units.push({
+      guid: buffer.readUInt32LE(offset),
+      creature: Boolean(flags & 1),
+      helmHidden: Boolean(flags & 2),
+      cloakHidden: Boolean(flags & 4),
+      race: buffer.readUInt8(offset + 5),
+      gender: buffer.readUInt8(offset + 6),
+      classId: buffer.readUInt8(offset + 7),
+      skin: buffer.readUInt8(offset + 8),
+      face: buffer.readUInt8(offset + 9),
+      hairStyle: buffer.readUInt8(offset + 10),
+      hairColor: buffer.readUInt8(offset + 11),
+      facialStyle: buffer.readUInt8(offset + 12),
+      sheathState: buffer.readUInt8(offset + 13),
+      scale: buffer.readUInt16LE(offset + 14) / 1000,
+      displayId: buffer.readUInt32LE(offset + 16),
+      nativeDisplayId: buffer.readUInt32LE(offset + 20),
+      mountDisplayId: buffer.readUInt32LE(offset + 24),
+      items,
+      mainHandType: buffer.readUInt8(offset + 104),
+      mainHandSubclass: buffer.readUInt8(offset + 105),
+      offHandType: buffer.readUInt8(offset + 106),
+      rangedSubclass: buffer.readUInt8(offset + 107),
+    });
+  }
+  return { mapId: header.mapId, instanceId: header.instanceId, serverTimeMs: header.serverTimeMs, units };
+}
+
 type CommandRunner = (command: string) => Promise<{ success: boolean; message: string }>;
 
 interface WatchedSession {
@@ -330,6 +370,10 @@ export class TelemetryStream {
       this.receiveBots(message);
       return;
     }
+    if (magic === APPEARANCE_MAGIC) {
+      this.receiveAppearances(message);
+      return;
+    }
     const datagram = parseStreamDatagram(message);
     if (!datagram) return;
     const session = this.sessions.get(`${datagram.mapId}:${datagram.instanceId}`);
@@ -404,6 +448,14 @@ export class TelemetryStream {
       mapId: datagram.mapId, instanceId: datagram.instanceId, serverTimeMs: datagram.serverTimeMs, bots,
     };
     for (const listener of session.listeners) listener.onBots?.(update);
+  }
+
+  private receiveAppearances(message: Buffer): void {
+    const update = parseAppearanceDatagram(message);
+    if (!update?.units.length) return;
+    const session = this.sessions.get(`${update.mapId}:${update.instanceId}`);
+    if (!session) return;
+    for (const listener of session.listeners) listener.onAppearances?.(update);
   }
 
   private setStatus(session: WatchedSession, status: StreamStatus): void {

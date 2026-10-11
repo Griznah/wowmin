@@ -54,3 +54,4 @@ graphify-out/
 
 # Web service runtime data (recorded sessions)
 .wowmin-data/
+assets/models/

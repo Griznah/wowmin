@@ -4,7 +4,9 @@ import { parseOnlineList, playersFromDatabase } from './utils/online-players';
 import { type ActiveInstanceSession, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getInstanceCoordinateBounds, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, groupActiveInstanceSessions, parseInstanceSessionKey, zoomInstanceViewAt } from './utils/instance-watch';
 import { clampIsoPitch, createFlatProjection, createIsoView, DEFAULT_ISO_YAW, type FadeSettings, getFadeVolumes, getHeightBand, getIsoPanForCenter, getNextQuarterTurn, ISO_PITCH, type IsoView, type MapProjection, resolveMinimapTileProjection, type SceneBox } from './utils/map-projection';
 import { InstanceSceneView } from './instance-scene/scene-view';
-import { applyLiveSample, creaturePathKey, LiveBotStore, LiveCreatureBuffer, LivePathStore, LivePositionBuffer, trimPathToPosition } from './utils/live-positions';
+import type { UnitModelPose } from './instance-scene/unit-models';
+import { applyLiveSample, creaturePathKey, getUnitModelUrl, LiveAppearanceStore, LiveBotStore, LiveCreatureBuffer, LivePathStore, LivePositionBuffer, trimPathToPosition } from './utils/live-positions';
+import { getCreatureCombatStyle, getPlayerCombatStyle } from './utils/unit-animation';
 import { CONTINENT_BOUNDS, worldToCanvas } from './utils/map-coords';
 import { getEnglishMotd, getServerUptime } from './utils/dashboard-data';
 import { calculateSessionTotalsAt, formatSessionReplayTime, isSessionRouteDiscontinuity } from './utils/session-replay';
@@ -6472,6 +6474,7 @@ const $instanceFollowBtn = $<HTMLButtonElement>('instance-follow-btn');
 const $instancePathsBtn = $<HTMLButtonElement>('instance-paths-btn');
 const $instanceMobsMode = $<HTMLSelectElement>('instance-mobs-mode');
 const $instanceDecisionsBtn = $<HTMLButtonElement>('instance-decisions-btn');
+const $instanceModelsBtn = $<HTMLButtonElement>('instance-models-btn');
 const $instanceBotCard = $<HTMLElement>('instance-bot-card');
 const $instanceBotDecisions = $<HTMLElement>('instance-bot-decisions');
 const $instanceDebugOverlay = $<HTMLElement>('instance-debug-overlay');
@@ -6565,12 +6568,20 @@ const INSTANCE_MOVE_TARGET_MS = 10_000;
 const INSTANCE_CURRENT_ACTION_MS = 3000;
 const INSTANCE_BOT_CARD_INTERVAL_MS = 250;
 let instanceBotCardRenderedAt = 0;
+// How each unit looks (display, gear), for drawing client models in 3D.
+const instanceLiveAppearances = new LiveAppearanceStore();
+const INSTANCE_MODELS_STORAGE_KEY = 'wowmin.instanceModels';
+let instanceShowModels = readStoredInstanceModels();
+// Rough model heights in yards, for placing labels and click targets above
+// a model rather than at its feet.
+const INSTANCE_PLAYER_MODEL_HEIGHT = 2.2;
+const INSTANCE_CREATURE_MODEL_HEIGHT = 2.5;
 // ?debug in the page URL shows render and stream statistics over the view.
 const instanceDebug = new URLSearchParams(window.location.search).has('debug');
 const INSTANCE_DEBUG_WINDOW_MS = 2000;
 const INSTANCE_DEBUG_INTERVAL_MS = 500;
 const instanceDebugEvents = new Map<string, Array<{ at: number; value: number }>>();
-let instanceDebugCounts = { players: 0, mobsShown: 0, mobsStreamed: 0, paths: 0, bots: 0 };
+let instanceDebugCounts = { players: 0, mobsShown: 0, mobsStreamed: 0, paths: 0, bots: 0, models: 0 };
 let instanceDebugLastFrameAt = 0;
 let instanceDebugRenderedAt = 0;
 // Redraw cap while animating live positions.
@@ -6626,6 +6637,7 @@ function syncInstanceLiveStream(): void {
   instanceLivePaths.clear();
   instanceLiveCreatures.clear();
   instanceLiveBots.clear();
+  instanceLiveAppearances.clear();
   instanceDebugEvents.clear();
   if (!wanted || !streamPositions) return;
   const stream: { key: string; stop: () => void; status: StreamStatus } = { key: wanted.key, stop: () => {}, status: 'starting' };
@@ -6659,6 +6671,11 @@ function syncInstanceLiveStream(): void {
       if (instanceLiveStream !== stream) return;
       instanceLiveBots.push(update, performance.now());
       noteInstanceDebug('bots', update.bots.length);
+    },
+    onAppearances: (update) => {
+      if (instanceLiveStream !== stream) return;
+      instanceLiveAppearances.push(update, performance.now());
+      noteInstanceDebug('appearances', update.units.length);
     },
   });
   instanceLiveStream = stream;
@@ -6842,6 +6859,109 @@ function setInstanceShowPaths(enabled: boolean): void {
   renderInstanceCanvas();
 }
 
+function readStoredInstanceModels(): boolean {
+  try {
+    return window.localStorage.getItem(INSTANCE_MODELS_STORAGE_KEY) !== 'false';
+  } catch {
+    return true;
+  }
+}
+
+function setInstanceShowModels(enabled: boolean): void {
+  instanceShowModels = enabled;
+  $instanceModelsBtn?.setAttribute('aria-pressed', String(enabled));
+  try {
+    window.localStorage.setItem(INSTANCE_MODELS_STORAGE_KEY, String(enabled));
+  } catch {
+    // Preference is per-session only when storage is unavailable.
+  }
+  renderInstanceCanvas();
+}
+
+// Players and creatures with a client model for their current look, posed
+// from the stream.
+// Marker colour for a player: team in battlegrounds, otherwise class (bots grey).
+function getInstancePlayerColor(player: MapPlayerPosition, battleground: boolean): string {
+  if (battleground) return player.teamId === 1 ? '#3b82f6' : player.teamId === 0 ? '#ef4444' : '#94a3b8';
+  return player.isBot ? '#94a3b8' : (CLASS_COLORS[player.class] || '#4fc3f7');
+}
+
+function getCreatureMarkerColor(creature: StreamCreatureSample): string {
+  return !creature.alive ? '#64748b'
+    : creature.playerControlled ? '#4ade80'
+      : creature.hostile ? '#ef4444' : '#facc15';
+}
+
+function getInstanceUnitPoses(
+  players: MapPlayerPosition[],
+  creatures: StreamCreatureSample[],
+  decisions: Map<string, StreamBotDecision>,
+  battleground: boolean,
+  now: number,
+): UnitModelPose[] {
+  const poses: UnitModelPose[] = [];
+  const playersByGuid = new Map<number, MapPlayerPosition>();
+  for (const player of players) {
+    const guid = instanceLivePositions.guidOf(player.name);
+    if (guid === null) continue;
+    playersByGuid.set(guid, player);
+    const appearance = instanceLiveAppearances.get(false, guid, now);
+    const url = getUnitModelUrl(appearance);
+    if (!appearance || !url) continue;
+    poses.push({
+      id: `p${guid}`,
+      url,
+      x: player.position_x,
+      y: player.position_y,
+      z: player.position_z,
+      orientation: player.orientation,
+      scale: appearance.scale || 1,
+      alive: player.alive,
+      inCombat: player.inCombat,
+      style: getPlayerCombatStyle(player.class, appearance, {
+        shapeshifted: appearance.displayId !== appearance.nativeDisplayId,
+        strategies: decisions.get(player.name)?.strategies,
+      }),
+      weapons: appearance,
+      sheathState: appearance.sheathState,
+      marker: {
+        color: player.alive ? getInstancePlayerColor(player, battleground) : '#475569',
+        inCombat: player.inCombat,
+        selected: player.name === selectedInstancePlayerName,
+        healthPct: null,
+      },
+    });
+  }
+  for (const creature of creatures) {
+    const appearance = instanceLiveAppearances.get(true, creature.guid, now);
+    const url = getUnitModelUrl(appearance);
+    if (!appearance || !url) continue;
+    const target = creature.targetIsPlayer ? playersByGuid.get(creature.targetGuid) : undefined;
+    poses.push({
+      id: `c${creature.guid}`,
+      url,
+      x: creature.x,
+      y: creature.y,
+      z: creature.z,
+      orientation: creature.orientation,
+      scale: appearance.scale || 1,
+      alive: creature.alive,
+      inCombat: creature.inCombat,
+      style: getCreatureCombatStyle(
+        target ? Math.hypot(target.position_x - creature.x, target.position_y - creature.y) : null, true),
+      weapons: appearance,
+      sheathState: appearance.sheathState,
+      marker: {
+        color: getCreatureMarkerColor(creature),
+        inCombat: creature.inCombat,
+        selected: false,
+        healthPct: creature.healthPct,
+      },
+    });
+  }
+  return poses;
+}
+
 function readStoredInstanceDecisions(): boolean {
   try {
     return window.localStorage.getItem(INSTANCE_DECISIONS_STORAGE_KEY) !== 'false';
@@ -6920,9 +7040,7 @@ function drawInstanceCreature(
   const boss = isBossCreature(creature, info);
   const elite = info?.rank === 1 || info?.rank === 2;
   const radius = (boss ? 7 : elite ? 4.5 : 3.5) * scale;
-  const color = !creature.alive ? '#64748b'
-    : creature.playerControlled ? '#4ade80'
-      : creature.hostile ? '#ef4444' : '#facc15';
+  const color = getCreatureMarkerColor(creature);
   ctx.save();
   ctx.globalAlpha = !creature.alive ? 0.55 : creature.inCombat || boss ? 1 : 0.75;
   if (creature.inCombat && creature.alive) {
@@ -7638,7 +7756,37 @@ function drawInstanceCanvas(followPass: boolean): void {
   const aspectRatio = assetWidth && assetHeight
     ? assetWidth / assetHeight
     : profile?.aspectRatio;
+  const visiblePlayers = floor && asset?.metadata.floors
+    ? session.players.filter((player) => getParticipantDungeonFloor(player, asset.metadata.floors ?? [])?.id === floor.id)
+    : session.players;
+  const live = instanceLiveStream?.key === session.key;
+  const liveNow = performance.now();
+  const creatures = live && instanceMobsMode !== 'off'
+    ? instanceLiveCreatures.samples(liveNow).filter((creature) => {
+      if (floor && asset?.metadata.floors && getParticipantDungeonFloor({
+        position_x: creature.x, position_y: creature.y, position_z: creature.z, wmoGroupId: creature.wmoGroupId,
+      }, asset.metadata.floors)?.id !== floor.id) return false;
+      return instanceMobsMode === 'all' || isBossCreature(creature, instanceCreatureInfo.get(creature.entry))
+        || visiblePlayers.some((player) =>
+          Math.hypot(player.position_x - creature.x, player.position_y - creature.y) <= INSTANCE_MOBS_NEAR_YARDS
+          && Math.abs(player.position_z - creature.z) <= INSTANCE_MOBS_NEAR_HEIGHT);
+    })
+    : [];
+  const decisions = new Map<string, StreamBotDecision>();
+  if (instanceShowDecisions && live) {
+    for (const player of visiblePlayers) {
+      const decision = player.isBot ? instanceLiveBots.get(player.name, liveNow) : null;
+      if (decision) decisions.set(player.name, decision);
+    }
+  }
+  // Models are placed before the scene draws; units without one get markers.
+  const sceneView = getInstanceSceneView();
+  const modelIds = sceneView
+    ? sceneView.setUnits(instanceShowModels && live && instanceView3d
+      ? getInstanceUnitPoses(visiblePlayers, creatures, decisions, Boolean(battleground), liveNow) : [], liveNow)
+    : new Set<string>();
   const isoView = renderInstanceScene(session, loadedAsset, floor, width, height);
+  const modelShown = (id: string) => Boolean(isoView) && modelIds.has(id);
   // Read after the scene, which may reset it when it reframes.
   const viewTransform = getInstanceViewTransform();
   if ($instanceWatchScene) $instanceWatchScene.hidden = !isoView;
@@ -7675,32 +7823,9 @@ function drawInstanceCanvas(followPass: boolean): void {
     followInstancePan(viewTransform.panX + width / 2 - point.x, viewTransform.panY + height / 2 - point.y);
   }
 
-  const visiblePlayers = floor && asset?.metadata.floors
-    ? session.players.filter((player) => getParticipantDungeonFloor(player, asset.metadata.floors ?? [])?.id === floor.id)
-    : session.players;
   // An 'action' label is a bot's current action, under its name.
   const pendingLabels: { name: string; x: number; y: number; priority: number; action?: boolean }[] = [];
   const markerScale = getCanvasPlayerIconScale(viewTransform.zoom);
-  const live = instanceLiveStream?.key === session.key;
-  const liveNow = performance.now();
-  const creatures = live && instanceMobsMode !== 'off'
-    ? instanceLiveCreatures.samples(liveNow).filter((creature) => {
-      if (floor && asset?.metadata.floors && getParticipantDungeonFloor({
-        position_x: creature.x, position_y: creature.y, position_z: creature.z, wmoGroupId: creature.wmoGroupId,
-      }, asset.metadata.floors)?.id !== floor.id) return false;
-      return instanceMobsMode === 'all' || isBossCreature(creature, instanceCreatureInfo.get(creature.entry))
-        || visiblePlayers.some((player) =>
-          Math.hypot(player.position_x - creature.x, player.position_y - creature.y) <= INSTANCE_MOBS_NEAR_YARDS
-          && Math.abs(player.position_z - creature.z) <= INSTANCE_MOBS_NEAR_HEIGHT);
-    })
-    : [];
-  const decisions = new Map<string, StreamBotDecision>();
-  if (instanceShowDecisions && live) {
-    for (const player of visiblePlayers) {
-      const decision = player.isBot ? instanceLiveBots.get(player.name, liveNow) : null;
-      if (decision) decisions.set(player.name, decision);
-    }
-  }
   let pathsDrawn = 0;
   // Paths, move targets, and target lines go under every marker.
   for (const player of visiblePlayers) {
@@ -7754,10 +7879,15 @@ function drawInstanceCanvas(followPass: boolean): void {
     for (const creature of ordered) {
       const info = instanceCreatureInfo.get(creature.entry);
       const point = projection.worldToScreen(creature.x, creature.y, creature.z);
-      drawInstanceCreature(ctx, creature, info, point, markerScale);
+      const model = modelShown(`c${creature.guid}`);
+      // A model has its own ring on the floor, with health and combat.
+      if (!model) drawInstanceCreature(ctx, creature, info, point, markerScale);
       const boss = isBossCreature(creature, info);
       if (info && creature.alive && (boss || viewTransform.zoom >= INSTANCE_MOB_LABEL_ZOOM)) {
-        pendingLabels.push({ name: info.name, x: point.x + 6 * markerScale, y: point.y - 4 * markerScale, priority: boss ? 1 : -1 });
+        const labelY = model
+          ? projection.worldToScreen(creature.x, creature.y, creature.z + INSTANCE_CREATURE_MODEL_HEIGHT).y
+          : point.y - 4 * markerScale;
+        pendingLabels.push({ name: info.name, x: point.x + 6 * markerScale, y: labelY, priority: boss ? 1 : -1 });
       }
     }
   }
@@ -7776,46 +7906,59 @@ function drawInstanceCanvas(followPass: boolean): void {
     }
 
     const point = project(player);
-    const color = battleground
-      ? player.teamId === 1 ? '#3b82f6' : player.teamId === 0 ? '#ef4444' : '#94a3b8'
-      : player.isBot ? '#94a3b8' : (CLASS_COLORS[player.class] || '#4fc3f7');
-    if (player.inCombat) {
-      ctx.beginPath();
-      ctx.arc(point.x, point.y, 11 * markerScale, 0, Math.PI * 2);
-      ctx.strokeStyle = '#ef4444';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-    }
+    const playerGuid = live ? instanceLivePositions.guidOf(player.name) : null;
+    const model = playerGuid !== null && modelShown(`p${playerGuid}`);
+    // With a model, labels and the click target sit over its head.
+    const top = model
+      ? projection.worldToScreen(player.position_x, player.position_y, player.position_z + INSTANCE_PLAYER_MODEL_HEIGHT).y
+      : point.y;
+    const color = getInstancePlayerColor(player, Boolean(battleground));
     const markerRadius = (player.isBot ? 6 : 8) * markerScale;
-    ctx.beginPath();
-    ctx.arc(point.x, point.y, markerRadius, 0, Math.PI * 2);
-    ctx.fillStyle = player.alive ? color : '#475569';
-    ctx.fill();
-    drawCanvasClassIcon(ctx, player.class, point.x, point.y, markerRadius * 1.65);
-    drawCanvasStateIcon(ctx, player, point.x + markerRadius * 0.7, point.y - markerRadius - 6 * markerScale,
+    // A model has its own ring on the floor (combat and selection included).
+    if (!model) {
+      if (player.inCombat) {
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, 11 * markerScale, 0, Math.PI * 2);
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, markerRadius, 0, Math.PI * 2);
+      ctx.fillStyle = player.alive ? color : '#475569';
+      ctx.fill();
+      drawCanvasClassIcon(ctx, player.class, point.x, point.y, markerRadius * 1.65);
+    }
+    drawCanvasStateIcon(ctx, player, point.x + markerRadius * 0.7, (model ? top : point.y - markerRadius) - 6 * markerScale,
       markerScale);
-    if (player.name === selectedInstancePlayerName) {
+    if (!model && player.name === selectedInstancePlayerName) {
       ctx.beginPath();
       ctx.arc(point.x, point.y, markerRadius + 4, 0, Math.PI * 2);
       ctx.strokeStyle = '#fbbf24';
       ctx.lineWidth = 2;
       ctx.stroke();
     }
-    instanceMarkerHitAreas.push({ name: player.name, x: point.x, y: point.y, radius: markerRadius + 6 });
+    instanceMarkerHitAreas.push(model
+      ? { name: player.name, x: point.x, y: (point.y + top) / 2, radius: Math.max(markerRadius + 6, (point.y - top) / 2 + 4) }
+      : { name: player.name, x: point.x, y: point.y, radius: markerRadius + 6 });
 
-    const headingLength = 13 * markerScale;
-    ctx.beginPath();
-    ctx.moveTo(point.x, point.y);
-    ctx.lineTo(point.x - Math.sin(player.orientation) * headingLength, point.y - Math.cos(player.orientation) * headingLength);
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
-    ctx.stroke();
+    // A model shows which way it faces.
+    if (!model) {
+      const headingLength = 13 * markerScale;
+      ctx.beginPath();
+      ctx.moveTo(point.x, point.y);
+      ctx.lineTo(point.x - Math.sin(player.orientation) * headingLength, point.y - Math.cos(player.orientation) * headingLength);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
 
     if (visiblePlayers.length <= 60) {
+      const labelY = model ? top - 1 : point.y - markerRadius - 1;
       pendingLabels.push({
         name: player.name,
         x: point.x + markerRadius + 4,
-        y: point.y - markerRadius - 1,
+        y: labelY,
         priority: (!player.isBot ? 2 : 0) + (player.inCombat ? 1 : 0),
       });
       const action = getCurrentBotAction(decisions.get(player.name));
@@ -7823,7 +7966,7 @@ function drawInstanceCanvas(followPass: boolean): void {
         pendingLabels.push({
           name: action,
           x: point.x + markerRadius + 4,
-          y: point.y - markerRadius + 14,
+          y: labelY + 15,
           priority: player.name === selectedInstancePlayerName ? 1.5 : -0.5,
           action: true,
         });
@@ -7850,6 +7993,7 @@ function drawInstanceCanvas(followPass: boolean): void {
     mobsStreamed: live ? instanceLiveCreatures.samples(liveNow).length : 0,
     paths: pathsDrawn,
     bots: decisions.size,
+    models: isoView ? modelIds.size : 0,
   };
   if (liveNow - instanceBotCardRenderedAt >= INSTANCE_BOT_CARD_INTERVAL_MS) renderInstanceBotCard(session, liveNow);
 }
@@ -8019,7 +8163,7 @@ function renderInstanceDebugOverlay(now: number): void {
     `scene   ${scene}`,
     `stream  ${instanceLiveStream?.status ?? 'off'} · ${frames.rate.toFixed(1)} frames/s · gap max ${Math.round(frames.max)} ms`,
     `        per s: ${perSecond('paths')} paths · ${perSecond('creatures')} mobs · ${perSecond('bots')} bots`,
-    `shown   ${counts.players} players · ${counts.mobsShown}/${counts.mobsStreamed} mobs · ${counts.paths} paths · ${counts.bots} bots`,
+    `shown   ${counts.players} players · ${counts.mobsShown}/${counts.mobsStreamed} mobs · ${counts.paths} paths · ${counts.bots} bots · ${counts.models} models`,
     `view    zoom ${transform.zoom.toFixed(2)} · yaw ${Math.round(getInstanceViewYaw() * 180 / Math.PI)}° · pitch ${Math.round(getInstanceViewPitch() * 180 / Math.PI)}°${floor ? ` · floor ${floor.floorIndex}` : ''}`,
   ];
   $instanceDebugOverlay.textContent = lines.join('\n');
@@ -8302,6 +8446,9 @@ $instancePathsBtn?.addEventListener('click', () => setInstanceShowPaths(!instanc
 $instanceDecisionsBtn?.setAttribute('aria-pressed', String(instanceShowDecisions));
 if ($instanceDecisionsBtn && !window.electronAPI.map.streamPositions) $instanceDecisionsBtn.disabled = true;
 $instanceDecisionsBtn?.addEventListener('click', () => setInstanceShowDecisions(!instanceShowDecisions));
+$instanceModelsBtn?.setAttribute('aria-pressed', String(instanceShowModels));
+if ($instanceModelsBtn && !window.electronAPI.map.streamPositions) $instanceModelsBtn.disabled = true;
+$instanceModelsBtn?.addEventListener('click', () => setInstanceShowModels(!instanceShowModels));
 // Pointer-down too, as the card redraws every second and a click could
 // straddle a redraw.
 for (const type of ['pointerdown', 'click'] as const) {

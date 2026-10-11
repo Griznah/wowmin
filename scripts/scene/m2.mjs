@@ -82,6 +82,7 @@ export function loadM2(modelName, readFile) {
         blend: batch.material.blend,
         materialFlags: batch.material.flags,
         texture: texture?.component === M2_TEXTURE_COMPONENT_HARDCODED && texture.filename ? texture.filename : null,
+        textureType: texture?.component ?? M2_TEXTURE_COMPONENT_HARDCODED,
         textureFlags: texture?.flags ?? 0,
       };
     }),

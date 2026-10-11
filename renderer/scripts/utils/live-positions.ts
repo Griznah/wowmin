@@ -1,5 +1,5 @@
 import type {
-  MapPlayerPosition, StreamBotDecision, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame,
+  MapPlayerPosition, StreamAppearance, StreamAppearanceUpdate, StreamBotDecision, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame,
   StreamPath, StreamPathUpdate, StreamPlayerSample,
 } from '../../../src/types/electron';
 
@@ -269,4 +269,66 @@ export function trimPathToPosition(points: Point3[], position: Point3): Point3[]
     }
   }
   return points.slice(start);
+}
+
+// How each unit looks; the module re-sends every 5 s, so one not heard from
+// for this long has gone.
+export const LIVE_APPEARANCE_STALE_MS = 15_000;
+
+export class LiveAppearanceStore {
+  private readonly appearances = new Map<string, { at: number; appearance: StreamAppearance }>();
+
+  push(update: StreamAppearanceUpdate, receivedAt: number): void {
+    for (const appearance of update.units) {
+      this.appearances.set(`${appearance.creature ? 'c' : 'p'}${appearance.guid}`, { at: receivedAt, appearance });
+    }
+  }
+
+  clear(): void {
+    this.appearances.clear();
+  }
+
+  get size(): number {
+    return this.appearances.size;
+  }
+
+  get(creature: boolean, guid: number, now: number): StreamAppearance | null {
+    const key = `${creature ? 'c' : 'p'}${guid}`;
+    const entry = this.appearances.get(key);
+    if (!entry) return null;
+    if (now - entry.at > LIVE_APPEARANCE_STALE_MS) {
+      this.appearances.delete(key);
+      return null;
+    }
+    return entry.appearance;
+  }
+}
+
+// Equipment slots that change how a character looks, in the order of the
+// character model key (scripts/scene/unit-model.mjs characterKey).
+const CHARACTER_KEY_SLOTS = [0, 2, 3, 4, 5, 6, 7, 8, 9, 14, 15, 16, 17, 18];
+const HEAD_SLOT = 0;
+const BACK_SLOT = 14;
+const WEAPON_SLOTS = [15, 16, 17];
+
+// The model for a unit's current look: a creature display (with its
+// weapons), which also covers druid forms and other shapeshifts and morphs,
+// or a dressed character.
+export function getUnitModelUrl(appearance: StreamAppearance | null): string | null {
+  if (!appearance?.displayId) return null;
+  if (appearance.creature || appearance.displayId !== appearance.nativeDisplayId) {
+    const weapons = appearance.creature ? WEAPON_SLOTS.map((slot) => appearance.items[slot] ?? 0) : [0, 0, 0];
+    return weapons.some(Boolean)
+      ? `assets/models/creature/${appearance.displayId}-${weapons.join('.')}.glb`
+      : `assets/models/creature/${appearance.displayId}.glb`;
+  }
+  const items = CHARACTER_KEY_SLOTS.map((slot) => {
+    if ((slot === HEAD_SLOT && appearance.helmHidden) || (slot === BACK_SLOT && appearance.cloakHidden)) return 0;
+    return appearance.items[slot] ?? 0;
+  });
+  const flags = (appearance.helmHidden ? 1 : 0) | (appearance.cloakHidden ? 2 : 0);
+  return `assets/models/character/${[
+    appearance.race, appearance.gender, appearance.skin, appearance.face, appearance.hairStyle, appearance.hairColor,
+    appearance.facialStyle, flags, items.join('.'),
+  ].join('-')}.glb`;
 }
