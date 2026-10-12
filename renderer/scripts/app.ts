@@ -7649,6 +7649,8 @@ function setInstanceView3d(enabled: boolean): void {
   renderInstanceWatcher();
 }
 
+let instanceLegacyMetadataWarned = false;
+
 async function loadInstanceMapAsset(mapId: number): Promise<void> {
   if (instanceMapAssets.has(mapId) || instanceMapAssetLoads.has(mapId)) return;
   instanceMapAssetLoads.add(mapId);
@@ -7657,7 +7659,14 @@ async function loadInstanceMapAsset(mapId: number): Promise<void> {
     const response = await fetch(metadataUrl);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const metadata = await response.json() as InstanceMapAssetMetadata;
-    if (![1, 2].includes(metadata.schemaVersion) || metadata.mapId !== mapId) {
+    // Version 3 came from the earlier combined export (extract:maps --scenes):
+    // version 2 plus a `scene` key, now ignored. Its maps need the scene
+    // export (extract:scenes) re-run for their 3D view.
+    if (metadata.schemaVersion === 3 && !instanceLegacyMetadataWarned) {
+      instanceLegacyMetadataWarned = true;
+      console.warn('[instance watch] Map files from the old extract:maps --scenes export: re-run npm run extract:scenes for the 3D view.');
+    }
+    if (![1, 2, 3].includes(metadata.schemaVersion) || metadata.mapId !== mapId) {
       throw new Error('unsupported instance map metadata');
     }
     const loadImage = async (relativePath: string): Promise<HTMLImageElement> => {
@@ -7716,6 +7725,9 @@ function getSelectedDungeonFloor(
     const floor = getParticipantDungeonFloor(player, floors);
     if (floor) counts.set(floor.id, (counts.get(floor.id) ?? 0) + 1);
   }
+  // With nobody on a known floor the 3D view shows everyone; the flat view
+  // still needs a floor for its artwork.
+  if (!counts.size && isInstanceSceneShowing(session.mapId)) return null;
   const floor = [...floors].sort((left, right) =>
     (counts.get(right.id) ?? 0) - (counts.get(left.id) ?? 0) || left.floorIndex - right.floorIndex)[0] ?? null;
   if (floor) instanceSelectedFloorIds.set(session.key, floor.id);
@@ -8132,9 +8144,7 @@ function drawInstanceCanvas(followPass: boolean): void {
   if (!instanceMapAssets.has(session.mapId) && !instanceMapAssetLoads.has(session.mapId)) {
     void loadInstanceMapAsset(session.mapId);
   }
-  if (!instanceScenes.has(session.mapId) && !instanceSceneLoads.has(session.mapId)) {
-    void loadInstanceScene(session.mapId);
-  }
+  void loadInstanceScene(session.mapId);
   const loadedAsset = instanceMapAssets.get(session.mapId) ?? null;
   const profile = getInstanceMapProfile(session.mapId);
   const projectionType = loadedAsset?.metadata.projection?.type;
@@ -8154,16 +8164,23 @@ function drawInstanceCanvas(followPass: boolean): void {
   const aspectRatio = assetWidth && assetHeight
     ? assetWidth / assetHeight
     : profile?.aspectRatio;
-  const visiblePlayers = floor
-    ? session.players.filter((player) => getParticipantDungeonFloor(player, floors)?.id === floor.id)
-    : session.players;
+  // Units on the floor shown; in 3D also those on no floor at all, as the
+  // scene draws what the floors don't cover (the flat view has only the
+  // floor's artwork).
+  const sceneFloors = isInstanceSceneShowing(session.mapId);
+  const onShownFloor = (unit: Pick<MapPlayerPosition, 'position_x' | 'position_y' | 'position_z' | 'wmoGroupId'>): boolean => {
+    if (!floor) return true;
+    const at = getParticipantDungeonFloor(unit, floors);
+    return at ? at.id === floor.id : sceneFloors;
+  };
+  const visiblePlayers = floor ? session.players.filter(onShownFloor) : session.players;
   const live = instanceLiveStream?.key === session.key;
   const liveNow = performance.now();
   const creatures = live && instanceMobsMode !== 'off'
     ? instanceLiveCreatures.samples(liveNow).filter((creature) => {
-      if (floor && getParticipantDungeonFloor({
-        position_x: creature.x, position_y: creature.y, position_z: creature.z, wmoGroupId: creature.wmoGroupId,
-      }, floors)?.id !== floor.id) return false;
+      if (!onShownFloor({ position_x: creature.x, position_y: creature.y, position_z: creature.z, wmoGroupId: creature.wmoGroupId })) {
+        return false;
+      }
       return instanceMobsMode === 'all' || isBossCreature(creature, instanceCreatureInfo.get(creature.entry))
         || visiblePlayers.some((player) =>
           Math.hypot(player.position_x - creature.x, player.position_y - creature.y) <= INSTANCE_MOBS_NEAR_YARDS
@@ -8397,8 +8414,7 @@ function drawInstanceCanvas(followPass: boolean): void {
     }
   }
   for (const player of visiblePlayers) {
-    const trail = (instanceTrails.get(player.name) ?? []).filter((point) =>
-      !floor || getParticipantDungeonFloor(point, floors)?.id === floor.id);
+    const trail = (instanceTrails.get(player.name) ?? []).filter(onShownFloor);
     if (instanceShowTrails && trail.length > 1) {
       ctx.beginPath();
       trail.forEach((point, index) => {

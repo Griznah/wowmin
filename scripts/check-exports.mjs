@@ -34,8 +34,12 @@ export function jsonDifferences(left, right, limit = 5, at = '') {
   return differences;
 }
 
+// Exports are flat folders: only their files are compared, so a folder
+// kept beside them (a workspace) is left alone.
+const fileNames = (dir) => fs.readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isFile()).map((entry) => entry.name);
+
 export function compareExports(referenceDir, newDir) {
-  const names = new Set([...fs.readdirSync(referenceDir), ...fs.readdirSync(newDir)]);
+  const names = new Set([...fileNames(referenceDir), ...fileNames(newDir)]);
   const report = { '2D': [], '3D': [] };
   for (const name of [...names].sort()) {
     const left = path.join(referenceDir, name);

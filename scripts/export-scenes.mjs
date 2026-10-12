@@ -10,6 +10,7 @@ import { pathToFileURL } from 'node:url';
 
 import { locateDataDir, openClientData } from './client-archives.mjs';
 import { buildMapCatalog } from './map-catalog.mjs';
+import { assertNpmValueOptionsHaveValues, readNpmConfigBoolean, readNpmConfigValue } from './npm-config.mjs';
 import { exportMapScene } from './scene/export-scene.mjs';
 
 export const SCENE_SCHEMA_VERSION = 1;
@@ -19,6 +20,7 @@ const USAGE = `WoW Admin 3D scene exporter
 Usage:
   npm run extract:scenes -- --source /path/to/WoW --all-instances
   npm run extract:scenes -- --source /path/to/WoW --map 489 --map 574
+  npm run extract:scenes --source=/path/to/WoW --all-instances
 
 Options:
   --source, -s        WoW client root or its Data directory
@@ -29,8 +31,21 @@ Options:
   --help, -h          Show this message
 `;
 
+const NPM_VALUE_OPTIONS = ['source', 'output', 'map', 'scene_texture_max'];
+
+// Arguments after a standalone --, or npm config options (--source=/path)
+// when npm took them itself.
 export function parseSceneArgs(argv) {
-  const options = { source: null, output: 'assets/instances', mapIds: [], allInstances: false, textureMax: 512, help: false };
+  assertNpmValueOptionsHaveValues(NPM_VALUE_OPTIONS);
+  const npmMaps = readNpmConfigValue('map');
+  const options = {
+    source: readNpmConfigValue('source') ?? null,
+    output: readNpmConfigValue('output') ?? 'assets/instances',
+    mapIds: npmMaps ? npmMaps.split(',').map(Number) : [],
+    allInstances: readNpmConfigBoolean('all_instances') ?? false,
+    textureMax: Number(readNpmConfigValue('scene_texture_max') ?? 512),
+    help: false,
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     const value = () => {

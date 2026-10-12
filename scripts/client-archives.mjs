@@ -109,8 +109,10 @@ export function archiveReader(openedArchives) {
 
 // A reader over every archive in a client's Data directory.
 export function openClientData(dataDir, { warn = () => {} } = {}) {
-  const openedArchives = openArchives(findMpqArchives(dataDir), (archivePath, message) =>
+  const archivePaths = findMpqArchives(dataDir);
+  if (!archivePaths.length) throw new Error(`No MPQ archives found in ${dataDir}.`);
+  const openedArchives = openArchives(archivePaths, (archivePath, message) =>
     warn(`Skipping ${path.basename(archivePath)}: ${message}`));
-  if (!openedArchives.length) throw new Error(`No MPQ archives found in ${dataDir}.`);
+  if (!openedArchives.length) throw new Error(`None of the ${archivePaths.length} MPQ archives in ${dataDir} could be opened.`);
   return archiveReader(openedArchives);
 }

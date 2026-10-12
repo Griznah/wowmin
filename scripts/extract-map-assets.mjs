@@ -13,6 +13,7 @@ import { PNG } from 'pngjs';
 
 import { archiveReader, extractMpqFile, findMpqArchives, locateDataDir, openArchives, walkFiles } from './client-archives.mjs';
 import { CONTINENTS, describeMaps, readMapTables, resolveMapTargets } from './map-catalog.mjs';
+import { assertNpmValueOptionsHaveValues, readNpmConfigBoolean, readNpmConfigValue } from './npm-config.mjs';
 
 // Audited common.MPQ map-530 edge textures. Both js-blp and Pillow show
 // these opaque white/grey placeholders in the original BLP pixels. Gate by
@@ -56,27 +57,6 @@ const DEFAULTS = {
 
 const NPM_VALUE_OPTIONS = ['source', 'output', 'map', 'map_dir', 'workspace', 'quality'];
 
-function readNpmConfigValue(name) {
-  const value = process.env[`npm_config_${name}`];
-  return value === undefined || value === '' || value === 'true' ? undefined : value;
-}
-
-function readNpmConfigBoolean(name) {
-  const value = process.env[`npm_config_${name}`];
-  if (value === undefined || value === '') return undefined;
-  return !['false', '0', 'no', 'off'].includes(value.toLowerCase());
-}
-
-function assertNpmValueOptionsHaveValues() {
-  const missingValues = NPM_VALUE_OPTIONS.filter((name) => process.env[`npm_config_${name}`] === 'true');
-  if (missingValues.length === 0) return;
-  const flags = missingValues.map((name) => `--${name.replaceAll('_', '-')}`).join(', ');
-  throw new Error(
-    `npm consumed ${flags} without their values. Put a standalone -- before extractor arguments ` +
-    '(recommended), or use npm config syntax such as --source=/path --quality=100.'
-  );
-}
-
 function printUsage() {
   console.log(`WoW Admin map extractor
 
@@ -109,7 +89,11 @@ Notes:
 }
 
 export function parseArgs(argv) {
-  assertNpmValueOptionsHaveValues();
+  assertNpmValueOptionsHaveValues(NPM_VALUE_OPTIONS);
+  // 3D scenes have their own command now.
+  if (readNpmConfigBoolean('scenes') || readNpmConfigValue('scene_texture_max')) {
+    throw new Error('3D scenes are no longer made by extract:maps; run npm run extract:scenes.');
+  }
   const npmOutput = readNpmConfigValue('output');
   const npmMaps = readNpmConfigValue('map');
   const options = {
@@ -451,6 +435,7 @@ function tryExtractMinimapsWithStormlib(
         if (requestedMapIds.length !== 1) throw new Error('--map-dir can only be used with one --map value.');
         targets = [{ mapId: requestedMapIds[0], label: `Map ${requestedMapIds[0]}`, candidates: [mapDirOverride] }];
       } else {
+        if (!tables.map) throw new Error('Could not extract DBFilesClient/Map.dbc; pass --map-dir explicitly.');
         targets = resolveMapTargets(tables, requestedMapIds, allInstances);
       }
     }

@@ -20,6 +20,23 @@ test('scene export options need a source and maps', async () => {
   assert.throws(() => parseSceneArgs(['--source', '/wow', '--scenes']), /Unknown argument/);
 });
 
+test('scene export options also come from npm config, as npm passes them without a standalone --', async () => {
+  const { parseSceneArgs } = await exporter;
+  const saved = { ...process.env };
+  try {
+    Object.assign(process.env, { npm_config_source: '/wow', npm_config_all_instances: 'true', npm_config_scene_texture_max: '256' });
+    const options = parseSceneArgs([]);
+    assert.equal(options.source, path.resolve('/wow'));
+    assert.equal(options.allInstances, true);
+    assert.equal(options.textureMax, 256);
+    process.env.npm_config_source = 'true';
+    assert.throws(() => parseSceneArgs([]), /npm consumed --source without their values/);
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+    Object.assign(process.env, saved);
+  }
+});
+
 test('a scene manifest names its map and carries the scene', async () => {
   const { sceneManifest, SCENE_SCHEMA_VERSION } = await exporter;
   const manifest = sceneManifest(

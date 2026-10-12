@@ -57,6 +57,12 @@ test('rejects spaced npm shorthand before positional values are misread', async 
   );
 });
 
+test('points npm config scene options at the scene command', async () => {
+  const { parseArgs } = await extractor;
+  assert.throws(() => withNpmConfig({ source: '/tmp/wow-client', all_instances: 'true', scenes: 'true' }, () => parseArgs([])),
+    /extract:scenes/);
+});
+
 test('cleans audited map-530 padding without removing real edge water', async () => {
   const { cleanMap530Placeholder } = await extractor;
   const image = {

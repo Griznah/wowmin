@@ -38,6 +38,8 @@ test('export check reports each side separately', async () => {
     fs.writeFileSync(path.join(left, '33.glb'), 'old');
     fs.writeFileSync(path.join(right, '33.glb'), 'newer');
     fs.writeFileSync(path.join(right, '33.scene.json'), '{}');
+    // Folders beside the exports (a kept workspace) are left alone.
+    for (const dir of [left, right]) fs.mkdirSync(path.join(dir, 'workspace'));
     const report = compareExports(left, right);
     assert.deepEqual(report['2D'], []);
     assert.deepEqual(report['3D'], ['33.glb: bytes differ (3 → 5)', `33.scene.json: only in ${right}`]);

@@ -188,7 +188,7 @@ export function readMapTables(readFile) {
 // The requested maps (or every instance) from Map.dbc, continents keeping
 // their known minimap directories.
 export function resolveMapTargets(tables, requestedMapIds, allInstances = false) {
-  if (!tables.map) throw new Error('Could not extract DBFilesClient/Map.dbc; pass --map-dir explicitly.');
+  if (!tables.map) throw new Error('Could not extract DBFilesClient/Map.dbc from the client.');
   const targets = parseMapDbc(tables.map, requestedMapIds, allInstances).map((target) => {
     const continent = target.mapType === 0 ? CONTINENTS.find((entry) => entry.mapId === target.mapId) : null;
     return continent ? { ...target, ...continent } : target;
