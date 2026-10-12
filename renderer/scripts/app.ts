@@ -6478,6 +6478,8 @@ const $instanceFadeRangeValue = $<HTMLOutputElement>('instance-fade-range-value'
 const $instanceHorizontalFade = $<HTMLInputElement>('instance-horizontal-fade');
 const $instanceFadesBtn = $<HTMLButtonElement>('instance-fades-btn');
 const $instanceHorizontalFadeValue = $<HTMLOutputElement>('instance-horizontal-fade-value');
+const $instanceRenderScale = $<HTMLInputElement>('instance-render-scale');
+const $instanceRenderScaleValue = $<HTMLOutputElement>('instance-render-scale-value');
 const $instanceFollowBtn = $<HTMLButtonElement>('instance-follow-btn');
 const $instancePathsBtn = $<HTMLButtonElement>('instance-paths-btn');
 const $instanceTrailsBtn = $<HTMLButtonElement>('instance-trails-btn');
@@ -6655,6 +6657,11 @@ const INSTANCE_HORIZONTAL_FADE_STORAGE_KEY = 'wowmin.instanceHorizontalFade';
 const INSTANCE_HORIZONTAL_FADE_DEFAULT = 40;
 const INSTANCE_HORIZONTAL_FADE_MAX = 200;
 let instanceHorizontalFade = readStoredInstanceHorizontalFade();
+// The 3D scene's resolution as a share of the screen's (capped) resolution.
+const INSTANCE_RENDER_SCALE_STORAGE_KEY = 'wowmin.instanceRenderScale';
+const INSTANCE_RENDER_SCALE_DEFAULT = 1;
+const INSTANCE_RENDER_SCALE_MIN = 0.5;
+let instanceRenderScale = readStoredInstanceRenderScale();
 // Both fades on or off; off shows and frames the whole map (battlegrounds,
 // outdoor areas).
 const INSTANCE_FADES_STORAGE_KEY = 'wowmin.instanceFades';
@@ -6887,11 +6894,40 @@ function readStoredInstanceView3d(): boolean {
   }
 }
 
+function clampInstanceRenderScale(scale: number): number {
+  return Number.isFinite(scale)
+    ? Math.max(INSTANCE_RENDER_SCALE_MIN, Math.min(1, scale))
+    : INSTANCE_RENDER_SCALE_DEFAULT;
+}
+
+function readStoredInstanceRenderScale(): number {
+  try {
+    const stored = window.localStorage.getItem(INSTANCE_RENDER_SCALE_STORAGE_KEY);
+    return clampInstanceRenderScale(stored === null ? INSTANCE_RENDER_SCALE_DEFAULT : Number(stored));
+  } catch {
+    return INSTANCE_RENDER_SCALE_DEFAULT;
+  }
+}
+
+function setInstanceRenderScale(scale: number, render = true): void {
+  instanceRenderScale = clampInstanceRenderScale(scale);
+  if ($instanceRenderScale) $instanceRenderScale.value = String(instanceRenderScale);
+  if ($instanceRenderScaleValue) $instanceRenderScaleValue.textContent = `${Math.round(instanceRenderScale * 100)}%`;
+  instanceSceneView?.setRenderScale(instanceRenderScale);
+  try {
+    window.localStorage.setItem(INSTANCE_RENDER_SCALE_STORAGE_KEY, String(instanceRenderScale));
+  } catch {
+    // Preference is per-session only when storage is unavailable.
+  }
+  if (render) renderInstanceCanvas();
+}
+
 function getInstanceSceneView(): InstanceSceneView | null {
   if (instanceSceneView === undefined) {
     instanceSceneView = $instanceWatchScene && InstanceSceneView.isSupported()
       ? new InstanceSceneView($instanceWatchScene, () => renderInstanceWatcher())
       : null;
+    instanceSceneView?.setRenderScale(instanceRenderScale);
   }
   return instanceSceneView?.available ? instanceSceneView : null;
 }
@@ -8702,7 +8738,7 @@ function renderInstanceDebugOverlay(now: number): void {
   const perSecond = (kind: string) => (getInstanceDebugStats(kind, now).total / (INSTANCE_DEBUG_WINDOW_MS / 1000)).toFixed(1);
   const session = getSelectedInstanceSession();
   const scene = $instanceWatchScene && !$instanceWatchScene.hidden
-    ? `3D · ${$instanceWatchScene.dataset.drawCalls ?? '?'} draws · ${Math.round(Number($instanceWatchScene.dataset.triangles ?? 0) / 1000)}k tris`
+    ? `3D · ${$instanceWatchScene.dataset.drawCalls ?? '?'} draws · ${Math.round(Number($instanceWatchScene.dataset.triangles ?? 0) / 1000)}k tris · ${$instanceWatchScene.dataset.buffer ?? '?'} px`
     : 'flat map';
   const floor = session ? getSelectedDungeonFloor(session, instanceMapAssets.get(session.mapId) ?? null) : null;
   const transform = getInstanceViewTransform();
@@ -9031,6 +9067,8 @@ setInstanceFadeRange(instanceFadeRange, false);
 $instanceFadeRange?.addEventListener('input', () => setInstanceFadeRange(Number($instanceFadeRange.value)));
 setInstanceHorizontalFade(instanceHorizontalFade, false);
 $instanceHorizontalFade?.addEventListener('input', () => setInstanceHorizontalFade(Number($instanceHorizontalFade.value)));
+setInstanceRenderScale(instanceRenderScale, false);
+$instanceRenderScale?.addEventListener('input', () => setInstanceRenderScale(Number($instanceRenderScale.value)));
 setInstanceFades(instanceFades, false);
 $instanceFadesBtn?.addEventListener('click', () => setInstanceFades(!instanceFades));
 $instanceAutoRefresh?.addEventListener('change', () => {

@@ -182,7 +182,7 @@ function healthColor(fraction: number): string {
 }
 
 function markerMesh<T extends BufferGeometry>(geometry: T, color: string): Mesh<T, MeshBasicMaterial> {
-  const mesh = new Mesh(geometry, new MeshBasicMaterial({ color, side: DoubleSide, depthTest: false, depthWrite: false }));
+  const mesh = new Mesh(geometry, new MeshBasicMaterial({ color, side: DoubleSide, forceSinglePass: true, depthTest: false, depthWrite: false }));
   mesh.renderOrder = MARKER_RENDER_ORDER;
   mesh.frustumCulled = false;
   return mesh;
@@ -579,6 +579,8 @@ export class UnitModelLayer {
       color: source.color.clone(),
       opacity: source.opacity,
       side: source.side === DoubleSide ? DoubleSide : FrontSide,
+      // One pass for both faces, as the client draws them (see scene-view.ts).
+      forceSinglePass: true,
       alphaTest: blend === 'alphaKey' ? 0.5 : 0,
       transparent: (blend !== 'opaque' && blend !== 'alphaKey') || source.opacity < 1,
       depthWrite: (blend === 'opaque' || blend === 'alphaKey') && source.opacity >= 1,

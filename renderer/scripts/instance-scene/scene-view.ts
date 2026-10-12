@@ -22,6 +22,8 @@ import {
   Sphere,
   SRGBColorSpace,
   type Texture,
+  Uniform,
+  UniformsGroup,
   Vector2,
   Vector3,
   WebGLRenderer,
@@ -73,6 +75,9 @@ const WATER_FRAGMENT = `
 const VERTEX_LIT_BRIGHTNESS = 2;
 const UNLIT_BRIGHTNESS = 0.75;
 const BACKGROUND = 0x08111d;
+// High-density displays draw at most this many pixels per CSS pixel (before
+// the viewer's render scale), so a 2x screen costs about half the pixels.
+const MAX_PIXEL_RATIO = 1.5;
 // Untextured ground until terrain textures are drawn.
 const TERRAIN_COLOR = 0x4a5a3c;
 // Effect heights on units drawn without a model, or whose model lacks the
@@ -89,6 +94,16 @@ const HEAD_HEIGHT = 0.9;
 // server coordinates; three.js is Y-up, so server (x, y, z) is (x, -z, y) here.
 // The reach uniforms' values when there is none (floats, so not Infinity).
 const NO_REACH = 1e9;
+// All fade values live in one uniform buffer shared by every scene material,
+// uploaded once a frame (per-material uniform arrays were re-sent on every
+// material switch). three.js r186 mislays arrays of vectors in a uniforms
+// group, so the block is one Float32Array packed by hand in std140 order.
+const FADE_BLOCK = 'WowFade';
+const FADE_VOLUME_MAX_OFFSET = MAX_FADE_VOLUMES * 4;
+const FADE_REACH_MIN_OFFSET = FADE_VOLUME_MAX_OFFSET * 2;
+const FADE_REACH_MAX_OFFSET = FADE_REACH_MIN_OFFSET + 4;
+const FADE_PARAMS_OFFSET = FADE_REACH_MAX_OFFSET + 4;
+const FADE_BLOCK_FLOATS = FADE_PARAMS_OFFSET + 4;
 const FADE_VERTEX_DECLARATIONS = 'varying vec3 vWowPosition;\n';
 const FADE_VERTEX = `
 vec4 wowWorld = modelMatrix * vec4(transformed, 1.0);
@@ -96,13 +111,19 @@ vWowPosition = vec3(wowWorld.x, -wowWorld.z, wowWorld.y);
 `;
 const FADE_FRAGMENT_DECLARATIONS = `
 #define WOW_MAX_VOLUMES ${MAX_FADE_VOLUMES}
-uniform vec3 wowVolumeMin[WOW_MAX_VOLUMES];
-uniform vec3 wowVolumeMax[WOW_MAX_VOLUMES];
-uniform int wowVolumeCount;
-uniform float wowHeightRange;
-uniform float wowHorizontalRange;
-uniform vec3 wowReachMin;
-uniform vec3 wowReachMax;
+layout(std140) uniform ${FADE_BLOCK} {
+  vec4 wowVolumeMinPacked[WOW_MAX_VOLUMES];
+  vec4 wowVolumeMaxPacked[WOW_MAX_VOLUMES];
+  vec4 wowReachMinPacked;
+  vec4 wowReachMaxPacked;
+  // Height range, horizontal range, volume count.
+  vec4 wowFadeParams;
+};
+#define wowReachMin wowReachMinPacked.xyz
+#define wowReachMax wowReachMaxPacked.xyz
+#define wowHeightRange wowFadeParams.x
+#define wowHorizontalRange wowFadeParams.y
+#define wowVolumeCount int(wowFadeParams.z)
 varying vec3 vWowPosition;
 float wowBayer4(vec2 position) {
   const float pattern[16] = float[16](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
@@ -110,7 +131,7 @@ float wowBayer4(vec2 position) {
   return (pattern[cell.x + cell.y * 4] + 0.5) / 16.0;
 }
 float wowVolumeFade(int index) {
-  vec3 outside = max(max(wowVolumeMin[index] - vWowPosition, vWowPosition - wowVolumeMax[index]), 0.0);
+  vec3 outside = max(max(wowVolumeMinPacked[index].xyz - vWowPosition, vWowPosition - wowVolumeMaxPacked[index].xyz), 0.0);
   float vertical = clamp(1.0 - outside.z / wowHeightRange, 0.0, 1.0);
   if (wowHorizontalRange <= 0.0) return vertical;
   float core = wowHorizontalRange * 0.5;
@@ -166,16 +187,9 @@ export class InstanceSceneView {
   private readonly renderer: WebGLRenderer;
   private readonly scene = new Scene();
   private readonly camera = new OrthographicCamera();
-  // Shared by every scene material.
-  private readonly fadeUniforms = {
-    wowVolumeMin: { value: Array.from({ length: MAX_FADE_VOLUMES }, () => new Vector3()) },
-    wowVolumeMax: { value: Array.from({ length: MAX_FADE_VOLUMES }, () => new Vector3()) },
-    wowVolumeCount: { value: 0 },
-    wowHeightRange: { value: 1 },
-    wowHorizontalRange: { value: 0 },
-    wowReachMin: { value: new Vector3(-NO_REACH, -NO_REACH, -NO_REACH) },
-    wowReachMax: { value: new Vector3(NO_REACH, NO_REACH, NO_REACH) },
-  };
+  // The fade block's contents, shared by every scene material.
+  private readonly fadeData = new Float32Array(FADE_BLOCK_FLOATS);
+  private readonly fadeGroup = new UniformsGroup().setName(FADE_BLOCK).add(new Uniform(this.fadeData));
   // Scenes are meshopt-compressed (scripts/scene/export-scene.mjs).
   private readonly loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
   private readonly roots = new Map<string, Object3D>();
@@ -200,11 +214,18 @@ export class InstanceSceneView {
   // The fade the last frame drew with, for picking only what can be seen.
   private lastFade: { volumes: FadeVolume[]; fade: FadeSettings } | null = null;
   private readonly raycaster = new Raycaster();
+  // The viewer's render scale (0.5 to 1), times the capped pixel ratio.
+  private renderScale = 1;
+  // The canvas size and pixel ratio last set, to resize only on a change.
+  private sizeKey = '';
 
   constructor(private readonly canvas: HTMLCanvasElement, private readonly onChange: () => void) {
     this.renderer = new WebGLRenderer({ canvas, antialias: true });
-    this.renderer.setPixelRatio(window.devicePixelRatio || 1);
     this.renderer.setClearColor(BACKGROUND);
+    // A loaded scene never moves: its world matrices are set once in load()
+    // and render() updates only the live layers, rather than three.js walking
+    // every node of a big map each frame.
+    this.scene.matrixWorldAutoUpdate = false;
     this.units = new UnitModelLayer(() => {
       this.lastFrameKey = '';
       this.onChange();
@@ -243,6 +264,14 @@ export class InstanceSceneView {
 
   get available(): boolean {
     return !this.lost;
+  }
+
+  // Draws at `scale` (0.5 to 1) of the capped resolution; the canvas is
+  // stretched to fit.
+  setRenderScale(scale: number): void {
+    if (scale === this.renderScale) return;
+    this.renderScale = scale;
+    this.lastFrameKey = '';
   }
 
   // Places the unit models for the next render; returns the IDs drawn as
@@ -382,10 +411,11 @@ export class InstanceSceneView {
     const root = this.roots.get(url);
     if (!root || this.lost) return false;
     const active = volumes.slice(0, MAX_FADE_VOLUMES);
+    const pixelRatio = Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO) * this.renderScale;
     // Live positions redraw the overlay up to 30 times a second; the scene only
     // changes when the camera moves or the fade shifts by about a yard.
     const frameKey = [
-      url, width, height, view.pixelsPerUnit.toFixed(4),
+      url, width, height, pixelRatio, view.pixelsPerUnit.toFixed(4),
       ...view.center.map((value) => value.toFixed(3)),
       ...view.basis.toCamera.map((value) => value.toFixed(5)),
       fade.height, fade.horizontal ?? 0, ...(fade.reach ? [fade.reach.minX, fade.reach.maxX, fade.reach.minY, fade.reach.maxY, fade.reach.minZ, fade.reach.maxZ] : ['none']),
@@ -408,18 +438,17 @@ export class InstanceSceneView {
       this.scene.add(root);
       this.shown = root;
     }
+    const data = this.fadeData;
     active.forEach((volume, index) => {
-      this.fadeUniforms.wowVolumeMin.value[index].set(volume.minX, volume.minY, volume.minZ);
-      this.fadeUniforms.wowVolumeMax.value[index].set(volume.maxX, volume.maxY, volume.maxZ);
+      data.set([volume.minX, volume.minY, volume.minZ], index * 4);
+      data.set([volume.maxX, volume.maxY, volume.maxZ], FADE_VOLUME_MAX_OFFSET + index * 4);
     });
-    this.fadeUniforms.wowVolumeCount.value = active.length;
-    this.fadeUniforms.wowHeightRange.value = fade.height;
-    this.fadeUniforms.wowHorizontalRange.value = fade.horizontal ?? 0;
     const reachBox = fade.reach ?? {
       minX: -NO_REACH, maxX: NO_REACH, minY: -NO_REACH, maxY: NO_REACH, minZ: -NO_REACH, maxZ: NO_REACH,
     };
-    this.fadeUniforms.wowReachMin.value.set(reachBox.minX, reachBox.minY, reachBox.minZ);
-    this.fadeUniforms.wowReachMax.value.set(reachBox.maxX, reachBox.maxY, reachBox.maxZ);
+    data.set([reachBox.minX, reachBox.minY, reachBox.minZ], FADE_REACH_MIN_OFFSET);
+    data.set([reachBox.maxX, reachBox.maxY, reachBox.maxZ], FADE_REACH_MAX_OFFSET);
+    data.set([fade.height, fade.horizontal ?? 0, active.length], FADE_PARAMS_OFFSET);
     const reach = fade.horizontal ?? Infinity;
     for (const bounds of this.meshBounds.get(root) ?? []) {
       bounds.mesh.visible = bounds.minZ <= reachBox.maxZ && bounds.maxZ >= reachBox.minZ
@@ -429,12 +458,21 @@ export class InstanceSceneView {
         && bounds.maxX > volume.minX - reach && bounds.minX < volume.maxX + reach
         && bounds.maxY > volume.minY - reach && bounds.minY < volume.maxY + reach));
     }
-    this.renderer.setSize(width, height, false);
+    // Resizing clears and reallocates the drawing buffer, so only on a change.
+    const sizeKey = `${width}x${height}@${pixelRatio}`;
+    if (sizeKey !== this.sizeKey) {
+      this.sizeKey = sizeKey;
+      this.renderer.setPixelRatio(pixelRatio);
+      this.renderer.setSize(width, height, false);
+    }
     applyIsoCamera(this.camera, view, width, height);
+    // setUnits has already updated the unit models' matrices this frame.
+    for (const child of this.scene.children) if (child !== root && child !== this.units.group) child.updateMatrixWorld();
     this.renderer.render(this.scene, this.camera);
     // Exposed for diagnosing slow scenes from the browser's developer tools.
     this.canvas.dataset.drawCalls = String(this.renderer.info.render.calls);
     this.canvas.dataset.triangles = String(this.renderer.info.render.triangles);
+    this.canvas.dataset.buffer = `${this.canvas.width}x${this.canvas.height}`;
     return true;
   }
 
@@ -464,13 +502,19 @@ export class InstanceSceneView {
   }
 
   // One function for every material, so three.js shares the compiled program.
+  // The material also needs the fade block (withFade).
   private readonly injectPartyFade = (shader: WebGLProgramParametersWithUniforms): void => {
-    Object.assign(shader.uniforms, this.fadeUniforms);
     shader.vertexShader = FADE_VERTEX_DECLARATIONS + shader.vertexShader
       .replace('#include <project_vertex>', `#include <project_vertex>\n${FADE_VERTEX}`);
     shader.fragmentShader = FADE_FRAGMENT_DECLARATIONS + shader.fragmentShader
       .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>\n${FADE_FRAGMENT}`);
   };
+
+  // Binds the fade block to a material whose shader has the party fade.
+  private withFade<T extends Material>(material: T): T {
+    (material as T & { uniformsGroups: UniformsGroup[] }).uniformsGroups = [this.fadeGroup];
+    return material;
+  }
 
   // Every texture in the scene by its material's name, for liquid frames.
   private async liquidFrames(gltf: GLTF): Promise<Map<string, Texture>> {
@@ -490,7 +534,7 @@ export class InstanceSceneView {
     if (!textures.length) return null;
     const see = liquid.kind === 'water' || liquid.kind === 'ocean';
     const material = new MeshBasicMaterial({
-      map: textures[0], side: DoubleSide, transparent: see, opacity: see ? WATER_OPACITY : 1, depthWrite: !see,
+      map: textures[0], side: DoubleSide, forceSinglePass: true, transparent: see, opacity: see ? WATER_OPACITY : 1, depthWrite: !see,
     });
     if (see) {
       material.color.setRGB(...(liquid.color ?? WATER_COLOR), SRGBColorSpace);
@@ -502,7 +546,7 @@ export class InstanceSceneView {
     } else {
       material.onBeforeCompile = this.injectPartyFade;
     }
-    return { material, frames: textures };
+    return { material: this.withFade(material), frames: textures };
   }
 
   // The map's ground textures as one array, and each tile's alpha atlas by
@@ -534,12 +578,12 @@ export class InstanceSceneView {
             color: new Color(TERRAIN_COLOR).multiplyScalar(vertexLit ? shadingScale : 1), vertexColors: vertexLit,
           });
           plain.onBeforeCompile = this.injectPartyFade;
-          return plain;
+          return this.withFade(plain);
         }
-        return createTerrainMaterial({
+        return this.withFade(createTerrainMaterial({
           layers: terrain.layers, alpha, origin: source.userData.origin as [number, number],
           vertexShaded: vertexLit, shadingScale, partyFade: this.injectPartyFade,
-        });
+        }));
       }
       const key = `${source.uuid}|${vertexLit}`;
       const cached = this.materials.get(key);
@@ -554,6 +598,10 @@ export class InstanceSceneView {
         opacity: source.opacity,
         vertexColors: vertexLit,
         side: source.side === DoubleSide ? DoubleSide : FrontSide,
+        // The client draws both faces in one pass; three.js's default two
+        // passes for see-through double-sided materials also re-derive the
+        // shader program on every draw.
+        forceSinglePass: true,
         alphaTest: blend === 'alphaKey' ? 0.5 : 0,
         transparent: (blend !== 'opaque' && blend !== 'alphaKey') || source.opacity < 1,
         depthWrite: (blend === 'opaque' || blend === 'alphaKey') && source.opacity >= 1,
@@ -561,6 +609,7 @@ export class InstanceSceneView {
         premultipliedAlpha: blend === 'mod' || blend === 'mod2x',
       });
       material.onBeforeCompile = this.injectPartyFade;
+      this.withFade(material);
       this.materials.set(key, material);
       return material;
     };

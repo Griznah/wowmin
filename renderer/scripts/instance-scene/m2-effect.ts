@@ -212,7 +212,7 @@ class QuadBatch {
     geometry.setAttribute('uv', new BufferAttribute(this.uvs, 2).setUsage(DynamicDrawUsage));
     geometry.setAttribute('color', new BufferAttribute(this.colors, 4).setUsage(DynamicDrawUsage));
     geometry.setIndex(new BufferAttribute(indices, 1));
-    const material = new MeshBasicMaterial({ map: texture, vertexColors: true, side: DoubleSide });
+    const material = new MeshBasicMaterial({ map: texture, vertexColors: true, side: DoubleSide, forceSinglePass: true });
     applyBlend(material, blend);
     this.mesh = new Mesh(geometry, material);
     this.mesh.frustumCulled = false;
@@ -539,7 +539,7 @@ export class EffectInstance {
       map.center.set(0.5, 0.5);
       map.needsUpdate = true;
     }
-    const material = new MeshBasicMaterial({ map, side: DoubleSide });
+    const material = new MeshBasicMaterial({ map, side: DoubleSide, forceSinglePass: true });
     applyBlend(material, geometryBlend(extras.wowBlend));
     mesh.material = material;
     this.materials.push({
