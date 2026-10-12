@@ -594,7 +594,7 @@ export async function exportMapScene({
     minX: x - 50, maxX: x + 50, minY: y - 50, maxY: y + 50, minZ: z - 50, maxZ: z + 50,
   }));
   const bounds = unionBounds(boundsSources);
-  const heights = new Map(computeFloorHeights(floors, groups).map(({ id, minZ, maxZ }) => [id, { minZ, maxZ }]));
+  const heights = new Map(computeFloorHeights(floors, groups).map((floor) => [floor.id, floor]));
 
   return {
     scene: {
@@ -603,7 +603,7 @@ export async function exportMapScene({
       groups: groups.map(({ wmoGroupId, exterior, minZ, maxZ }) => ({ wmoGroupId, exterior, minZ, maxZ })),
       // Every floor, so the 3D view can tell which one a player is on; the
       // height range only where its WMO groups give one.
-      floors: floors.map(({ id, floorIndex, bounds: box, chunks }) => ({ id, floorIndex, bounds: box, chunks, ...heights.get(id) })),
+      floors: floors.map((floor) => ({ ...floor, ...heights.get(floor.id) })),
       buildingReach: buildingReach(groups, area, safePoints(readFile, mapId)),
       ...(terrain.tiles ? { terrain: { tiles: terrain.tiles, chunks: terrain.chunks, bounds: terrain.bounds } } : {}),
     },

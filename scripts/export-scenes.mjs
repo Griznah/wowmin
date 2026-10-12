@@ -95,8 +95,8 @@ async function main() {
         readFile,
         outputDir: options.output,
         textureMax: options.textureMax,
-        floors: map.floors ?? [],
-        worldMapBounds: map.worldMapBounds ?? null,
+        floors: map.floors,
+        worldMapBounds: map.worldMapBounds,
       });
       const manifestPath = path.join(options.output, `${map.mapId}.scene.json`);
       fs.writeFileSync(manifestPath, `${JSON.stringify(sceneManifest(map, scene), null, 2)}\n`);

@@ -3,7 +3,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -12,11 +11,8 @@ import jpeg from 'jpeg-js';
 import BLPFile from 'js-blp';
 import { PNG } from 'pngjs';
 
-import { extractMpqFile, findMpqArchives, locateDataDir, walkFiles } from './client-archives.mjs';
+import { archiveReader, extractMpqFile, findMpqArchives, locateDataDir, openArchives, walkFiles } from './client-archives.mjs';
 import { CONTINENTS, describeMaps, readMapTables, resolveMapTargets } from './map-catalog.mjs';
-
-const require = createRequire(import.meta.url);
-const { MpqArchive } = require('stormlib-js');
 
 // Audited common.MPQ map-530 edge textures. Both js-blp and Pillow show
 // these opaque white/grey placeholders in the original BLP pixels. Gate by
@@ -437,32 +433,14 @@ function tryExtractMinimapsWithStormlib(
 ) {
   if (archives.length === 0) return null;
 
-  const openedArchives = [];
+  const openedArchives = openArchives(archives, (archivePath, message) =>
+    console.warn(`  ! Skipping ${path.basename(archivePath)} for built-in MPQ extraction: ${message}`));
   try {
-    for (const archivePath of archives) {
-      try {
-        openedArchives.push({
-          archivePath,
-          archive: MpqArchive.open(archivePath),
-        });
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        console.warn(`  ! Skipping ${path.basename(archivePath)} for built-in MPQ extraction: ${errorMessage}`);
-      }
-    }
-
     if (openedArchives.length === 0) {
       return null;
     }
 
-    // The archives are in rising priority: read from the last, so patches win.
-    const readFile = (fileName) => {
-      for (let index = openedArchives.length - 1; index >= 0; index -= 1) {
-        const file = extractMpqFile(openedArchives[index].archive, [fileName]);
-        if (file) return file;
-      }
-      return null;
-    };
+    const readFile = archiveReader(openedArchives);
     const trsBuffer = readFile('textures\\Minimap\\md5translate.trs');
     if (!trsBuffer) return null;
 

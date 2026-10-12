@@ -82,23 +82,35 @@ export function extractMpqFile(archive, fileNames) {
   return null;
 }
 
-// A reader over every archive in a client's Data directory, highest priority
-// first, so patches override the base archives.
-export function openClientData(dataDir, { warn = () => {} } = {}) {
-  const archives = findMpqArchives(dataDir).reverse().flatMap((archivePath) => {
+// Opens each archive, keeping their order; one that fails is skipped and
+// passed to onError.
+export function openArchives(archivePaths, onError = () => {}) {
+  return archivePaths.flatMap((archivePath) => {
     try {
-      return [MpqArchive.open(archivePath)];
+      return [{ archivePath, archive: MpqArchive.open(archivePath) }];
     } catch (error) {
-      warn(`Skipping ${path.basename(archivePath)}: ${error instanceof Error ? error.message : error}`);
+      onError(archivePath, error instanceof Error ? error.message : String(error));
       return [];
     }
   });
-  if (!archives.length) throw new Error(`No MPQ archives found in ${dataDir}.`);
+}
+
+// Reads a file from the highest-priority archive holding it. The archives are
+// in rising priority (as findMpqArchives lists them), so patches win.
+export function archiveReader(openedArchives) {
   return (fileName) => {
-    for (const archive of archives) {
-      const file = extractMpqFile(archive, [fileName]);
+    for (let index = openedArchives.length - 1; index >= 0; index -= 1) {
+      const file = extractMpqFile(openedArchives[index].archive, [fileName]);
       if (file) return file;
     }
     return null;
   };
+}
+
+// A reader over every archive in a client's Data directory.
+export function openClientData(dataDir, { warn = () => {} } = {}) {
+  const openedArchives = openArchives(findMpqArchives(dataDir), (archivePath, message) =>
+    warn(`Skipping ${path.basename(archivePath)}: ${message}`));
+  if (!openedArchives.length) throw new Error(`No MPQ archives found in ${dataDir}.`);
+  return archiveReader(openedArchives);
 }

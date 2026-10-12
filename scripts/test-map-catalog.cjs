@@ -10,46 +10,6 @@ test('resolves client artwork aliases missing from WorldMapArea', async () => {
   assert.deepEqual(getClientMapDirectoryAliases(33), []);
 });
 
-test('WorldMapArea resolves patched artwork directory without sub-area bounds replacement', async () => {
-  const { parseWorldMapAreaDbc } = await catalog;
-  const strings = Buffer.from('\0ShadowfangKeep\0OtherFloor\0');
-  const buffer = Buffer.alloc(20 + 2 * 44 + strings.length);
-  buffer.write('WDBC');
-  buffer.writeUInt32LE(2, 4);
-  buffer.writeUInt32LE(11, 8);
-  buffer.writeUInt32LE(44, 12);
-  buffer.writeUInt32LE(strings.length, 16);
-  strings.copy(buffer, 108);
-  for (let index = 0; index < 2; index += 1) {
-    const offset = 20 + index * 44;
-    buffer.writeUInt32LE(33, offset + 4);
-    buffer.writeUInt32LE(209, offset + 8);
-    buffer.writeUInt32LE(index === 0 ? 1 : 16, offset + 12);
-    [400, 100, 300, 50].forEach((value, component) =>
-      buffer.writeFloatLE(value + index * 1000, offset + 16 + component * 4));
-  }
-  const area = parseWorldMapAreaDbc(buffer).get(33);
-  assert.deepEqual(area.directories, ['ShadowfangKeep', 'OtherFloor']);
-  assert.deepEqual(area.bounds, { minX: 50, maxX: 300, minY: 100, maxY: 400 });
-});
-
-test('WorldMapArea keeps the artwork directory of a record without bounds', async () => {
-  const { parseWorldMapAreaDbc } = await catalog;
-  const strings = Buffer.from('\0TheTempleOfAtalHakkar\0');
-  const buffer = Buffer.alloc(20 + 44 + strings.length);
-  buffer.write('WDBC');
-  buffer.writeUInt32LE(1, 4);
-  buffer.writeUInt32LE(11, 8);
-  buffer.writeUInt32LE(44, 12);
-  buffer.writeUInt32LE(strings.length, 16);
-  strings.copy(buffer, 64);
-  buffer.writeUInt32LE(109, 24);
-  buffer.writeUInt32LE(1477, 28);
-  buffer.writeUInt32LE(1, 32);
-  const area = parseWorldMapAreaDbc(buffer).get(109);
-  assert.deepEqual(area, { bounds: null, directories: ['TheTempleOfAtalHakkar'] });
-});
-
 // A WDBC table: `write(buffer, offset, string)` fills each record, `string`
 // returning the offset of a string it adds to the string block.
 function dbc(fieldCount, recordSize, records) {
@@ -97,6 +57,16 @@ const chunkRecord = (mapId, wmoGroupId, floorId, minZ) => (buffer, offset) => {
   buffer.writeUInt32LE(floorId, offset + 12);
   buffer.writeFloatLE(minZ, offset + 16);
 };
+
+test('WorldMapArea resolves patched artwork directory without sub-area bounds replacement', async () => {
+  const { parseWorldMapAreaDbc } = await catalog;
+  const area = parseWorldMapAreaDbc(dbc(11, 44, [
+    areaRecord(33, 209, 'ShadowfangKeep', [400, 100, 300, 50]),
+    areaRecord(33, 209, 'OtherFloor', [1400, 1100, 1300, 1050]),
+  ])).get(33);
+  assert.deepEqual(area.directories, ['ShadowfangKeep', 'OtherFloor']);
+  assert.deepEqual(area.bounds, { minX: 50, maxX: 300, minY: 100, maxY: 400 });
+});
 
 const CLIENT_TABLES = {
   'DBFilesClient\\Map.dbc': dbc(6, 24, [

@@ -11,6 +11,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const IGNORED_KEYS = new Set(['generatedAt']);
 
@@ -42,13 +43,15 @@ export function compareExports(referenceDir, newDir) {
     const kind = exportKind(name);
     if (!fs.existsSync(left)) { report[kind].push(`${name}: only in ${newDir}`); continue; }
     if (!fs.existsSync(right)) { report[kind].push(`${name}: only in ${referenceDir}`); continue; }
-    const a = fs.readFileSync(left);
-    const b = fs.readFileSync(right);
     if (name.endsWith('.json')) {
-      const differences = jsonDifferences(JSON.parse(a.toString('utf8')), JSON.parse(b.toString('utf8')));
+      const differences = jsonDifferences(JSON.parse(fs.readFileSync(left, 'utf8')), JSON.parse(fs.readFileSync(right, 'utf8')));
       if (differences.length) report[kind].push(`${name}: differs at ${differences.join(', ')}`);
-    } else if (!a.equals(b)) {
-      report[kind].push(`${name}: bytes differ (${a.length} → ${b.length})`);
+      continue;
+    }
+    // Scenes run to tens of MB: only read files whose sizes match.
+    const [sizeA, sizeB] = [fs.statSync(left).size, fs.statSync(right).size];
+    if (sizeA !== sizeB || !fs.readFileSync(left).equals(fs.readFileSync(right))) {
+      report[kind].push(`${name}: bytes differ (${sizeA} → ${sizeB})`);
     }
   }
   return report;
@@ -69,4 +72,4 @@ function main() {
   process.exit(report['2D'].length || report['3D'].length ? 1 : 0);
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === new URL(import.meta.url).pathname) main();
+if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) main();

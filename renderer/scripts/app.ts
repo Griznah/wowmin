@@ -6962,9 +6962,9 @@ function isInstanceSceneShowing(mapId: number): boolean {
   return Boolean(url && instanceView3d && getInstanceSceneView()?.state(url) === 'ready');
 }
 
-// The floors the view in use splits the map by: the scene's while it shows,
-// otherwise the flat view's floor maps. Both come from DungeonMap.dbc, so a
-// floor keeps its id when the view changes.
+// The floors the view in use splits the map by: the scene's (every
+// DungeonMap.dbc floor) while it shows, otherwise the flat view's (only floors
+// with artwork). The ids are DungeonMap.dbc's in both.
 function getInstanceFloors(mapId: number): DungeonFloor[] {
   if (isInstanceSceneShowing(mapId)) return getInstanceScene(mapId)?.floors ?? [];
   const metadata = instanceMapAssets.get(mapId)?.metadata;
@@ -7498,10 +7498,12 @@ function updateInstanceOrbit(event: PointerEvent): void {
 // Draws the 3D scene under the overlay and returns its projection, or null
 // when the flat view should be used (no scene, 3D off, still loading, no WebGL).
 // The scene shows around the party and around `landmarks` (bosses, which are
-// always drawn), but is framed on the party.
+// always drawn), but is framed on the party: `floorPlayers`, the players on the
+// focused floor.
 function renderInstanceScene(
   session: ActiveInstanceSession,
   floor: DungeonFloor | null,
+  floorPlayers: MapPlayerPosition[],
   width: number,
   height: number,
   landmarks: Point3[] = [],
@@ -7514,10 +7516,6 @@ function renderInstanceScene(
   if (sceneView.state(url) !== 'ready') return null;
 
   const floorHeights = floor ? scene.floors.find((candidate) => candidate.id === floor.id) : undefined;
-  // The party is whoever is drawn: the players on the focused floor.
-  const floorPlayers = floor
-    ? session.players.filter((player) => getParticipantDungeonFloor(player, scene.floors)?.id === floor.id)
-    : session.players;
   const buildings = scene.buildingReach;
   const pad = INSTANCE_REACH_PADDING;
   const reach: SceneBox | null = buildings ? {
@@ -7661,8 +7659,10 @@ async function loadInstanceMapAsset(mapId: number): Promise<void> {
   }
 }
 
-function getSelectedDungeonFloor(session: ActiveInstanceSession): DungeonFloor | null {
-  const floors = getInstanceFloors(session.mapId);
+function getSelectedDungeonFloor(
+  session: ActiveInstanceSession,
+  floors = getInstanceFloors(session.mapId),
+): DungeonFloor | null {
   if (!floors.length) return null;
   const focused = selectedInstancePlayerName
     ? session.players.find((player) => player.name === selectedInstancePlayerName)
@@ -8101,12 +8101,14 @@ function drawInstanceCanvas(followPass: boolean): void {
   if (!instanceMapAssets.has(session.mapId) && !instanceMapAssetLoads.has(session.mapId)) {
     void loadInstanceMapAsset(session.mapId);
   }
-  void loadInstanceScene(session.mapId);
+  if (!instanceScenes.has(session.mapId) && !instanceSceneLoads.has(session.mapId)) {
+    void loadInstanceScene(session.mapId);
+  }
   const loadedAsset = instanceMapAssets.get(session.mapId) ?? null;
   const profile = getInstanceMapProfile(session.mapId);
   const projectionType = loadedAsset?.metadata.projection?.type;
   const floors = getInstanceFloors(session.mapId);
-  const floor = getSelectedDungeonFloor(session);
+  const floor = getSelectedDungeonFloor(session, floors);
   const asset = projectionType === 'minimapTiles'
     || projectionType === 'dungeonFloors'
     || (projectionType === 'worldMapArea' && (profile || loadedAsset?.metadata.worldMapBounds))
@@ -8176,7 +8178,7 @@ function drawInstanceCanvas(followPass: boolean): void {
   const bossPositions = creatures
     .filter((creature) => isBossCreature(creature, instanceCreatureInfo.get(creature.entry)))
     .map((creature): Point3 => [creature.x, creature.y, creature.z]);
-  const isoView = renderInstanceScene(session, floor, width, height, bossPositions);
+  const isoView = renderInstanceScene(session, floor, visiblePlayers, width, height, bossPositions);
   // The flat map stops at its own closest zoom, which the 3D view can pass.
   if (!isoView && getInstanceViewTransform().zoom > INSTANCE_MAX_ZOOM) {
     const flatViewport = aspectRatio ? getInstanceProjectionViewport(width, height, aspectRatio) : { x: 0, y: 0, width, height };
