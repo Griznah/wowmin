@@ -164,6 +164,7 @@ export function applyLiveSample(player: MapPlayerPosition, sample: StreamPlayerS
     spiritForm: (sample.stateFlags & 16) !== 0,
     flagCarrier: (sample.stateFlags & 32) !== 0,
     flying: (sample.stateFlags & 64) !== 0,
+    sitting: (sample.stateFlags & 128) !== 0,
   };
 }
 

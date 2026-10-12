@@ -90,8 +90,8 @@ accessed from a browser.
   away (**3D** button) and is used wherever a scene isn't available
 - Players and mobs drawn with their own game models (race, gear, druid forms,
   pets, mounts, vehicles and their passengers), animated walking, running,
-  fighting, casting, and dying, with floor rings showing side, combat,
-  selection, and health
+  fighting, casting, sitting (to eat or drink), and dying, with floor rings
+  showing side, combat, selection, and health
 - Live from the companion module's UDP position stream (10 updates a second):
   smooth movement, mobs, bot paths and decisions (with `mod-playerbots`),
   battleground banners, flags, and doors, raid markers, and debuffs

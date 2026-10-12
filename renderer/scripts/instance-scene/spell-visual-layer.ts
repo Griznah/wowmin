@@ -84,6 +84,9 @@ export class SpellVisualLayer {
   private readonly alphas = new Map<UnitKey, { alpha: number; fadeMs: number; at: number }>();
   private readonly onceAnimations = new Map<UnitKey, string>();
   private particleCount = 0;
+  // This frame's units. Effects that follow a unit read it every frame, so
+  // they keep up with it (each frame brings new positions).
+  private units: UnitInfo = { anchor: () => null, scale: () => 1, facing: () => 0 };
   private readonly chains: ChainRibbons;
   // Spells that auras with a bearer area cast (Starfall's 30 yard search),
   // whose own rings the steady area replaces.
@@ -208,15 +211,16 @@ export class SpellVisualLayer {
   // `auras` lists each unit's art auras (spell IDs), from the live stream.
   update(store: CombatEffectStore | null, now: number, units: UnitInfo, camera: Camera,
     auras: ReadonlyMap<UnitKey, readonly number[]> = new Map()): void {
+    this.units = units;
     const castsNow = new Set(store?.casts ?? []);
     const areasNow = new Set(store?.areas ?? []);
     const seconds = this.lastUpdateAt ? Math.min(0.1, Math.max(0, (now - this.lastUpdateAt) / 1000)) : 0;
     this.lastUpdateAt = now;
     if (store) {
       for (const area of store.areas) this.startArea(area, now, units);
-      for (const cast of store.casts) this.startCast(cast, now, units);
-      for (const projectile of store.projectiles) this.startMissile(projectile, now, units);
-      for (const impact of store.impacts) this.startImpact(impact, now, units);
+      for (const cast of store.casts) this.startCast(cast, now);
+      for (const projectile of store.projectiles) this.startMissile(projectile, now);
+      for (const impact of store.impacts) this.startImpact(impact, now);
     }
     this.syncStates(store ? auras : new Map(), now, units);
     // Casts the store has ended: held effects stop; release flashes play out.
@@ -340,8 +344,7 @@ export class SpellVisualLayer {
 
   // Each of a kit's effects on its body slot of `unit`, following it, and
   // any colour flash it starts there.
-  private playKit(kit: VisualKit, templates: Array<EffectTemplate | null>, unit: UnitKey, now: number, loop: boolean,
-    units: UnitInfo): PlayingEffect[] {
+  private playKit(kit: VisualKit, templates: Array<EffectTemplate | null>, unit: UnitKey, now: number, loop: boolean): PlayingEffect[] {
     const flash = kitColorFlash(kit);
     if (flash) this.flashes.set(unit, { flash, startAt: now });
     return kit.effects.flatMap((effect, index) => {
@@ -349,22 +352,22 @@ export class SpellVisualLayer {
       if (!template) return [];
       const role = slotAnchor(effect.slot);
       const playing = this.play(template, now, loop, () => {
-        const point = units.anchor(unit, role);
-        return point ? { position: point, yaw: units.facing(unit), scale: effect.scale * units.scale(unit) } : null;
+        const point = this.units.anchor(unit, role);
+        return point ? { position: point, yaw: this.units.facing(unit), scale: effect.scale * this.units.scale(unit) } : null;
       });
       if (!loop) playing.stopAt = now + playing.instance.duration;
       return [playing];
     });
   }
 
-  private startCast(cast: CastGlow, now: number, units: UnitInfo): void {
+  private startCast(cast: CastGlow, now: number): void {
     if (this.casts.has(cast) || now < cast.startAt) return;
     const art = this.art(cast.spellId, cast.schoolMask);
     const kit = art ? castKit(art, cast) : undefined;
     if (!kit) return;
     const templates = this.kitTemplates(kit);
     if (!templates) return;
-    this.casts.set(cast, { kit, effects: this.playKit(kit, templates, cast.caster, now, !cast.release, units), startedAt: now });
+    this.casts.set(cast, { kit, effects: this.playKit(kit, templates, cast.caster, now, !cast.release), startedAt: now });
     if (cast.release) {
       const once = kitAnimationName(kit.anim);
       if (once) this.onceAnimations.set(cast.caster, once);
@@ -393,7 +396,7 @@ export class SpellVisualLayer {
       if (this.states.has(key)) continue;
       const templates = this.kitTemplates(kit);
       if (!templates) continue;
-      this.states.set(key, { unit, kit, effects: this.playKit(kit, templates, unit, now, true, units), startedAt: now });
+      this.states.set(key, { unit, kit, effects: this.playKit(kit, templates, unit, now, true), startedAt: now });
     }
   }
 
@@ -436,15 +439,15 @@ export class SpellVisualLayer {
     });
   }
 
-  private startMissile(projectile: Projectile, now: number, units: UnitInfo): void {
+  private startMissile(projectile: Projectile, now: number): void {
     if (this.missiles.has(projectile) || now < projectile.startAt) return;
     const missile = this.art(projectile.spellId, projectile.schoolMask)?.missile;
     if (!missile) return;
     const template = this.template(missile.id);
     if (!template) return;
     const effect = this.play(template, now, true, (time) => {
-      const from = units.anchor(projectile.source, 'handRight');
-      const to = units.anchor(projectile.target, 'chest');
+      const from = this.units.anchor(projectile.source, 'handRight');
+      const to = this.units.anchor(projectile.target, 'chest');
       if (!from || !to) return null;
       const t = Math.min(1, Math.max(0, (time - projectile.startAt) / projectile.travelMs));
       const position: Point3 = [from[0] + (to[0] - from[0]) * t, from[1] + (to[1] - from[1]) * t, from[2] + (to[2] - from[2]) * t];
@@ -455,7 +458,7 @@ export class SpellVisualLayer {
     this.missiles.set(projectile, effect);
   }
 
-  private startImpact(impact: Impact, now: number, units: UnitInfo): void {
+  private startImpact(impact: Impact, now: number): void {
     if (this.seenImpacts.has(impact) || now < impact.at || impact.small) return;
     const art = this.art(impact.spellId, impact.schoolMask);
     const kit = art?.kits.targetImpact ?? art?.kits.impact;
@@ -463,7 +466,7 @@ export class SpellVisualLayer {
     const templates = this.kitTemplates(kit);
     if (!templates) return;
     this.seenImpacts.add(impact);
-    this.playKit(kit, templates, impact.target, now, false, units);
+    this.playKit(kit, templates, impact.target, now, false);
     const once = kitAnimationName(kit.anim);
     if (once) this.onceAnimations.set(impact.target, once);
   }

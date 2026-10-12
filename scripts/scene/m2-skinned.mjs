@@ -10,6 +10,18 @@ import { expandSkinVertices, M2_VERTEX_SIZE, skinFileName, staticBatchColor } fr
 const M2_NO_LOOP = 0xFFFF;
 // Set on sequences whose keyframes are inside the .m2 rather than a .anim file.
 const M2_SEQUENCE_FLAG_INLINE = 0x20;
+// Set on sequences that only point at another (aliasNext) for their keys.
+const M2_SEQUENCE_FLAG_ALIAS = 0x40;
+// Where a bone's tracks sit in the .m2, for reading a .anim file's keys: the
+// bone array's M2Array in the header, each bone's size, and each track's
+// offset in it. A track's times and keys are M2Arrays of per-sequence
+// M2Arrays (count, offset); an external sequence's offsets point into its
+// .anim file.
+const M2_BONES_OFFSET = 0x2c;
+const M2_BONE_SIZE = 88;
+const M2_BONE_TRACKS = { translationTrack: 16, rotationTrack: 36, scaleTrack: 56 };
+const M2_TRACK_TIMES = 4;
+const M2_TRACK_KEYS = 12;
 const M2_TRACK_INTERPOLATION_NONE = 0;
 
 // AnimationData.dbc IDs of the animations exported, by the name the renderer
@@ -54,6 +66,11 @@ export const UNIT_ANIMATIONS = {
   // A flying mount in the air: moving, and staying in place.
   Fly: 135,
   Hover: 193,
+  // Sitting on the ground (eating, drinking, resting): sitting down, seated,
+  // and getting up.
+  SitGroundDown: 96,
+  SitGround: 97,
+  SitGroundUp: 98,
 };
 
 // M2 stores rotations as signed 16-bit quaternion components.
@@ -97,14 +114,54 @@ export function expandSkinnedVertices(modelVertices, skinVertexLookup) {
 }
 
 // The sequence index for each wanted animation: variation 0, keyframes inline.
-export function selectSequences(sequences, wanted = UNIT_ANIMATIONS) {
+// The first variation of each wanted animation. Sequences kept in .anim
+// files are left out unless `external` (their entries are then marked).
+export function selectSequences(sequences, wanted = UNIT_ANIMATIONS, { external = false } = {}) {
   const selected = [];
   for (const [name, id] of Object.entries(wanted)) {
     const index = sequences.findIndex((sequence) => sequence.id === id && sequence.variationIndex === 0);
-    if (index < 0 || !(sequences[index].flags & M2_SEQUENCE_FLAG_INLINE)) continue;
-    selected.push({ name, id, index, duration: sequences[index].duration, moveSpeed: sequences[index].moveSpeed });
+    if (index < 0 || sequences[index].flags & M2_SEQUENCE_FLAG_ALIAS) continue;
+    const inline = Boolean(sequences[index].flags & M2_SEQUENCE_FLAG_INLINE);
+    if (!inline && !external) continue;
+    selected.push({
+      name, id, index, duration: sequences[index].duration, moveSpeed: sequences[index].moveSpeed, ...(inline ? {} : { external: true }),
+    });
   }
   return selected;
+}
+
+// The file an external sequence's keys are in: <model><id>-<variation>.anim.
+export function animFileName(modelName, sequence) {
+  return `${modelName.replace(/\.m2$/i, '')}${String(sequence.id).padStart(4, '0')}-${String(sequence.variationIndex).padStart(2, '0')}.anim`;
+}
+
+// One bone track's keys for a sequence kept in a .anim file, read through
+// the track's header in the .m2. Global-sequence tracks keep their keys in
+// the .m2, as for any sequence.
+export function externalTrackKeys(modelBytes, animBytes, boneIndex, trackName, track, sequenceIndex) {
+  if (track.loopIndex !== M2_NO_LOOP) return trackKeys(track, sequenceIndex);
+  const model = new DataView(modelBytes.buffer, modelBytes.byteOffset, modelBytes.byteLength);
+  const anim = new DataView(animBytes.buffer, animBytes.byteOffset, animBytes.byteLength);
+  const header = model.getUint32(M2_BONES_OFFSET + 4, true) + boneIndex * M2_BONE_SIZE + M2_BONE_TRACKS[trackName];
+  const entry = (field) => {
+    if (sequenceIndex >= model.getUint32(header + field, true)) return null;
+    const at = model.getUint32(header + field + 4, true) + sequenceIndex * 8;
+    return { count: model.getUint32(at, true), offset: model.getUint32(at + 4, true) };
+  };
+  const times = entry(M2_TRACK_TIMES);
+  const keys = entry(M2_TRACK_KEYS);
+  if (!times?.count || !keys?.count) return null;
+  const rotation = trackName === 'rotationTrack';
+  const width = rotation ? 4 : 3;
+  const keyBytes = rotation ? 2 : 4;
+  if (times.offset + times.count * 4 > anim.byteLength || keys.offset + keys.count * width * keyBytes > anim.byteLength) return null;
+  const timeValues = new Uint32Array(times.count);
+  for (let index = 0; index < times.count; index += 1) timeValues[index] = anim.getUint32(times.offset + index * 4, true);
+  const values = rotation ? new Int16Array(keys.count * width) : new Float32Array(keys.count * width);
+  for (let index = 0; index < values.length; index += 1) {
+    values[index] = rotation ? anim.getInt16(keys.offset + index * 2, true) : anim.getFloat32(keys.offset + index * 4, true);
+  }
+  return { times: timeValues, values, step: track.trackType === M2_TRACK_INTERPOLATION_NONE };
 }
 
 function trackKeys(track, sequenceIndex) {
@@ -151,6 +208,8 @@ export function boneChannelsFrom(bone, parentPivot, pick) {
 
 // Loads the model, its first skin profile, the bones, and the wanted
 // animations. `showSection(id)` picks geosets (all when omitted).
+const clipInfo = ({ name, duration, moveSpeed }) => ({ name, duration, moveSpeed });
+
 export function loadSkinnedM2(modelName, readFile, { showSection = () => true, animations = UNIT_ANIMATIONS } = {}) {
   const modelBuffer = readFile(modelName);
   const skinBuffer = modelBuffer ? readFile(skinFileName(modelName)) : null;
@@ -163,13 +222,25 @@ export function loadSkinnedM2(modelName, readFile, { showSection = () => true, a
     parentIndex: bone.parentIndex,
     pivot: Array.from(bone.pivot),
   }));
-  const sequences = selectSequences(model.sequences, animations);
-  const clips = sequences.map((sequence) => ({
-    name: sequence.name,
-    duration: sequence.duration,
-    moveSpeed: sequence.moveSpeed,
-    bones: model.bones.map((bone) => boneChannels(bone, model.bones[bone.parentIndex]?.pivot, sequence.index)),
-  }));
+  const modelBytes = asBytes(modelBuffer);
+  // Most of a character's animations (sitting among them) are in .anim
+  // files; a sequence whose file is missing is left out.
+  const clips = selectSequences(model.sequences, animations, { external: true }).flatMap((sequence) => {
+    const parentPivot = (bone) => model.bones[bone.parentIndex]?.pivot;
+    if (!sequence.external) {
+      return [{ ...clipInfo(sequence), bones: model.bones.map((bone) => boneChannels(bone, parentPivot(bone), sequence.index)) }];
+    }
+    const animBuffer = readFile(animFileName(modelName, model.sequences[sequence.index]));
+    if (!animBuffer) return [];
+    const animBytes = asBytes(animBuffer);
+    return [{
+      ...clipInfo(sequence),
+      bones: model.bones.map((bone, boneIndex) => boneChannelsFrom(bone, parentPivot(bone), (track) => {
+        const trackName = Object.keys(M2_BONE_TRACKS).find((name) => bone[name] === track);
+        return externalTrackKeys(modelBytes, animBytes, boneIndex, trackName, track, sequence.index);
+      })),
+    }];
+  });
 
   return {
     ...expandSkinnedVertices(model.vertices, skin.vertices),

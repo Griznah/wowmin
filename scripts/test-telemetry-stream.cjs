@@ -138,7 +138,9 @@ test('overlays live fields on the polled player record and keeps the rest', () =
   assert.equal(live.flagCarrier, true);
   assert.equal(live.flying, true);
   assert.equal(live.stunned, false);
+  assert.equal(live.sitting, false);
   assert.equal(live.wmoGroupId, 25050);
+  assert.equal(applyLiveSample(polled, { ...tankard, stateFlags: 128 }).sitting, true);
 });
 
 // Builds a path datagram exactly as BuildPathDatagrams in WowMinTelemetry.cpp does.

@@ -17,7 +17,8 @@ const BUILD_TIMEOUT_MS = 60000;
 // 6: a mount's saddle point and riders' seated (Mount) animation.
 // 7: flying mounts' Fly and Hover animations.
 // 8: creature displays' model opacity (a Shadowfiend's see-through look).
-export const UNIT_MODEL_CACHE_VERSION = 8;
+// 9: sitting on the ground (SitGroundDown, SitGround, SitGroundUp).
+export const UNIT_MODEL_CACHE_VERSION = 9;
 // Spell art (effect models and spell lookups) changes more often than unit
 // models, so it has its own version and folder, art-v<version>/, and can be
 // rebuilt without rebuilding every unit.

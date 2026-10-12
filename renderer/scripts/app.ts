@@ -7107,6 +7107,7 @@ function getInstanceUnitPoses(
       mountUrl: passenger ? null : getMountModelUrl(appearance, Boolean(player.mounted)),
       riding: passenger ? true : undefined,
       flying: Boolean(player.flying),
+      sitting: Boolean(player.sitting),
       ...combat(unitKey(guid, false)),
       marker: {
         color: player.alive ? getInstancePlayerColor(player) : '#475569',

@@ -93,6 +93,8 @@ export interface UnitModelPose {
   riding?: boolean;
   // In the air: a flying mount flies (or hovers when still).
   flying?: boolean;
+  // Sitting on the ground or in a chair (eating, drinking, resting).
+  sitting?: boolean;
 }
 
 // The id a rider's mount is drawn under.
@@ -194,6 +196,8 @@ interface UnitInstance {
   // materials swapped out for changed copies, by mesh.
   look: string;
   changed: Map<Mesh, Material | Material[]>;
+  // Whether it was last seen sitting, or null before its first pose.
+  sitting: boolean | null;
 }
 
 const CROSSFADE_SECONDS = 0.2;
@@ -203,6 +207,10 @@ const RIDING_CLIP = 'Mount';
 const FLY_CLIP = 'Fly';
 const HOVER_CLIP = 'Hover';
 const FLY_MOVING_SPEED = 1;
+// Sitting on the ground, and sitting down and getting up (AnimationData 96-98).
+const SIT_CLIP = 'SitGround';
+const SIT_DOWN_CLIP = 'SitGroundDown';
+const SIT_UP_CLIP = 'SitGroundUp';
 const NO_WEAPONS: UnitWeapons = { mainHandType: 0, mainHandSubclass: 0, offHandType: 0, rangedSubclass: 0 };
 const SPEED_SMOOTHING = 0.25;
 // The longest step the mixers advance in one frame, so a stalled tab doesn't
@@ -624,6 +632,7 @@ export class UnitModelLayer {
       points: new Map(),
       look: '',
       changed: new Map(),
+      sitting: null,
     };
     model.traverse((object) => {
       if (object.userData.wowSheath) unit.sheathItems.push(object);
@@ -691,26 +700,37 @@ export class UnitModelLayer {
     const clips = unit.template.clips!;
     // A rider sits still in the saddle; the mount does the moving.
     const riding = Boolean(pose.riding) && clips.has(RIDING_CLIP);
-    const stance = riding ? 'stand' : chooseUnitStance({ alive: pose.alive, speed: unit.speed, inCombat: pose.inCombat, style: pose.style });
-    const flight = !riding && pose.flying && pose.alive && clips.has(FLY_CLIP)
+    // Sitting on the ground holds still too, getting down and up as it changes.
+    const sitting = !riding && Boolean(pose.sitting) && pose.alive && clips.has(SIT_CLIP);
+    const seated = riding || sitting;
+    const stance = seated ? 'stand' : chooseUnitStance({ alive: pose.alive, speed: unit.speed, inCombat: pose.inCombat, style: pose.style });
+    const flight = !seated && pose.flying && pose.alive && clips.has(FLY_CLIP)
       ? (unit.speed > FLY_MOVING_SPEED || !clips.has(HOVER_CLIP) ? FLY_CLIP : HOVER_CLIP) : null;
     const chosen = riding
       ? { loop: RIDING_CLIP, strike: null }
-      : flight ? { loop: flight, strike: null } : getStanceClips(stance, pose.weapons, unit.template.clipNames!);
+      : sitting ? { loop: SIT_CLIP, strike: null }
+        : flight ? { loop: flight, strike: null } : getStanceClips(stance, pose.weapons, unit.template.clipNames!);
     // Standing or fighting, a cast or channel holds the pose its kit names.
     const still = stance !== 'walk' && stance !== 'run' && stance !== 'dead';
-    const kitLoop = still && !riding && pose.kitLoop && clips.has(pose.kitLoop) ? pose.kitLoop : null;
+    const kitLoop = still && !seated && pose.kitLoop && clips.has(pose.kitLoop) ? pose.kitLoop : null;
     if (kitLoop) chosen.loop = kitLoop;
     if (stance !== unit.stance || chosen.loop !== unit.loopName) {
       unit.stance = stance;
       this.playLoop(unit, chosen.loop, Boolean(chosen.holdLastFrame), pose.alive || unit.seenAlive);
     }
+    // Sitting down or getting up plays once over the new loop. A unit first
+    // seen seated is already down.
+    if (sitting !== unit.sitting) {
+      const transition = sitting ? SIT_DOWN_CLIP : SIT_UP_CLIP;
+      if (unit.sitting !== null && pose.alive && clips.has(transition)) this.playStrike(unit, transition);
+      unit.sitting = sitting;
+    }
     if (unit.loop && (stance === 'walk' || stance === 'run') && unit.loopName) {
       unit.loop.timeScale = getMoveTimeScale(unit.speed, unit.template.speeds?.[unit.loopName]);
     }
     const fighting = stance === 'melee' || stance === 'ranged' || stance === 'cast';
-    if (riding) {
-      // No swings or casting poses in the saddle.
+    if (seated) {
+      // No swings or casting poses in the saddle or on the ground.
     } else if (still && pose.kitOnce && clips.has(pose.kitOnce)) {
       this.playStrike(unit, pose.kitOnce);
     } else if (pose.strike && (fighting || stance === 'stand')) {

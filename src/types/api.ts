@@ -104,6 +104,7 @@ export interface MapPlayerPosition {
   spiritForm?: boolean;
   flagCarrier?: boolean;
   flying?: boolean;
+  sitting?: boolean;
 }
 
 export interface MapBattlegroundWorldState {
