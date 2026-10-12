@@ -3,7 +3,8 @@ import { ts, escapeHtml, showResult, debounce, getMapName, CLASS_COLORS, RACE_NA
 import { parseOnlineList, playersFromDatabase } from './utils/online-players';
 import { type ActiveInstanceSession, type DungeonFloor, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getInstanceCoordinateBounds, getInstanceFactionColor, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, groupActiveInstanceSessions, parseInstanceSessionKey, zoomInstanceViewAt, INSTANCE_MAX_ZOOM, isSceneryCreature } from './utils/instance-watch';
 import { clampIsoPitch, type CompassPoint, createFlatProjection, createIsoView, DEFAULT_ISO_YAW, type FadeSettings, getCompassDirections, getFadeVolumes, getHeightBand, getIsoPanForCenter, getNextQuarterTurn, ISO_PITCH, type IsoView, type MapProjection, resolveMinimapTileProjection, type SceneBox } from './utils/map-projection';
-import { InstanceSceneView } from './instance-scene/scene-view';
+import { InstanceSceneView, type SceneLighting } from './instance-scene/scene-view';
+import type { MapLights } from './utils/map-light';
 import type { UnitModelPose } from './instance-scene/unit-models';
 import type { GameObjectPose } from './instance-scene/game-objects';
 import {
@@ -6478,6 +6479,8 @@ const $instancePathsBtn = $<HTMLButtonElement>('instance-paths-btn');
 const $instanceTrailsBtn = $<HTMLButtonElement>('instance-trails-btn');
 const $instanceMobsMode = $<HTMLSelectElement>('instance-mobs-mode');
 const $instancePlatesMode = $<HTMLSelectElement>('instance-plates-mode');
+const $instanceLightingMode = $<HTMLSelectElement>('instance-lighting-mode');
+const $instanceObjectLightsBtn = $<HTMLButtonElement>('instance-object-lights-btn');
 const $instanceDecisionsBtn = $<HTMLButtonElement>('instance-decisions-btn');
 const $instanceModelsBtn = $<HTMLButtonElement>('instance-models-btn');
 const $instanceNumbersBtn = $<HTMLButtonElement>('instance-numbers-btn');
@@ -6573,6 +6576,14 @@ const INSTANCE_MOB_LABEL_ZOOM = 2.5;
 type InstancePlatesMode = PlateStyle | 'labels';
 const INSTANCE_PLATES_STORAGE_KEY = 'wowmin.instancePlates';
 let instancePlatesMode = readStoredInstancePlatesMode();
+const INSTANCE_LIGHTING_STORAGE_KEY = 'wowmin.instanceLighting';
+let instanceLighting: SceneLighting = readStoredSetting(INSTANCE_LIGHTING_STORAGE_KEY) === 'neutral' ? 'neutral' : 'client';
+const INSTANCE_OBJECT_LIGHTS_STORAGE_KEY = 'wowmin.instanceObjectLights';
+let instanceObjectLights = readStoredFlag(INSTANCE_OBJECT_LIGHTS_STORAGE_KEY, true);
+// Each map's lights (assets/models/light/<id>.json, from the client), null
+// when it has none or they could not be built.
+const instanceMapLights = new Map<number, MapLights | null>();
+const instanceMapLightLoads = new Set<number>();
 // Plates are drawn at this size with the icon size setting at its default.
 const INSTANCE_PLATE_BASE_ICON_SCALE = 1.25;
 // Players' pets get plates this much smaller.
@@ -7093,6 +7104,7 @@ function getInstanceUnitPoses(
       y: player.position_y,
       z: player.position_z,
       orientation: player.orientation,
+      wmoGroupId: player.wmoGroupId,
       scale: appearance.scale || 1,
       alive: player.alive,
       inCombat: player.inCombat,
@@ -7132,6 +7144,7 @@ function getInstanceUnitPoses(
       y: creature.y,
       z: creature.z,
       orientation: creature.orientation,
+      wmoGroupId: creature.wmoGroupId,
       scale: appearance.scale || 1,
       pet: creature.playerControlled && !vehicles.has(creature.guid),
       alive: creature.alive,
@@ -7194,6 +7207,34 @@ function setInstancePlatesMode(mode: InstancePlatesMode): void {
   if ($instancePlatesMode) $instancePlatesMode.value = mode;
   storeSetting(INSTANCE_PLATES_STORAGE_KEY, mode);
   renderInstanceCanvas();
+}
+
+function setInstanceLighting(mode: SceneLighting): void {
+  instanceLighting = mode;
+  if ($instanceLightingMode) $instanceLightingMode.value = mode;
+  storeSetting(INSTANCE_LIGHTING_STORAGE_KEY, mode);
+  renderInstanceCanvas();
+}
+
+function setInstanceObjectLights(enabled: boolean, render = true): void {
+  instanceObjectLights = enabled;
+  $instanceObjectLightsBtn?.setAttribute('aria-pressed', String(enabled));
+  storeSetting(INSTANCE_OBJECT_LIGHTS_STORAGE_KEY, String(enabled));
+  if (render) renderInstanceCanvas();
+}
+
+async function loadInstanceMapLights(mapId: number): Promise<void> {
+  if (instanceMapLights.has(mapId) || instanceMapLightLoads.has(mapId)) return;
+  instanceMapLightLoads.add(mapId);
+  try {
+    const response = await fetch(`assets/models/light/${mapId}.json`);
+    instanceMapLights.set(mapId, response.ok ? await response.json() as MapLights : null);
+  } catch {
+    instanceMapLights.set(mapId, null);
+  } finally {
+    instanceMapLightLoads.delete(mapId);
+    if (getSelectedInstanceSession()?.mapId === mapId) renderInstanceCanvas();
+  }
 }
 
 function setInstanceMobsMode(mode: InstanceMobsMode): void {
@@ -8217,6 +8258,8 @@ function drawInstanceCanvas(followPass: boolean): void {
   }).map((cue) => [cue.unit, cue.kind] as const) : []);
   // Models are placed before the scene draws; units without one get markers.
   const sceneView = getInstanceSceneView();
+  void loadInstanceMapLights(session.mapId);
+  sceneView?.setLighting(instanceMapLights.get(session.mapId) ?? null, instanceLighting, instanceObjectLights);
   const modelIds = sceneView
     ? sceneView.setUnits(instanceShowModels && live && instanceView3d
       ? getInstanceUnitPoses(visiblePlayers, creatures, decisions, liveNow, strikes, sceneryGuids) : [], liveNow)
@@ -8755,7 +8798,7 @@ function renderInstanceDebugOverlay(now: number): void {
     `stream  ${instanceLiveStream?.status ?? 'off'} · ${frames.rate.toFixed(1)} frames/s · gap max ${Math.round(frames.max)} ms`,
     `        per s: ${perSecond('paths')} paths · ${perSecond('creatures')} mobs · ${perSecond('bots')} bots · ${perSecond('combat')} combat events · ${perSecond('auras')} aura lists`,
     `combat  ${counts.effects} effects drawn (${counts.spellArt} client art, ${counts.particles} particles) · ${instanceCombatEffects.dropped} events dropped by the server`,
-    `shown   ${counts.players} players · ${counts.mobsShown}/${counts.mobsStreamed} mobs · ${counts.paths} paths · ${counts.bots} bots · ${counts.models} models`,
+    `shown   ${counts.players} players · ${counts.mobsShown}/${counts.mobsStreamed} mobs · ${counts.paths} paths · ${counts.bots} bots · ${counts.models} models · ${getInstanceSceneView()?.indoorCount ?? 0} lit indoors`,
     `view    zoom ${transform.zoom.toFixed(2)} · yaw ${Math.round(getInstanceViewYaw() * 180 / Math.PI)}° · pitch ${Math.round(getInstanceViewPitch() * 180 / Math.PI)}°${floor ? ` · floor ${floor.floorIndex}` : ''}`,
   ];
   $instanceDebugOverlay.textContent = lines.join('\n');
@@ -9056,6 +9099,10 @@ if (instanceDebug) {
     if (getActiveMainTabId() === 'instances') renderInstanceDebugOverlay(performance.now());
   }, INSTANCE_DEBUG_INTERVAL_MS);
 }
+if ($instanceLightingMode) {
+  $instanceLightingMode.value = instanceLighting;
+  $instanceLightingMode.addEventListener('change', () => setInstanceLighting($instanceLightingMode.value as SceneLighting));
+}
 if ($instancePlatesMode) {
   $instancePlatesMode.value = instancePlatesMode;
   $instancePlatesMode.addEventListener('change', () => setInstancePlatesMode($instancePlatesMode.value as InstancePlatesMode));
@@ -9072,6 +9119,8 @@ setInstanceRenderScale(instanceRenderScale, false);
 $instanceRenderScale?.addEventListener('input', () => setInstanceRenderScale(Number($instanceRenderScale.value)));
 setInstanceFades(instanceFades, false);
 $instanceFadesBtn?.addEventListener('click', () => setInstanceFades(!instanceFades));
+setInstanceObjectLights(instanceObjectLights, false);
+$instanceObjectLightsBtn?.addEventListener('click', () => setInstanceObjectLights(!instanceObjectLights));
 $instanceAutoRefresh?.addEventListener('change', () => {
   if ($instanceAutoRefresh.checked) {
     void refreshInstanceWatcher();

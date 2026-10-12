@@ -2,13 +2,14 @@ import {
   AdditiveBlending,
   AmbientLight,
   Box3,
-  type BufferGeometry,
+  BufferGeometry,
   Color,
   type DataArrayTexture,
   DirectionalLight,
   DoubleSide,
   FrontSide,
   Frustum,
+  InstancedBufferAttribute,
   InstancedMesh,
   Material,
   Matrix4,
@@ -20,6 +21,7 @@ import {
   NormalBlending,
   Object3D,
   OrthographicCamera,
+  PointLight,
   Raycaster,
   Scene,
   Sphere,
@@ -36,13 +38,17 @@ import { type GLTF, GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 
 import { type FadeSettings, type FadeVolume, getSceneFade, type IsoView, MAX_FADE_VOLUMES } from '../utils/map-projection';
+import {
+  blendLight, type BuildingBatchLight, buildingBatchLight, CLIENT_AMBIENT_GAIN, CLIENT_DIRECT_GAIN, characterAmbientScale, floorLight, INDOOR_LIGHT_DIRECTION, indoorLight, type LightColors,
+  lightAt, type MapLights, nearestObjectLights, scaleAmbient, type Rgb, sunDirection, timeOfDay,
+} from '../utils/map-light';
 import type { CombatEffectStore, Point3, UnitKey } from '../utils/spell-events';
-import { applyIsoCamera, threeToServer } from './iso-camera';
+import { applyIsoCamera, serverToThree, threeToServer } from './iso-camera';
 import { SpellEffectLayer, type UnitAnchorRole } from './spell-effects';
 import { buildLayerArray, BYTE_SHADING_SCALE, createTerrainMaterial, prepareAlphaAtlas } from './terrain-material';
 import { GameObjectLayer, type GameObjectPose } from './game-objects';
 import { type BearerAreaCircle, SpellVisualLayer, type UnitInfo } from './spell-visual-layer';
-import { type UnitModelPose, UnitModelLayer } from './unit-models';
+import { clientLight, type UnitLook, type UnitModelPose, UnitModelLayer } from './unit-models';
 
 type WowBlend = 'opaque' | 'alphaKey' | 'alpha' | 'add' | 'mod' | 'mod2x';
 
@@ -78,8 +84,86 @@ const WATER_FRAGMENT = `
 const VERTEX_LIT_BRIGHTNESS = 2;
 const UNLIT_BRIGHTNESS = 0.75;
 // Outdoor WMO groups are lit like the world outside; the client adds their
-// vertex colours to that light rather than using them as all of it.
-const EXTERIOR_LIGHT_FRAGMENT = `diffuseColor.rgb *= vColor.rgb + ${UNLIT_BRIGHTNESS.toFixed(2)};`;
+// vertex colours to that light rather than using them as all of it. The
+// outdoor light is in the fade block.
+const EXTERIOR_LIGHT_FRAGMENT = 'diffuseColor.rgb *= vColor.rgb + wowOutdoorLightPacked.rgb;';
+// With the map's light, a building's batches as the client draws them (see
+// buildingBatchLight): texture x 2 x a colour, all in the client's (gamma)
+// colour space, so made linear here. The colour is the vertex colour (MOCV)
+// lit by the map's ambient and sun on the older render path, or with half
+// of either light added on the newer one (the building's own ambient
+// indoors); transition batches mix the two by the vertex alpha. The map's
+// light is the raw sky light here: the gains are terrain's. WOW_BUILDING is
+// 0 unlit, 1 own, 2 lit, 3 transition. Without the map's light, the old
+// look (and the vertex alpha never changes the surface's).
+const BUILDING_LIGHT = { unlit: 0, own: 1, lit: 2, transition: 3 } as const satisfies Record<BuildingBatchLight, number>;
+const BUILDING_LIGHT_FRAGMENT = `
+vec3 wowMocv = vColor.rgb;
+if (wowClientAmbientPacked.w > 0.5) {
+  vec3 wowSky = clamp(wowClientAmbientPacked.rgb / ${CLIENT_AMBIENT_GAIN.toFixed(4)}
+    + wowClientDirectPacked.rgb / ${CLIENT_DIRECT_GAIN.toFixed(4)} * clamp(dot(normalize(vWowNormal), wowClientSunPacked.xyz), 0.0, 1.0), 0.0, 1.0);
+#ifdef WOW_BUILDING_UNIFIED
+  vec3 wowLit = clamp(wowSky * 0.5 + wowMocv, 0.0, 1.0);
+  vec3 wowOwn = clamp(wowBuildingAmbient * 0.5 + wowMocv, 0.0, 1.0);
+#else
+  vec3 wowLit = clamp(wowMocv * wowSky, 0.0, 1.0);
+  vec3 wowOwn = wowMocv;
+#endif
+#if WOW_BUILDING == 1
+  vec3 wowColor = wowOwn;
+#elif WOW_BUILDING == 2
+  vec3 wowColor = wowLit;
+#elif WOW_BUILDING == 3
+#ifdef USE_COLOR_ALPHA
+  vec3 wowColor = mix(wowOwn, wowLit, vColor.a);
+#else
+  vec3 wowColor = wowLit;
+#endif
+#else
+  vec3 wowColor = wowMocv;
+#endif
+  diffuseColor.rgb *= pow(2.0 * wowColor, vec3(2.2));
+} else {
+#ifdef WOW_EXTERIOR_GROUP
+  diffuseColor.rgb *= wowMocv + wowOutdoorLightPacked.rgb;
+#else
+  diffuseColor.rgb *= wowMocv * ${VERTEX_LIT_BRIGHTNESS.toFixed(1)};
+#endif
+}
+`;
+// The map's props (not a building's) are shaded by the scene's lights, a
+// little dimmed to sit with the buildings' baked light.
+const PROP_BRIGHTNESS = 0.75;
+
+// How the scene is lit: by the map's own light (Light.dbc, at the view's
+// centre and the time of day), or by a fixed neutral white.
+export type SceneLighting = 'client' | 'neutral';
+const NEUTRAL_AMBIENT = 2.2;
+const NEUTRAL_SUN = 1.6;
+// With the map's light, models and terrain are lit as the client lights
+// them (see clientLight in unit-models.ts): ambient plus direct times N.L,
+// summed in the client's colour space. Outdoor buildings add the ambient
+// plus this share of the direct as it falls on flat ground to their vertex
+// colours, made linear, at this gain (the default outdoor light at noon then
+// about as bright as the neutral 0.75).
+const CLIENT_OUTDOOR_DIRECT = 0.62;
+const CLIENT_OUTDOOR = 0.55;
+// Towards the sun, in three.js world space, for the neutral look; the
+// client's moves through the day (sunDirection).
+const NEUTRAL_SUN_TOWARDS = new Vector3(0.4, 1, 0.6).normalize();
+// Indoor light for units in a building: the floor's colour under them,
+// sampled by a ray from this far above their feet; resampled once they
+// move this far, at most this many a frame.
+const INDOOR_RAY_LIFT = 1.5;
+const INDOOR_RESAMPLE_DISTANCE = 0.75;
+const INDOOR_SAMPLES_PER_FRAME = 6;
+// Object lights (torches, braziers): the nearest this many to the view's
+// centre, within this reach, light what the scene's lights do (terrain,
+// shaded props, units), not the buildings, whose torches are baked into
+// their vertex colours. A fixed number of lights, so shaders compile once.
+const OBJECT_LIGHT_COUNT = 16;
+const OBJECT_LIGHT_REACH = 120;
+const OBJECT_LIGHT_INTENSITY = 6;
 const BACKGROUND = 0x08111d;
 // High-density displays draw at most this many pixels per CSS pixel (before
 // the viewer's render scale), so a 2x screen costs about half the pixels.
@@ -101,6 +185,9 @@ const HEAD_HEIGHT = 0.9;
 // The reach uniforms' values when there is none (floats, so not Infinity).
 const NO_REACH = 1e9;
 const floorAreaColor = new Color();
+const outdoorColor = new Color();
+const DOWN = new Vector3(0, -1, 0);
+const INDOOR_TOWARDS = serverToThree(INDOOR_LIGHT_DIRECTION.map((value) => -value) as Point3).normalize();
 // All fade values live in one uniform buffer shared by every scene material,
 // uploaded once a frame (per-material uniform arrays were re-sent on every
 // material switch). three.js r186 mislays arrays of vectors in a uniforms
@@ -116,7 +203,15 @@ const MAX_FLOOR_AREAS = 8;
 const FLOOR_AREA_OFFSET = FADE_PARAMS_OFFSET + 4;
 const FLOOR_AREA_COLOR_OFFSET = FLOOR_AREA_OFFSET + MAX_FLOOR_AREAS * 4;
 const FLOOR_AREA_COUNT_OFFSET = FLOOR_AREA_COLOR_OFFSET + MAX_FLOOR_AREAS * 4;
-const FADE_BLOCK_FLOATS = FLOOR_AREA_COUNT_OFFSET + 4;
+const OUTDOOR_LIGHT_OFFSET = FLOOR_AREA_COUNT_OFFSET + 4;
+// The client's light for lit scene materials (terrain, the map's props):
+// ambient and direct colours (w 1 while on) and the view-space way to the sun.
+const CLIENT_AMBIENT_OFFSET = OUTDOOR_LIGHT_OFFSET + 4;
+const CLIENT_DIRECT_OFFSET = CLIENT_AMBIENT_OFFSET + 4;
+const CLIENT_SUN_OFFSET = CLIENT_DIRECT_OFFSET + 4;
+// The view-space way to the indoor light, for a building's props.
+const CLIENT_INDOOR_OFFSET = CLIENT_SUN_OFFSET + 4;
+const FADE_BLOCK_FLOATS = CLIENT_INDOOR_OFFSET + 4;
 // A floor area paints only surfaces facing up at least this much, within
 // this many yards of its centre's height, so walls, ceilings, and other
 // floors stay clear: a faint fill and a thin, lighter rim.
@@ -129,8 +224,26 @@ const FLOOR_AREA_RIM_LIGHTEN = 0.35;
 // Starfall's reads less pink.
 const FLOOR_AREA_BLUE = new Color('#60a5fa');
 const FLOOR_AREA_BLUE_SHIFT = 0.35;
-const FADE_VERTEX_DECLARATIONS = 'varying vec3 vWowPosition;\n';
+// A building's props carry their own light, per instance (propLight).
+const FADE_VERTEX_DECLARATIONS = `varying vec3 vWowPosition;
+#ifdef WOW_BUILDING
+varying vec3 vWowNormal;
+#endif
+#ifdef WOW_PROP_LIGHT
+attribute vec4 wowPropAmbient;
+attribute vec4 wowPropDirect;
+varying vec4 vWowPropAmbient;
+varying vec4 vWowPropDirect;
+#endif
+`;
 const FADE_VERTEX = `
+#ifdef WOW_BUILDING
+vWowNormal = normalize(normalMatrix * normal);
+#endif
+#ifdef WOW_PROP_LIGHT
+vWowPropAmbient = wowPropAmbient;
+vWowPropDirect = wowPropDirect;
+#endif
 vec4 wowLocal = vec4(transformed, 1.0);
 #ifdef USE_INSTANCING
 wowLocal = instanceMatrix * wowLocal;
@@ -150,6 +263,12 @@ layout(std140) uniform ${FADE_BLOCK} {
   vec4 wowFloorAreaPacked[${MAX_FLOOR_AREAS}];
   vec4 wowFloorAreaColorPacked[${MAX_FLOOR_AREAS}];
   vec4 wowFloorAreaCountPacked;
+  // The light outdoor WMO groups add their vertex colours to.
+  vec4 wowOutdoorLightPacked;
+  vec4 wowClientAmbientPacked;
+  vec4 wowClientDirectPacked;
+  vec4 wowClientSunPacked;
+  vec4 wowClientIndoorPacked;
 };
 #define wowReachMin wowReachMinPacked.xyz
 #define wowReachMax wowReachMaxPacked.xyz
@@ -157,6 +276,14 @@ layout(std140) uniform ${FADE_BLOCK} {
 #define wowHorizontalRange wowFadeParams.y
 #define wowVolumeCount int(wowFadeParams.z)
 varying vec3 vWowPosition;
+#ifdef WOW_PROP_LIGHT
+varying vec4 vWowPropAmbient;
+varying vec4 vWowPropDirect;
+#endif
+#ifdef WOW_BUILDING
+varying vec3 vWowNormal;
+uniform vec3 wowBuildingAmbient;
+#endif
 float wowBayer4(vec2 position) {
   const float pattern[16] = float[16](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
   ivec2 cell = ivec2(mod(position, 4.0));
@@ -191,6 +318,36 @@ float wowVolumeFade(int index) {
   return vertical * (1.0 - clamp((length(outside.xy) - core) / (wowHorizontalRange - core), 0.0, 1.0));
 }
 `;
+// Lit scene materials (Lambert: terrain, the map's props) under the map's
+// light, as the client lights them. A building's props have their own
+// light (propLight): indoors (x 0) the sky's raw ambient, which the client
+// gives a prop when it makes it, and the floor's direct light from the
+// indoor light's direction, leaning towards the sky's direct light and the
+// sun by their share (w); outdoors (x 1) the map's light as its own props
+// have; with no floor (x 2) a flat light. At their own brightness.
+const CLIENT_LIGHT_FRAGMENT = `
+if (wowClientAmbientPacked.w > 0.5) {
+#ifdef WOW_PROP_LIGHT
+  vec3 wowLight;
+  if (vWowPropAmbient.x < 0.5) {
+    float wowShare = vWowPropAmbient.w;
+    vec3 wowTowards = mix(wowClientIndoorPacked.xyz, wowClientSunPacked.xyz, wowShare);
+    wowTowards = dot(wowTowards, wowTowards) > 1e-6 ? normalize(wowTowards) : wowClientSunPacked.xyz;
+    vec3 wowSkyDirect = wowClientDirectPacked.rgb / ${CLIENT_DIRECT_GAIN.toFixed(4)};
+    wowLight = wowClientAmbientPacked.rgb / ${CLIENT_AMBIENT_GAIN.toFixed(4)}
+      + mix(vWowPropDirect.rgb, wowSkyDirect, wowShare) * saturate(dot(normal, wowTowards));
+  } else if (vWowPropAmbient.x < 1.5) {
+    wowLight = wowClientAmbientPacked.rgb + wowClientDirectPacked.rgb * saturate(dot(normal, wowClientSunPacked.xyz));
+  } else {
+    wowLight = vec3(1.0);
+  }
+  reflectedLight.indirectDiffuse += diffuseColor.rgb * pow(max(wowLight, vec3(0.0)), vec3(2.2)) * vWowPropDirect.w;
+#else
+  vec3 wowLight = wowClientAmbientPacked.rgb + wowClientDirectPacked.rgb * saturate(dot(normal, wowClientSunPacked.xyz));
+  reflectedLight.indirectDiffuse += diffuseColor.rgb * pow(max(wowLight, vec3(0.0)), vec3(2.2));
+#endif
+}
+`;
 const FADE_FRAGMENT = `
 if (any(lessThan(vWowPosition, wowReachMin)) || any(greaterThan(vWowPosition, wowReachMax))) discard;
 float wowFade = wowVolumeCount == 0 ? 1.0 : 0.0;
@@ -206,6 +363,89 @@ if (wowFade <= 0.0 || wowFade < wowBayer4(gl_FragCoord.xy)) discard;
 function isExteriorGroup(mesh: Mesh): boolean {
   const node = mesh.userData.kind === 'wmoGroup' ? mesh : mesh.parent;
   return node?.userData.kind === 'wmoGroup' && Boolean(node.userData.exterior);
+}
+
+// A prop the map places itself (from its ADTs), rather than one of a
+// building's: a building's props are siblings of its groups.
+// A building's prop's floor light, as the scene stores it (encodePropFloor
+// in export-scene.mjs): [r, g, b, share] per instance; r -1 outdoors, -2
+// with no floor found. Null for other meshes and older scenes.
+function propFloors(mesh: Mesh): ArrayLike<number> | null {
+  if (mesh instanceof InstancedMesh) {
+    const floors = mesh.geometry.getAttribute('_WOWFLOOR');
+    return floors ? floors.array : null;
+  }
+  const node = mesh.userData.kind === 'doodad' ? mesh : mesh.parent;
+  const floor = node?.userData.kind === 'doodad' ? node.userData.wowFloor as number[] | undefined : undefined;
+  return floor?.length === 4 ? floor : null;
+}
+
+// Gives a building's prop its light per instance, on its own copy of the
+// geometry (the buffers are shared): wowPropAmbient is [kind, 0, 0, share]
+// and wowPropDirect the floor's direct light and the brightness (see
+// CLIENT_LIGHT_FRAGMENT). Indoors the client's light from the floor (its
+// direct light; Wow.exe FUN_007a0d60 keeps the floor's ambient apart, and the
+// prop's light setup FUN_007c1730 reads the sky ambient it was made with);
+// outdoors the map's light as its own props; with no floor, a flat light as
+// unlit props have. Brightness is relative to the shaded props' colour.
+function applyPropLight(mesh: Mesh, floors: ArrayLike<number>): void {
+  const count = floors.length / 4;
+  const ambient = new Float32Array(count * 4);
+  const direct = new Float32Array(count * 4);
+  for (let index = 0; index < count; index += 1) {
+    const [r, g, b, share] = [floors[index * 4], floors[index * 4 + 1], floors[index * 4 + 2], floors[index * 4 + 3]];
+    if (r === -1) {
+      ambient.set([1, 0, 0, 1], index * 4);
+      direct.set([0, 0, 0, 1], index * 4);
+    } else if (r < 0) {
+      ambient.set([2, 0, 0, 0], index * 4);
+      direct.set([0, 0, 0, UNLIT_BRIGHTNESS / PROP_BRIGHTNESS], index * 4);
+    } else {
+      ambient.set([0, 0, 0, share], index * 4);
+      direct.set([...indoorLight([r, g, b]).direct, 1 / PROP_BRIGHTNESS], index * 4);
+    }
+  }
+  const source = mesh.geometry;
+  const geometry = new BufferGeometry();
+  geometry.setIndex(source.index);
+  for (const [name, attribute] of Object.entries(source.attributes)) geometry.setAttribute(name, attribute);
+  for (const group of source.groups) geometry.addGroup(group.start, group.count, group.materialIndex);
+  geometry.boundingBox = source.boundingBox?.clone() ?? null;
+  geometry.boundingSphere = source.boundingSphere?.clone() ?? null;
+  geometry.setDrawRange(source.drawRange.start, source.drawRange.count);
+  geometry.userData = source.userData;
+  geometry.setAttribute('wowPropAmbient', new InstancedBufferAttribute(ambient, 4));
+  geometry.setAttribute('wowPropDirect', new InstancedBufferAttribute(direct, 4));
+  mesh.geometry = geometry;
+}
+
+// A building group's batch, as the scene describes it (the group node's
+// extras): which batch it is, the group's batch counts and flags, and its
+// building's render path and ambient. Null for older scenes.
+function buildingBatch(mesh: Mesh): { batch: number; counts: number[]; unified: boolean; ambient: number; flags: number } | null {
+  const node = mesh.userData.kind === 'wmoGroup' ? mesh : mesh.parent;
+  const counts = node?.userData.kind === 'wmoGroup' ? node.userData.wmoBatches as number[] | undefined : undefined;
+  if (!node || !counts) return null;
+  let batch = 0;
+  let found = -1;
+  node.traverse((child) => {
+    if (!(child instanceof Mesh)) return;
+    if (child === mesh) found = batch;
+    batch += 1;
+  });
+  return {
+    batch: found,
+    counts,
+    unified: Boolean(node.userData.wmoUnified),
+    ambient: (node.userData.wmoAmbient as number | undefined) ?? 0,
+    flags: (node.userData.wmoFlags as number | undefined) ?? 0,
+  };
+}
+
+function isWorldProp(mesh: Mesh): boolean {
+  const node = mesh.userData.kind === 'doodad' || mesh.userData.kind === 'doodads' ? mesh : mesh.parent;
+  if (node?.userData.kind !== 'doodad' && node?.userData.kind !== 'doodads') return false;
+  return !node.parent?.children.some((sibling) => sibling.userData.kind === 'wmoGroup');
 }
 
 // Building batches share one vertex buffer per WMO group, so three.js would
@@ -302,6 +542,26 @@ export class InstanceSceneView {
   private readonly camera = new OrthographicCamera();
   // The fade block's contents, shared by every scene material.
   private readonly fadeData = new Float32Array(FADE_BLOCK_FLOATS);
+  private readonly ambient = new AmbientLight(0xffffff, NEUTRAL_AMBIENT);
+  private readonly sun = new DirectionalLight(0xffffff, NEUTRAL_SUN);
+  private mapLights: MapLights | null = null;
+  private lighting: SceneLighting = 'client';
+  private objectLightsOn = true;
+  // Towards the sun now, in three.js world space (applyLighting).
+  private readonly sunTowards = NEUTRAL_SUN_TOWARDS.clone();
+  // ?lightTime=HH:MM pins the time of day the map's light is drawn at, to
+  // compare its look through the day.
+  private readonly pinnedTime = ((): number | null => {
+    const match = /^(\d{1,2}):(\d{2})$/.exec(new URLSearchParams(window.location.search).get('lightTime') ?? '');
+    return match ? (Number(match[1]) * 60 + Number(match[2])) * 2 : null;
+  })();
+  private readonly objectLights = Array.from({ length: OBJECT_LIGHT_COUNT }, () => {
+    // No falloff with distance but the fade to `distance`, as the client's
+    // lights fade out between two distances.
+    const light = new PointLight(0xffffff, 0, 1, 0);
+    light.visible = false;
+    return light;
+  });
   private readonly fadeGroup = new UniformsGroup().setName(FADE_BLOCK).add(new Uniform(this.fadeData));
   // Scenes are meshopt-compressed (scripts/scene/export-scene.mjs).
   private readonly loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
@@ -329,6 +589,18 @@ export class InstanceSceneView {
   // The fade the last frame drew with, for picking only what can be seen.
   private lastFade: { volumes: FadeVolume[]; fade: FadeSettings } | null = null;
   private readonly raycaster = new Raycaster();
+  // Each scene's interior WMO groups' meshes, by group ID, for indoor light.
+  private readonly interiors = new WeakMap<Object3D, Map<number, Mesh[]>>();
+  // Units' indoor light, with where and in which group it was sampled.
+  // Units' indoor light from the floor under them, and its share of the
+  // outdoor light (on a transition face).
+  private readonly indoorLights = new Map<string, { groupId: number; position: Point3; light: LightColors | null; outdoor: number }>();
+  // The sky's raw light (with the zone's character ambient), which the
+  // client blends a unit's indoor light towards on transition faces (Wow.exe
+  // FUN_007c1c40); the light outdoors carries terrain's gains.
+  private unitSkyLight: LightColors = { direct: [0, 0, 0], ambient: [0, 0, 0] };
+  // Transition faces by batch, as sets (from the light file's lists).
+  private readonly transitionSets = new WeakMap<number[], Set<number>>();
   // The server point at the centre of the last frame drawn, and the view's
   // frustum, for the units' animation budget.
   private lastViewCentre: Point3 | null = null;
@@ -352,10 +624,9 @@ export class InstanceSceneView {
     this.scene.add(this.spellVisuals.group);
     this.gameObjects = new GameObjectLayer(this.redraw);
     this.scene.add(this.gameObjects.group);
-    this.scene.add(new AmbientLight(0xffffff, 2.2));
-    const sun = new DirectionalLight(0xffffff, 1.6);
-    sun.position.set(0.4, 1, 0.6);
-    this.scene.add(sun);
+    this.scene.add(this.ambient, ...this.objectLights);
+    this.sun.position.set(0.4, 1, 0.6);
+    this.scene.add(this.sun);
     canvas.addEventListener('webglcontextlost', (event) => {
       event.preventDefault();
       this.lost = true;
@@ -401,10 +672,74 @@ export class InstanceSceneView {
         scratchMatrix.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse)),
       centre: this.lastViewCentre,
     } : null;
+    this.updateIndoorLights(poses);
     return this.units.update(animations.size ? poses.map((pose) => {
       const animation = animations.get(pose.id);
       return animation ? { ...pose, kitLoop: animation.loop, kitOnce: animation.once } : pose;
     }) : poses, nowMs, view);
+  }
+
+  // Units lit by their building's light, for ?debug.
+  get indoorCount(): number {
+    let count = 0;
+    for (const { light } of this.indoorLights.values()) if (light) count += 1;
+    return count;
+  }
+
+  // Samples the indoor light of units standing in an interior WMO group (as
+  // the client does: the floor's baked colour under them), within a budget
+  // a frame and only once they have moved; drops it for the rest.
+  private updateIndoorLights(poses: UnitModelPose[]): void {
+    const interiors = this.lighting === 'client' && this.shown ? this.interiors.get(this.shown) : undefined;
+    const indoors = new Set<string>();
+    let budget = INDOOR_SAMPLES_PER_FRAME;
+    for (const pose of poses) {
+      const groupId = pose.wmoGroupId ?? -1;
+      const meshes = interiors?.get(groupId);
+      const group = this.mapLights?.interiors?.[groupId];
+      if (!meshes || group?.outdoor) continue;
+      indoors.add(pose.id);
+      const known = this.indoorLights.get(pose.id);
+      const fresh = known && known.groupId === groupId
+        && Math.hypot(known.position[0] - pose.x, known.position[1] - pose.y, known.position[2] - pose.z) < INDOOR_RESAMPLE_DISTANCE;
+      if (fresh || budget <= 0) continue;
+      budget -= 1;
+      const floor = this.floorColor(meshes, [pose.x, pose.y, pose.z]);
+      const transitions = floor && group?.transitions?.[floor.batch];
+      this.indoorLights.set(pose.id, {
+        groupId,
+        position: [pose.x, pose.y, pose.z],
+        light: floor ? indoorLight(floorLight(floor.color, group?.ambient)) : known?.light ?? null,
+        outdoor: floor ? (transitions && this.transitionSet(transitions).has(floor.triangle) ? floor.alpha : 0) : known?.outdoor ?? 0,
+      });
+    }
+    for (const id of this.indoorLights.keys()) if (!indoors.has(id)) this.indoorLights.delete(id);
+  }
+
+  private transitionSet(triangles: number[]): Set<number> {
+    let set = this.transitionSets.get(triangles);
+    if (!set) this.transitionSets.set(triangles, set = new Set(triangles));
+    return set;
+  }
+
+  // The baked vertex colour and alpha of the floor under a point (client
+  // values, 0 to 1), and the render batch and triangle it is on, from a ray
+  // down from a little above it; null if it misses.
+  private floorColor(meshes: Mesh[], [x, y, z]: Point3): { color: Rgb; alpha: number; batch: number; triangle: number } | null {
+    this.raycaster.set(serverToThree([x, y, z + INDOOR_RAY_LIFT]), DOWN);
+    const hit = this.raycaster.intersectObjects(meshes, false)[0];
+    if (!hit?.face || !hit.barycoord || hit.faceIndex === undefined || hit.faceIndex === null) return null;
+    const colors = (hit.object as Mesh).geometry.getAttribute('color');
+    const { a, b, c } = hit.face;
+    const { x: wa, y: wb, z: wc } = hit.barycoord;
+    const at = (channel: number) =>
+      colors.getComponent(a, channel) * wa + colors.getComponent(b, channel) * wb + colors.getComponent(c, channel) * wc;
+    return {
+      color: [at(0), at(1), at(2)],
+      alpha: colors.itemSize > 3 ? at(3) : 1,
+      batch: (hit.object.userData.wowBatch as number | undefined) ?? 0,
+      triangle: hit.faceIndex,
+    };
   }
 
   // Where an effect sits on a unit, in server coordinates: the model's own
@@ -435,7 +770,16 @@ export class InstanceSceneView {
       facing: (unit) => this.units.orientationOf(unit) ?? 0,
     };
     this.spellVisuals.update(store, now, units, this.camera, auras);
-    this.units.setLooks(this.spellVisuals.unitLooks(now));
+    const looks = this.spellVisuals.unitLooks(now);
+    const ambientScale = characterAmbientScale(this.mapLights?.ambientMultiplier);
+    for (const [id, { light, outdoor }] of this.indoorLights) {
+      if (!light) continue;
+      const look: UnitLook = looks.get(id) ?? { color: null, alpha: 1 };
+      const own = { direct: light.direct, ambient: scaleAmbient(light.ambient, ambientScale) };
+      look.indoor = { ...(outdoor > 0 ? blendLight(own, this.unitSkyLight, outdoor) : own), outdoor };
+      looks.set(id, look);
+    }
+    this.units.setLooks(looks);
     this.effects.update(store, now, anchor,
       (entry) => this.spellVisuals.handles(entry) && !('radius' in entry && isTaunt(entry.spellId)));
     const areas = this.setFloorAreas(store && auras ? this.spellVisuals.bearerAreas(auras) : [], anchor);
@@ -526,6 +870,21 @@ export class InstanceSceneView {
       });
       this.meshBounds.set(root, bounds);
       this.roots.set(url, root);
+      const interiors = new Map<number, Mesh[]>();
+      root.traverse((node) => {
+        if (node.userData.kind !== 'wmoGroup' || node.userData.exterior) return;
+        const meshes = interiors.get(node.userData.wmoGroupId as number) ?? [];
+        // The group's primitives are its render batches, in order.
+        let batch = 0;
+        node.traverse((child) => {
+          if (!(child instanceof Mesh)) return;
+          child.userData.wowBatch = batch;
+          batch += 1;
+          if (child.geometry.getAttribute('color')) meshes.push(child);
+        });
+        if (meshes.length) interiors.set(node.userData.wmoGroupId as number, meshes);
+      });
+      this.interiors.set(root, interiors);
       this.states.set(url, 'ready');
       this.onChange();
     }, undefined, (error) => {
@@ -557,10 +916,12 @@ export class InstanceSceneView {
       ...active.flatMap((volume) => [volume.minX, volume.maxX, volume.minY, volume.maxY, volume.minZ, volume.maxZ]
         .map((value) => Math.round(value))),
     ].join('|');
+    const lightKey = this.applyLighting(view.center);
     const frameKey = [
       visibilityKey, width, height, pixelRatio, view.pixelsPerUnit.toFixed(4),
       ...view.center.map((value) => value.toFixed(3)),
       ...view.basis.toCamera.map((value) => value.toFixed(5)),
+      lightKey,
     ].join('|');
     // Animated models, live effects, and liquids need every frame.
     const liquids = this.liquids.get(url);
@@ -602,6 +963,11 @@ export class InstanceSceneView {
     }
     applyIsoCamera(this.camera, view, width, height);
     this.lastViewCentre = [view.center[0], view.center[1], view.center[2]];
+    // The ways to the sun and to the indoor light, in view space.
+    clientLight.sun.copy(this.sunTowards).transformDirection(this.camera.matrixWorldInverse);
+    clientLight.indoor.copy(INDOOR_TOWARDS).transformDirection(this.camera.matrixWorldInverse);
+    this.fadeData.set([clientLight.sun.x, clientLight.sun.y, clientLight.sun.z], CLIENT_SUN_OFFSET);
+    this.fadeData.set([clientLight.indoor.x, clientLight.indoor.y, clientLight.indoor.z], CLIENT_INDOOR_OFFSET);
     // setUnits has already updated the unit models' matrices this frame.
     for (const child of this.scene.children) if (child !== root && child !== this.units.group) child.updateMatrixWorld();
     this.renderer.render(this.scene, this.camera);
@@ -676,6 +1042,64 @@ export class InstanceSceneView {
     return null;
   }
 
+  // The map's lights (null for none yet), how to light the scene, and
+  // whether objects' lights (torches, braziers) are drawn.
+  setLighting(lights: MapLights | null, lighting: SceneLighting, objectLights: boolean): void {
+    this.mapLights = lights;
+    this.lighting = lighting;
+    this.objectLightsOn = objectLights;
+  }
+
+  // Sets the scene's lights for a point (the view's centre) now; returns a
+  // key that changes when they do.
+  private applyLighting(center: Point3): string {
+    const time = this.mapLights ? this.pinnedTime ?? this.mapLights.timeOfDay ?? timeOfDay(new Date()) : 0;
+    const colors: LightColors | null = this.lighting === 'client' && this.mapLights
+      ? lightAt(this.mapLights, center, time) : null;
+    if (colors) this.sunTowards.copy(serverToThree(sunDirection(time).map((value) => -value) as Point3));
+    else this.sunTowards.copy(NEUTRAL_SUN_TOWARDS);
+    // The scene's own lights only for the neutral look; the client's light
+    // is drawn by the materials themselves.
+    this.ambient.intensity = colors ? 0 : NEUTRAL_AMBIENT;
+    this.sun.intensity = colors ? 0 : NEUTRAL_SUN;
+    const on = colors ? 1 : 0;
+    const [ar, ag, ab] = colors?.ambient ?? [0, 0, 0];
+    const [dr, dg, db] = colors?.direct ?? [0, 0, 0];
+    // Units (characters) take the zone's character ambient too; terrain and
+    // props do not.
+    const [ur, ug, ub] = scaleAmbient([ar, ag, ab], characterAmbientScale(this.mapLights?.ambientMultiplier));
+    this.unitSkyLight = { ambient: [ur, ug, ub], direct: [dr, dg, db] };
+    clientLight.ambient.set(ur * CLIENT_AMBIENT_GAIN, ug * CLIENT_AMBIENT_GAIN, ub * CLIENT_AMBIENT_GAIN, on);
+    clientLight.direct.set(dr * CLIENT_DIRECT_GAIN, dg * CLIENT_DIRECT_GAIN, db * CLIENT_DIRECT_GAIN, on);
+    this.fadeData.set([ar * CLIENT_AMBIENT_GAIN, ag * CLIENT_AMBIENT_GAIN, ab * CLIENT_AMBIENT_GAIN, on], CLIENT_AMBIENT_OFFSET);
+    this.fadeData.set([clientLight.direct.x, clientLight.direct.y, clientLight.direct.z, on], CLIENT_DIRECT_OFFSET);
+    if (colors) {
+      const direct = CLIENT_DIRECT_GAIN * CLIENT_OUTDOOR_DIRECT * Math.max(0, this.sunTowards.y);
+      const linear = (channel: number) =>
+        ((colors.ambient[channel] * CLIENT_AMBIENT_GAIN + colors.direct[channel] * direct) ** 2.2) * CLIENT_OUTDOOR;
+      outdoorColor.setRGB(linear(0), linear(1), linear(2));
+    } else {
+      outdoorColor.setScalar(UNLIT_BRIGHTNESS);
+    }
+    this.fadeData.set([outdoorColor.r, outdoorColor.g, outdoorColor.b], OUTDOOR_LIGHT_OFFSET);
+    const nearest = this.objectLightsOn && this.mapLights?.objects
+      ? nearestObjectLights(this.mapLights.objects, center, OBJECT_LIGHT_COUNT, OBJECT_LIGHT_REACH) : null;
+    // All shown while on (unused ones dark), all hidden while off: shaders
+    // compile only when the setting changes.
+    this.objectLights.forEach((light, index) => {
+      light.visible = Boolean(nearest);
+      const object = nearest?.[index];
+      light.intensity = object ? object.intensity * OBJECT_LIGHT_INTENSITY : 0;
+      if (!object) return;
+      light.color.setHex(object.color);
+      light.distance = object.end;
+      light.position.copy(serverToThree(object.position));
+    });
+    const colorKey = colors
+      ? [...colors.ambient, ...colors.direct, this.sunTowards.x, this.sunTowards.y].map((value) => value.toFixed(3)).join(',') : 'neutral';
+    return `${colorKey}|${nearest ? nearest.map((light) => light.position.join(',')).join(';') : 'off'}`;
+  }
+
   // One function for every material, so three.js shares the compiled program.
   // The material also needs the fade block (withFade).
   private readonly injectPartyFade = (shader: WebGLProgramParametersWithUniforms): void => {
@@ -683,6 +1107,7 @@ export class InstanceSceneView {
       .replace('#include <project_vertex>', `#include <project_vertex>\n${FADE_VERTEX}`);
     shader.fragmentShader = FADE_FRAGMENT_DECLARATIONS + shader.fragmentShader
       .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>\n${FADE_FRAGMENT}`)
+      .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>\n${CLIENT_LIGHT_FRAGMENT}`)
       .replace('#include <opaque_fragment>', '#include <opaque_fragment>\ngl_FragColor.rgb += wowFloorAreas();');
   };
 
@@ -690,6 +1115,16 @@ export class InstanceSceneView {
     this.injectPartyFade(shader);
     shader.fragmentShader = shader.fragmentShader.replace('#include <color_fragment>', EXTERIOR_LIGHT_FRAGMENT);
   };
+
+  // A building batch's material (three.js calls it as the material's): its
+  // own ambient (the newer path's) in its userData.
+  private readonly injectBuildingLight = ((view: InstanceSceneView) => function injectBuildingLight(
+    this: Material, shader: WebGLProgramParametersWithUniforms,
+  ): void {
+    view.injectPartyFade(shader);
+    shader.uniforms.wowBuildingAmbient = { value: this.userData.wowBuildingAmbient as Color };
+    shader.fragmentShader = shader.fragmentShader.replace('#include <color_fragment>', BUILDING_LIGHT_FRAGMENT);
+  })(this);
 
   // Binds the fade block to a material whose shader has the party fade.
   private withFade<T extends Material>(material: T): T {
@@ -748,6 +1183,10 @@ export class InstanceSceneView {
   private convertMaterial(mesh: Mesh, terrain: TerrainTextures | null): Material | Material[] {
     const vertexLit = Boolean(mesh.geometry.getAttribute('color'));
     const exteriorLit = vertexLit && isExteriorGroup(mesh);
+    const building = vertexLit ? buildingBatch(mesh) : null;
+    const floors = vertexLit ? null : propFloors(mesh);
+    if (floors && !mesh.geometry.getAttribute('wowPropAmbient')) applyPropLight(mesh, floors);
+    const propLightReady = Boolean(floors);
     const convert = (source: Material): Material => {
       // Terrain: its texture layers blended through its alpha atlas, lit by
       // the scene's lights (it has no baked lighting), with its vertex
@@ -769,16 +1208,27 @@ export class InstanceSceneView {
       }
       // Instanced props get their own copy: three.js re-derives the shader
       // program whenever a material switches between instanced and plain.
-      const key = `${source.uuid}|${vertexLit}|${exteriorLit}|${mesh instanceof InstancedMesh}`;
+      const blend = (source.userData.wowBlend ?? 'opaque') as WowBlend;
+      // The map's own props are shaded by its light; glowing (blended) parts
+      // stay unlit.
+      // A building's props are lit by the floor under them, as the client
+      // lights them (propLight); scenes exported before have no floors.
+      const opaque = !vertexLit && (blend === 'opaque' || blend === 'alphaKey');
+      const propLit = opaque && propLightReady;
+      const shaded = opaque && (propLit || isWorldProp(mesh));
+      const light = building ? buildingBatchLight(building.batch, building.counts, building.unified, building.flags,
+        (source.userData.wowMapObjFlags as number | undefined) ?? 0) : null;
+      const key = `${source.uuid}|${vertexLit}|${exteriorLit}|${shaded}|${propLit}|${mesh instanceof InstancedMesh}`
+        + (building ? `|${light}|${building.unified ? building.ambient : ''}` : '');
       const cached = this.materials.get(key);
       if (cached) return cached;
       const standard = source as MeshStandardMaterial;
-      const blend = (source.userData.wowBlend ?? 'opaque') as WowBlend;
-      const material = new MeshBasicMaterial({
+      const MaterialType = shaded ? MeshLambertMaterial : MeshBasicMaterial;
+      const material = new MaterialType({
         name: source.name,
         map: standard.map ?? null,
         color: (standard.color ?? new Color(1, 1, 1)).clone()
-          .multiplyScalar(exteriorLit ? 1 : vertexLit ? VERTEX_LIT_BRIGHTNESS : UNLIT_BRIGHTNESS),
+          .multiplyScalar(shaded ? PROP_BRIGHTNESS : exteriorLit || building ? 1 : vertexLit ? VERTEX_LIT_BRIGHTNESS : UNLIT_BRIGHTNESS),
         opacity: source.opacity,
         vertexColors: vertexLit,
         side: source.side === DoubleSide ? DoubleSide : FrontSide,
@@ -793,6 +1243,17 @@ export class InstanceSceneView {
         premultipliedAlpha: blend === 'mod' || blend === 'mod2x',
       });
       material.onBeforeCompile = exteriorLit ? this.injectExteriorLight : this.injectPartyFade;
+      if (propLit) material.defines = { ...material.defines, WOW_PROP_LIGHT: '' };
+      if (building && light) {
+        material.defines = {
+          ...material.defines,
+          WOW_BUILDING: BUILDING_LIGHT[light],
+          ...(building.unified ? { WOW_BUILDING_UNIFIED: '' } : {}),
+          ...(exteriorLit ? { WOW_EXTERIOR_GROUP: '' } : {}),
+        };
+        material.userData.wowBuildingAmbient = new Color(building.ambient);
+        material.onBeforeCompile = this.injectBuildingLight;
+      }
       this.withFade(material);
       this.materials.set(key, material);
       return material;

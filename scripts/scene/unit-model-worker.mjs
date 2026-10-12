@@ -1,6 +1,7 @@
 // Child process of the web server that builds unit models, spell effect
-// models (GLB), spell art and name lookups (JSON), and icons (PNG) from the WoW client's Data
-// directory on request, writing each to the cache path it is given. Messages in: { id, kind, params, outputPath }; out:
+// models (GLB), spell art and name lookups and map lights (JSON), and icons
+// (PNG) from the WoW client's Data directory on request, writing each to the
+// cache path it is given. Messages in: { id, kind, params, outputPath }; out:
 // { id, ok, error? }. Client archives are opened once, on the first request.
 
 import fs from 'node:fs';
@@ -9,6 +10,7 @@ import path from 'node:path';
 import { openClientData } from '../client-archives.mjs';
 import { buildEffectGlb } from './effect-model.mjs';
 import { buildIconPng } from './icons.mjs';
+import { mapLights } from './lights.mjs';
 import { SpellVisuals } from './spell-visuals.mjs';
 import { buildUnitGlb, UnitData } from './unit-model.mjs';
 
@@ -39,6 +41,10 @@ async function build(kind, params) {
     return spell ? Buffer.from(JSON.stringify(spell)) : null;
   }
   if (kind === 'icon') return buildIconPng(data().readFile, params, visuals());
+  if (kind === 'light') {
+    const lights = mapLights(data().readFile, Number(params.mapId));
+    return lights ? Buffer.from(JSON.stringify(lights)) : null;
+  }
   if (kind === 'gameobject') {
     const modelName = visuals().gameObjectModel(Number(params.displayId));
     return modelName ? buildEffectGlb(data().readFile, modelName) : null;
@@ -55,7 +61,8 @@ process.on('message', async ({ id, kind, params, outputPath }) => {
     const output = await build(kind, params);
     if (!output) {
       process.send({ id, ok: false, error: kind === 'visual' ? `No art for spell ${params.spellId}.`
-        : kind === 'spell' ? `No spell ${params.spellId}.` : kind === 'icon' ? 'No such icon.' : 'No model for this look.' });
+        : kind === 'spell' ? `No spell ${params.spellId}.` : kind === 'icon' ? 'No such icon.'
+          : kind === 'light' ? `No lights for map ${params.mapId}.` : 'No model for this look.' });
       return;
     }
     fs.mkdirSync(path.dirname(outputPath), { recursive: true });

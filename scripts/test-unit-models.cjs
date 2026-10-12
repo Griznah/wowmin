@@ -332,6 +332,8 @@ test('parses model URLs into build requests, rejecting anything else', () => {
   assert.equal(parseUnitModelPath('/assets/models/icon/marker-9.png'), null);
   assert.deepEqual(JSON.parse(JSON.stringify(parseUnitModelPath('/assets/models/icon/chain-736.png'))),
     { kind: 'icon', key: 'chain-736', params: { chain: 736 } });
+  assert.deepEqual(JSON.parse(JSON.stringify(parseUnitModelPath('/assets/models/light/489.json'))),
+    { kind: 'light', key: '489', params: { mapId: 489 } });
   assert.deepEqual(JSON.parse(JSON.stringify(parseUnitModelPath('/assets/models/gameobject/6251.glb'))),
     { kind: 'gameobject', key: '6251', params: { displayId: 6251 } });
   assert.equal(parseUnitModelPath('/assets/models/icon/../x.png'), null);

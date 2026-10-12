@@ -29,9 +29,12 @@ export const UNIT_MODEL_CACHE_VERSION = 9;
 // 4: spell lookups say whether the spell taunts.
 // 5: chain effects (Chain Heal), areas round an aura's bearer (Starfall),
 // and a wand's Shoot art by school.
-export const SPELL_ART_CACHE_VERSION = 5;
-const SPELL_ART_KINDS = new Set<UnitModelRequest['kind']>(['effect', 'visual', 'spell', 'icon', 'gameobject']);
-const EXTENSIONS: Partial<Record<UnitModelRequest['kind'], string>> = { visual: 'json', spell: 'json', icon: 'png' };
+// 6: map lights carry their objects' lights (torches, braziers).
+// 7: map lights carry the map's fixed time of day, if it has one.
+// 8: map lights carry their interior WMO groups (building ambient, outdoor-lit).
+export const SPELL_ART_CACHE_VERSION = 8;
+const SPELL_ART_KINDS = new Set<UnitModelRequest['kind']>(['effect', 'visual', 'spell', 'icon', 'gameobject', 'light']);
+const EXTENSIONS: Partial<Record<UnitModelRequest['kind'], string>> = { visual: 'json', spell: 'json', icon: 'png', light: 'json' };
 // A look that could not be built is not retried for this long.
 const FAILURE_RETRY_MS = 10 * 60 * 1000;
 
@@ -44,8 +47,8 @@ export interface UnitModelRequest {
   // 'effect' is a SpellVisualEffectName model; 'visual' a spell's art (JSON);
   // 'spell' a spell's name (JSON); 'icon' a client icon (PNG): a spell's, a
   // side's PvP crest, a raid marker, or a spell chain's texture; 'gameobject'
-  // a game object display's model (GLB).
-  kind: 'creature' | 'character' | 'effect' | 'visual' | 'spell' | 'icon' | 'gameobject';
+  // a game object display's model (GLB); 'light' a map's lights (JSON).
+  kind: 'creature' | 'character' | 'effect' | 'visual' | 'spell' | 'icon' | 'gameobject' | 'light';
   key: string;
   params: Record<string, unknown>;
 }
@@ -67,6 +70,8 @@ export function parseUnitModelPath(urlPath: string): UnitModelRequest | null {
   if (visual) return { kind: 'visual', key: visual[1], params: { spellId: Number(visual[1]) } };
   const spell = urlPath.match(/^\/assets\/models\/spell\/(\d{1,7})\.json$/);
   if (spell) return { kind: 'spell', key: spell[1], params: { spellId: Number(spell[1]) } };
+  const light = urlPath.match(/^\/assets\/models\/light\/(\d{1,5})\.json$/);
+  if (light) return { kind: 'light', key: light[1], params: { mapId: Number(light[1]) } };
   const gameObject = urlPath.match(/^\/assets\/models\/gameobject\/(\d{1,7})\.glb$/);
   if (gameObject) return { kind: 'gameobject', key: gameObject[1], params: { displayId: Number(gameObject[1]) } };
   const icon = urlPath.match(/^\/assets\/models\/icon\/(faction-(alliance|horde)|spell-(\d{1,7})|marker-([1-8])|chain-(\d{1,7}))\.png$/);

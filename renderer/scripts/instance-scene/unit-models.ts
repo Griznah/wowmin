@@ -27,12 +27,15 @@ import {
   SkinnedMesh,
   Sphere,
   Vector3,
+  Vector4,
+  type WebGLProgramParametersWithUniforms,
   DetachedBindMode,
 } from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 
+import type { LightColors } from '../utils/map-light';
 import type { Point3, StrikeKind } from '../utils/spell-events';
 import {
   chooseUnitStance,
@@ -50,10 +53,68 @@ import { threeToServer, useServerAxes } from './iso-camera';
 const PET_OVERSIZED_DISPLAY_SCALE = 2;
 
 // How a unit's spells' kits change its model: a colour it is multiplied by
-// (0xRRGGBB, null for none) and how see-through it is (1 opaque).
+// (0xRRGGBB, null for none) and how see-through it is (1 opaque); and its
+// light indoors (the building's on the floor under it), or null outdoors.
 export interface UnitLook {
   color: number | null;
   alpha: number;
+  indoor?: IndoorLook | null;
+}
+
+// A unit's light indoors, and how far its light's direction leans from the
+// indoor light's towards the sun's (0 to 1; on a transition face).
+export interface IndoorLook extends LightColors {
+  outdoor: number;
+}
+
+// The map's light as the client lights models: ambient plus direct times
+// N.L, summed in the client's (gamma) colour space and then made linear.
+// The scene view sets these each frame; w is 1 while the client's light is
+// in use (else the scene's own three.js lights light the models).
+export const clientLight = {
+  ambient: new Vector4(),
+  direct: new Vector4(),
+  // Towards the light, in view space: the sun outdoors, the fixed indoor
+  // light indoors.
+  sun: new Vector3(0, 1, 0),
+  indoor: new Vector3(0, 1, 0),
+};
+
+// The client's light on a lit model material: the uniforms come from the
+// material (shared ones, or a unit's own indoors). The scene's three.js
+// ambient and sun are dark while it is on; point lights still add.
+const CLIENT_LIGHT_DECLARATIONS = `
+uniform vec4 wowLightAmbient;
+uniform vec4 wowLightDirect;
+uniform vec3 wowLightDirection;
+uniform vec3 wowSunDirection;
+`;
+// The direct light's w is how far its direction leans towards the sun's
+// (1 outdoors, where they are the same; a unit's own share indoors).
+const CLIENT_LIGHT_FRAGMENT = `
+if (wowLightAmbient.w > 0.5) {
+  vec3 wowTowards = mix(wowLightDirection, wowSunDirection, wowLightDirect.w);
+  wowTowards = dot(wowTowards, wowTowards) > 1e-6 ? normalize(wowTowards) : wowLightDirection;
+  vec3 wowLight = wowLightAmbient.rgb + wowLightDirect.rgb * saturate(dot(normal, wowTowards));
+  reflectedLight.indirectDiffuse += diffuseColor.rgb * pow(max(wowLight, vec3(0.0)), vec3(2.2));
+}
+`;
+interface ClientLightUniforms {
+  wowLightAmbient: { value: Vector4 };
+  wowLightDirect: { value: Vector4 };
+  wowLightDirection: { value: Vector3 };
+  wowSunDirection: { value: Vector3 };
+}
+const sharedLightUniforms = (): ClientLightUniforms => ({
+  wowLightAmbient: { value: clientLight.ambient },
+  wowLightDirect: { value: clientLight.direct },
+  wowLightDirection: { value: clientLight.sun },
+  wowSunDirection: { value: clientLight.sun },
+});
+function injectClientLight(this: Material, shader: WebGLProgramParametersWithUniforms): void {
+  Object.assign(shader.uniforms, this.userData.wowLight as ClientLightUniforms);
+  shader.fragmentShader = CLIENT_LIGHT_DECLARATIONS + shader.fragmentShader
+    .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>\n${CLIENT_LIGHT_FRAGMENT}`);
 }
 
 // One unit to draw, in server coordinates.
@@ -95,6 +156,18 @@ export interface UnitModelPose {
   flying?: boolean;
   // Sitting on the ground or in a chair (eating, drinking, resting).
   sitting?: boolean;
+  // The WMO group the unit stands in (-1 or absent for none), for its
+  // indoor light.
+  wmoGroupId?: number;
+}
+
+// A unit's own copy of a shared material, keeping the client's light.
+function copyMaterial(material: Material): Material {
+  const copy = material.clone();
+  copy.userData.wowLight = sharedLightUniforms();
+  copy.userData.wowIndoor = { ambient: new Vector4(), direct: new Vector4() };
+  copy.onBeforeCompile = injectClientLight;
+  return copy;
 }
 
 // The id a rider's mount is drawn under.
@@ -802,8 +875,9 @@ export class UnitModelLayer {
   // Multiplies the unit's materials by a colour and an opacity, on copies
   // of the shared ones, or puts the shared ones back.
   private setLook(unit: UnitInstance, look: UnitLook | null): void {
-    const plain = !look || (look.color === null && look.alpha >= 1);
-    const key = plain ? '' : `${look.color}|${look.alpha.toFixed(3)}`;
+    const plain = !look || (look.color === null && look.alpha >= 1 && !look.indoor);
+    const indoor = look?.indoor ?? null;
+    const key = plain ? '' : `${look.color}|${look.alpha.toFixed(3)}|${indoor ? [...indoor.ambient, ...indoor.direct, indoor.outdoor].map((value) => value.toFixed(2)).join(',') : ''}`;
     if (unit.look === key) return;
     unit.look = key;
     if (plain) {
@@ -821,13 +895,25 @@ export class UnitModelLayer {
       if (!original) {
         original = object.material as Material | Material[];
         unit.changed.set(object, original);
-        object.material = Array.isArray(original) ? original.map((material) => material.clone()) : original.clone();
+        object.material = Array.isArray(original) ? original.map(copyMaterial) : copyMaterial(original);
       }
       const originals = Array.isArray(original) ? original : [original];
       const copies = Array.isArray(object.material) ? object.material : [object.material];
       copies.forEach((copy, index) => {
         const source = originals[index];
         if (!(copy instanceof MeshLambertMaterial) || !(source instanceof MeshLambertMaterial)) return;
+        // Indoors the unit's own light, from the fixed indoor direction
+        // (leaning towards the sun's by its share); outdoors the map's,
+        // shared.
+        const uniforms = copy.userData.wowLight as ClientLightUniforms;
+        const own = copy.userData.wowIndoor as { ambient: Vector4; direct: Vector4 };
+        if (indoor) {
+          own.ambient.set(...indoor.ambient, 1);
+          own.direct.set(...indoor.direct, indoor.outdoor);
+        }
+        uniforms.wowLightAmbient.value = indoor ? own.ambient : clientLight.ambient;
+        uniforms.wowLightDirect.value = indoor ? own.direct : clientLight.direct;
+        uniforms.wowLightDirection.value = indoor ? clientLight.indoor : clientLight.sun;
         copy.color.copy(source.color).multiply(tintColor);
         copy.opacity = source.opacity * look.alpha;
         const seeThrough = copy.opacity < 1;
@@ -859,6 +945,8 @@ export class UnitModelLayer {
       depthWrite: (blend === 'opaque' || blend === 'alphaKey') && opacity >= 1,
       blending: blend === 'add' ? AdditiveBlending : NormalBlending,
     });
+    material.userData.wowLight = sharedLightUniforms();
+    material.onBeforeCompile = injectClientLight;
     this.materials.set(source.uuid, material);
     return material;
   }

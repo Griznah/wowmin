@@ -12,10 +12,24 @@ import { toM2Path } from './placement.mjs';
 export const WMO_GROUP_FLAG_VERTEX_COLORS = 0x4;
 export const WMO_GROUP_FLAG_EXTERIOR = 0x8;
 export const WMO_GROUP_FLAG_INTERIOR = 0x2000;
+export const WMO_MATERIAL_FLAG_UNLIT = 0x1;
 export const WMO_MATERIAL_FLAG_UNCULLED = 0x4;
+export const WMO_MATERIAL_FLAG_WINDOW = 0x20;
 export const WMO_MATERIAL_FLAG_CLAMP_S = 0x40;
 export const WMO_MATERIAL_FLAG_CLAMP_T = 0x80;
 const WMO_ROOT_FLAG_VERTEX_COLORS_FIXED = 0x8;
+// The building takes the client's newer ("unified") render path, which adds
+// the header's ambient to its interiors' light and to the floor colour it
+// lights things by (Wow.exe FUN_007a9380, FUN_007c7fe0).
+export const WMO_ROOT_FLAG_UNIFIED = 0x2;
+const WMO_ROOT_FLAG_ADD_AMBIENT = WMO_ROOT_FLAG_UNIFIED;
+const WMO_GROUP_FLAG_EXTERIOR_LIT = 0x40;
+const MOHD_AMBIENT = 0x1c;
+const MOPY_FLAG_TRANSITION = 0x1;
+// A prop's floor: a ray from this far above its origin down to this far
+// below (Wow.exe FUN_007a0d60).
+const PROP_FLOOR_ABOVE = 1;
+const PROP_FLOOR_BELOW = 12;
 
 const MOGP_HEADER_SIZE = 0x44;
 const MOMT_ENTRY_SIZE = 64;
@@ -32,8 +46,12 @@ export function readGroupHeader(groupBuffer) {
   const doodadRefs = findChunk(readChunks(mogp, MOGP_HEADER_SIZE), 'MODR');
   return {
     flags: mogp.readUInt32LE(0x08),
+    // MOPY: a flags byte and a material per triangle.
+    polyFlags: findChunk(readChunks(mogp, MOGP_HEADER_SIZE), 'MOPY'),
     boundingBox: readFloats(mogp, 0x0C, 6),
     transBatchCount: mogp.readUInt16LE(0x28),
+    intBatchCount: mogp.readUInt16LE(0x2a),
+    extBatchCount: mogp.readUInt16LE(0x2c),
     // WMOAreaTable group ID; the server reports this as the player's wmoGroupId.
     groupId: mogp.readUInt32LE(0x38),
     doodadRefs: doodadRefs
@@ -68,13 +86,19 @@ export function readDoodadDefinitions(rootChunks) {
   return { sets, definitions };
 }
 
-// The client's FixColorVertexAlpha for the interior/exterior batches, as in
-// @wowserhq/format but reading the last transparent batch (that library reads
-// one past it, which crashes when every batch is transparent).
+// The client's FixColorVertexAlpha (Wow.exe FUN_007d7380), as in
+// @wowserhq/format but reading the last transition batch (that library reads
+// one past it, which crashes when every batch is one): the transition
+// batches' vertices (doorways, cave mouths) are halved and keep their alpha,
+// which the client blends indoor light into outdoor by; the rest are
+// brightened by their alpha, halved, and made opaque.
 export function fixVertexColors(bgra, batches, transBatchCount) {
   const colors = Uint8Array.from(bgra);
   const lastTransBatch = transBatchCount > 0 ? batches[Math.min(transBatchCount, batches.length) - 1] : null;
   const firstFixed = lastTransBatch ? lastTransBatch.lastVertex + 1 : 0;
+  for (let offset = 0; offset < Math.min(firstFixed * 4, colors.length); offset += 4) {
+    for (let channel = 0; channel < 3; channel += 1) colors[offset + channel] >>= 1;
+  }
   for (let offset = firstFixed * 4; offset + 3 < colors.length; offset += 4) {
     const alpha = colors[offset + 3];
     for (let channel = 0; channel < 3; channel += 1) {
@@ -145,5 +169,53 @@ export function loadWmo(rootName, readFile) {
     };
   });
 
-  return { materials, groups, rootFlags: root.flags, ...readDoodadDefinitions(rootChunks) };
+  const mohd = findChunk(rootChunks, 'MOHD');
+  return {
+    materials,
+    groups,
+    rootFlags: root.flags,
+    // BGRA, as the vertex colours.
+    ambient: mohd ? mohd.readUInt32LE(MOHD_AMBIENT) : 0,
+    ...readDoodadDefinitions(rootChunks),
+  };
+}
+
+// The light a building's prop is lit by, as the client finds it: from the
+// first group that lists the prop, the floor under the prop's origin (its
+// vertex colour as the client keeps it, doubled, plus the building's
+// ambient if it adds one), and how far a transition face there leans it to
+// the outdoor light (its alpha). [r, g, b, share], 0 to 1; 'outdoor' for a
+// prop in an exterior or outdoor-lit group; null if no group lists it or
+// the ray misses.
+export function propFloor(wmo, doodadIndex, [x, y, z]) {
+  const group = wmo.groups.find((candidate) => candidate.doodadRefs.includes(doodadIndex));
+  if (!group) return null;
+  if (group.flags & (WMO_GROUP_FLAG_EXTERIOR | WMO_GROUP_FLAG_EXTERIOR_LIT)) return 'outdoor';
+  const { positions, indices, colors, polyFlags } = group;
+  if (!colors) return null;
+  const top = z + PROP_FLOOR_ABOVE;
+  const bottom = z - PROP_FLOOR_BELOW;
+  let best = null;
+  for (let triangle = 0; triangle * 3 + 2 < indices.length; triangle += 1) {
+    const [a, b, c] = [indices[triangle * 3], indices[triangle * 3 + 1], indices[triangle * 3 + 2]];
+    const [ax, ay, az] = [positions[a * 3], positions[a * 3 + 1], positions[a * 3 + 2]];
+    const [bx, by, bz] = [positions[b * 3], positions[b * 3 + 1], positions[b * 3 + 2]];
+    const [cx, cy, cz] = [positions[c * 3], positions[c * 3 + 1], positions[c * 3 + 2]];
+    const area = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
+    if (Math.abs(area) < 1e-9) continue;
+    const wa = ((by - cy) * (x - cx) + (cx - bx) * (y - cy)) / area;
+    const wb = ((cy - ay) * (x - cx) + (ax - cx) * (y - cy)) / area;
+    const wc = 1 - wa - wb;
+    if (wa < 0 || wb < 0 || wc < 0) continue;
+    const height = wa * az + wb * bz + wc * cz;
+    if (height > top || height < bottom || (best && height <= best.height)) continue;
+    best = { height, triangle, weights: [[a, wa], [b, wb], [c, wc]] };
+  }
+  if (!best) return null;
+  // BGRA bytes, blended by the hit's weights.
+  const channel = (offset) => best.weights.reduce((sum, [vertex, weight]) => sum + colors[vertex * 4 + offset] * weight, 0);
+  const ambient = wmo.rootFlags & WMO_ROOT_FLAG_ADD_AMBIENT ? wmo.ambient : 0;
+  const lit = (offset) => Math.min(255, channel(offset) * 2 + ((ambient >> (offset * 8)) & 0xff)) / 255;
+  const transition = polyFlags && polyFlags[best.triangle * 2] & MOPY_FLAG_TRANSITION;
+  return [lit(2), lit(1), lit(0), transition ? channel(3) / 255 : 0];
 }

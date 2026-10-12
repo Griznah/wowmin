@@ -21,7 +21,11 @@ import { adtLiquidSurfaces, firstTileType, liquidSurface, liquidTypeInfo, mapLiq
 import { encodeTexture } from './textures.mjs';
 import {
   loadWmo,
+  propFloor,
   selectDoodadIndices,
+  WMO_MATERIAL_FLAG_UNLIT,
+  WMO_MATERIAL_FLAG_WINDOW,
+  WMO_ROOT_FLAG_UNIFIED,
   WMO_GROUP_FLAG_EXTERIOR,
   WMO_MATERIAL_FLAG_CLAMP_S,
   WMO_MATERIAL_FLAG_CLAMP_T,
@@ -81,18 +85,27 @@ export function transformBoundingBox([minX, minY, minZ, maxX, maxY, maxZ], { pos
 // Copies of one model under one parent become a single node drawn with GPU
 // instancing (EXT_mesh_gpu_instancing): the viewer draws each model once per
 // building, and once for all the map's loose props, instead of once per copy.
+// A building prop's floor light (propFloor in wmo.mjs) as the scene stores
+// it: [r, g, b, share]; r is -1 for a prop lit by the outdoor light, -2 for
+// one with no floor found.
+const PROP_FLOOR_OUTDOOR = [-1, 0, 0, 0];
+const PROP_FLOOR_NONE = [-2, 0, 0, 0];
+export const encodePropFloor = (floor) =>
+  floor === 'outdoor' ? PROP_FLOOR_OUTDOOR : floor ? floor.map((value) => Math.round(value * 1000) / 1000) : PROP_FLOOR_NONE;
+
 export class DoodadBatches {
   constructor(builder) {
     this.builder = builder;
     this.parents = new Map();
   }
 
-  add(parent, mesh, { position, rotation, scale }) {
+  // `floor` (a building's props only): see propFloor.
+  add(parent, mesh, { position, rotation, scale }, floor) {
     let byMesh = this.parents.get(parent);
     if (!byMesh) this.parents.set(parent, byMesh = new Map());
     let copies = byMesh.get(mesh);
     if (!copies) byMesh.set(mesh, copies = []);
-    copies.push({ position, rotation, scale });
+    copies.push({ position, rotation, scale, ...(floor === undefined ? {} : { floor: encodePropFloor(floor) }) });
   }
 
   // Adds the nodes; returns how many are instanced.
@@ -104,10 +117,10 @@ export class DoodadBatches {
     for (const [parent, byMesh] of this.parents) {
       for (const [mesh, copies] of byMesh) {
         if (copies.length === 1) {
-          const [{ position, rotation, scale }] = copies;
+          const [{ position, rotation, scale, floor }] = copies;
           parent.addChild(document.createNode(`doodad-${mesh.getName()}`).setMesh(mesh)
             .setTranslation(position).setRotation(rotation).setScale([scale, scale, scale])
-            .setExtras({ kind: 'doodad' }));
+            .setExtras({ kind: 'doodad', ...(floor ? { wowFloor: floor } : {}) }));
           continue;
         }
         instancing ??= document.createExtension(EXTMeshGPUInstancing).setRequired(true);
@@ -123,6 +136,11 @@ export class DoodadBatches {
           .setAttribute('TRANSLATION', builder.accessor('VEC3', translations))
           .setAttribute('ROTATION', builder.accessor('VEC4', rotations))
           .setAttribute('SCALE', builder.accessor('VEC3', scales));
+        if (copies.some((copy) => copy.floor)) {
+          const floors = new Float32Array(copies.length * 4);
+          copies.forEach(({ floor }, index) => floors.set(floor ?? PROP_FLOOR_NONE, index * 4));
+          batch.setAttribute('_WOWFLOOR', builder.accessor('VEC4', floors));
+        }
         parent.addChild(document.createNode(`doodads-${mesh.getName()}`).setMesh(mesh)
           .setExtension('EXT_mesh_gpu_instancing', batch)
           .setExtras({ kind: 'doodads', count: copies.length }));
@@ -216,16 +234,21 @@ export function computeFloorHeights(floors, groups) {
   }).filter(Boolean);
 }
 
+// Vertex colours as RGBA, keeping their alpha: on transition batches it is
+// how far the client leans them to the outdoor light.
 function bgraToRgba(colors) {
   const rgba = new Uint8Array(colors.length);
   for (let index = 0; index < colors.length; index += 4) {
     rgba[index] = colors[index + 2];
     rgba[index + 1] = colors[index + 1];
     rgba[index + 2] = colors[index];
-    rgba[index + 3] = 255;
+    rgba[index + 3] = colors[index + 3];
   }
   return rgba;
 }
+
+// A BGRA colour (a WMO header's) as 0xRRGGBB.
+const bgraToRgb = (bgra) => bgra & 0xffffff;
 
 class SceneBuilder {
   constructor({ mapId, readFile, textureMax }) {
@@ -329,13 +352,15 @@ class SceneBuilder {
     return texture;
   }
 
-  material(name, { texture, blend, doubleSided, wrapS, wrapT, tint = [1, 1, 1], opacity = 1 }) {
+  // `mapObjFlags`: a building material's MOMT flags (0x1 unlit, 0x20
+  // window), which choose the light the client draws it with.
+  material(name, { texture, blend, doubleSided, wrapS, wrapT, tint = [1, 1, 1], opacity = 1, mapObjFlags }) {
     const material = this.document.createMaterial(name)
       .setMetallicFactor(0)
       .setRoughnessFactor(1)
       .setBaseColorFactor([...tint, opacity])
       .setDoubleSided(doubleSided)
-      .setExtras({ wowBlend: blend });
+      .setExtras({ wowBlend: blend, ...(mapObjFlags ? { wowMapObjFlags: mapObjFlags } : {}) });
     if (blend === 'alphaKey') material.setAlphaMode('MASK').setAlphaCutoff(0.5);
     else if (blend !== 'opaque' || opacity < 1) material.setAlphaMode('BLEND');
     const image = this.texture(texture);
@@ -355,6 +380,7 @@ class SceneBuilder {
       doubleSided: Boolean(material.flags & WMO_MATERIAL_FLAG_UNCULLED),
       wrapS: !(material.flags & WMO_MATERIAL_FLAG_CLAMP_S),
       wrapT: !(material.flags & WMO_MATERIAL_FLAG_CLAMP_T),
+      mapObjFlags: material.flags & (WMO_MATERIAL_FLAG_UNLIT | WMO_MATERIAL_FLAG_WINDOW),
     }));
     return wmo.groups.map((group) => {
       if (!group.batches.length) return null;
@@ -464,9 +490,20 @@ export async function exportMapScene({
       const exterior = Boolean(group.flags & WMO_GROUP_FLAG_EXTERIOR);
       if (!meshes[index]) return;
       groups.push({ wmoGroupId: group.groupId, exterior, ...bounds });
+      // How the client lights the group's batches (wmoLight in the
+      // renderer): its transition, interior, and exterior batch counts
+      // (its primitives are its batches, in that order); whether the
+      // building takes the newer render path, which adds its ambient
+      // (0xRRGGBB) to its interiors' light; and the group flags.
+      const unified = Boolean(wmo.rootFlags & WMO_ROOT_FLAG_UNIFIED);
       wmoNode.addChild(document.createNode(`group-${group.index}`)
         .setMesh(meshes[index])
-        .setExtras({ kind: 'wmoGroup', wmoGroupId: group.groupId, exterior, minZ: bounds.minZ, maxZ: bounds.maxZ }));
+        .setExtras({
+          kind: 'wmoGroup', wmoGroupId: group.groupId, exterior, minZ: bounds.minZ, maxZ: bounds.maxZ,
+          wmoBatches: [group.transBatchCount, group.intBatchCount, group.extBatchCount],
+          wmoFlags: group.flags,
+          ...(unified ? { wmoUnified: true, wmoAmbient: bgraToRgb(wmo.ambient) } : {}),
+        }));
     });
 
     // Each group's liquid, in the group's space under the building.
@@ -485,7 +522,7 @@ export async function exportMapScene({
       const definition = wmo.definitions[doodadIndex];
       const mesh = definition && builder.m2Mesh(definition.name);
       if (!mesh) continue;
-      doodads.add(wmoNode, mesh, definition);
+      doodads.add(wmoNode, mesh, definition, propFloor(wmo, doodadIndex, definition.position));
       doodadCount += 1;
     }
   }

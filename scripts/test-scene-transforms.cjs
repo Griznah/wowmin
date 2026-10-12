@@ -93,6 +93,8 @@ test('reads the MOGP group ID, flags, and doodad references from a WMO group', a
   header.writeUInt32LE(0x2805, 0x08);
   [-1, -2, -3, 4, 5, 6].forEach((value, index) => header.writeFloatLE(value, 0x0C + index * 4));
   header.writeUInt16LE(3, 0x28);
+  header.writeUInt16LE(4, 0x2a);
+  header.writeUInt16LE(5, 0x2c);
   header.writeUInt32LE(24550, 0x38);
   const refs = Buffer.alloc(4);
   refs.writeUInt16LE(3, 0);
@@ -100,11 +102,42 @@ test('reads the MOGP group ID, flags, and doodad references from a WMO group', a
   const group = Buffer.concat([chunk('MVER', Buffer.alloc(4)), chunk('MOGP', Buffer.concat([header, chunk('MODR', refs)]))]);
   assert.deepEqual(readGroupHeader(group), {
     flags: 0x2805,
+    polyFlags: null,
     boundingBox: [-1, -2, -3, 4, 5, 6],
     transBatchCount: 3,
+    intBatchCount: 4,
+    extBatchCount: 5,
     groupId: 24550,
     doodadRefs: [3, 9],
   });
+});
+
+test('lights a building\'s prop by the floor under it, as the client does', async () => {
+  const { propFloor } = await load('wmo.mjs');
+  // A floor square at height 0 (two triangles; the second a transition
+  // face), vertex colours BGRA, and a ceiling at height 3 over it.
+  const positions = Float32Array.from([0, 0, 0, 10, 0, 0, 10, 10, 0, 0, 10, 0, 0, 0, 3, 10, 0, 3, 10, 10, 3]);
+  const colors = Uint8Array.from([
+    20, 40, 60, 255, 20, 40, 60, 255, 20, 40, 60, 255, 20, 40, 60, 128,
+    0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255,
+  ]);
+  const floor = {
+    flags: 0x2000, doodadRefs: [0, 1], positions, colors,
+    indices: Uint16Array.from([0, 1, 2, 0, 2, 3, 4, 5, 6]),
+    polyFlags: Buffer.from([0x20, 0, 0x21, 0, 0x20, 0]),
+  };
+  const wmo = { rootFlags: 0x2, ambient: 0xff0a1428, groups: [{ flags: 0x8, doodadRefs: [2] }, floor] };
+  const [r, g, b, share] = propFloor(wmo, 0, [8, 2, 0.5]);
+  // Doubled plus the ambient (BGRA bytes 0x28, 0x14, 0x0a): (120 + 10, 80 + 20, 40 + 40) / 255.
+  [130 / 255, 100 / 255, 80 / 255, 0].forEach((expected, index) => assert.ok(Math.abs([r, g, b, share][index] - expected) < 1e-6, `${index}`));
+  // On the transition face, its share is the floor's alpha there.
+  const onTransition = propFloor(wmo, 1, [1, 9, 0]);
+  assert.ok(onTransition[3] > 0.5 && onTransition[3] < 1, `share ${onTransition[3]}`);
+  // Under the ceiling only from above 1 yard: the floor, not the ceiling.
+  assert.equal(propFloor(wmo, 0, [8, 2, 2.5])[0] < 1, true);
+  assert.equal(propFloor(wmo, 2, [0, 0, 0]), 'outdoor');
+  assert.equal(propFloor(wmo, 0, [8, 2, 20]), null, 'more than 12 yards above the floor');
+  assert.equal(propFloor(wmo, 5, [0, 0, 0]), null, 'listed by no group');
 });
 
 test('selects the global doodad set plus the placement set', async () => {
@@ -185,16 +218,16 @@ test('picks the first mip level that fits the texture size cap', async () => {
   assert.equal(hasTransparency(Uint8Array.from([1, 2, 3, 255])), false);
 });
 
-test('fixes WMO vertex colours after the last transparent batch, even when every batch is transparent', async () => {
+test('fixes WMO vertex colours as the client does, even when every batch is a transition batch', async () => {
   const { fixVertexColors } = await load('wmo.mjs');
   const bgra = Uint8Array.from([100, 100, 100, 64, 100, 100, 100, 64]);
   const batches = [{ lastVertex: 0 }, { lastVertex: 1 }];
-  // Vertex 0 belongs to the transparent batch and is left alone; vertex 1 is fixed.
-  assert.deepEqual([...fixVertexColors(bgra, batches, 1)], [100, 100, 100, 64, 100, 100, 100, 255]);
-  // No transparent batches: everything is fixed. (100 + 100 * 64 / 64) / 2 = 100.
+  // Vertex 0 belongs to the transition batch: halved, alpha kept; vertex 1 is fixed.
+  assert.deepEqual([...fixVertexColors(bgra, batches, 1)], [50, 50, 50, 64, 100, 100, 100, 255]);
+  // No transition batches: everything is fixed. (100 + 100 * 64 / 64) / 2 = 100.
   assert.deepEqual([...fixVertexColors(Uint8Array.from([200, 0, 50, 0]), batches, 0)], [100, 0, 25, 255]);
-  // All batches transparent: nothing to fix, and no out-of-range read.
-  assert.deepEqual([...fixVertexColors(bgra, batches, 2)], [...bgra]);
+  // All batches transition ones: all halved, and no out-of-range read.
+  assert.deepEqual([...fixVertexColors(bgra, batches, 2)], [50, 50, 50, 64, 50, 50, 50, 64]);
   assert.deepEqual([...bgra], [100, 100, 100, 64, 100, 100, 100, 64], 'input is not mutated');
 });
 

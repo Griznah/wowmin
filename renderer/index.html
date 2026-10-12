@@ -1233,6 +1233,12 @@ SELECT * FROM creature_template WHERE entry = 1;" spellcheck="false"></textarea>
                 <option value="labels">Labels</option>
               </select>
             </label>
+            <label title="How the 3D view is lit: by each map's own light from the client, at your local time of day, or by a fixed neutral white.">Lighting
+              <select id="instance-lighting-mode">
+                <option value="client">Client</option>
+                <option value="neutral">Neutral</option>
+              </select>
+            </label>
             <div class="btn-row">
               <button id="instance-refresh-btn" class="btn btn-small">Refresh now</button>
               <button id="instance-fit-btn" class="btn btn-small" title="Reset pan, zoom, rotation, and tilt">Fit view</button>
@@ -1246,6 +1252,7 @@ SELECT * FROM creature_template WHERE entry = 1;" spellcheck="false"></textarea>
               <button id="instance-models-btn" class="btn btn-small" title="Draw players and mobs with their game models, animated. Needs the live stream and 3D." aria-pressed="true">Models</button>
               <button id="instance-numbers-btn" class="btn btn-small" title="Float damage and healing numbers over units, like the game's combat text. Needs the live stream." aria-pressed="false">Numbers</button>
               <button id="instance-fades-btn" class="btn btn-small" title="Fade the 3D scene out away from the party, by the height and horizontal fade settings. Turn off to see the whole map, as suits battlegrounds and outdoor areas." aria-pressed="true">Fade</button>
+              <button id="instance-object-lights-btn" class="btn btn-small" title="Light the ground, props, and units near the party with the torches, braziers, and lamps on the map. Turn off if the 3D view is slow." aria-pressed="true">Lights</button>
             </div>
           </div>
         </div>
