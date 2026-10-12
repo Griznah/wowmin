@@ -13,8 +13,9 @@ import path from 'node:path';
 import { Document } from '@gltf-transform/core';
 import { M2Model, M2SkinProfile } from '@wowserhq/format';
 
-import { skinFileName } from './m2.mjs';
-import { decompressQuaternions, expandSkinnedVertices, selectSequences } from './m2-skinned.mjs';
+import { asBytes } from './chunks.mjs';
+import { IDENTITY_ROTATION, M2_BLEND, skinFileName } from './m2.mjs';
+import { boneChannelsFrom, expandSkinnedVertices, selectSequences } from './m2-skinned.mjs';
 import { parseParticleEmitters, parseRibbons } from './m2-effects.mjs';
 import { encodeTexture } from './textures.mjs';
 import { keyframeTimes, writeGlb } from './unit-model.mjs';
@@ -29,11 +30,7 @@ const M2_TRACK_INTERPOLATION_NONE = 0;
 const FIXED16_ONE = 32767;
 // Bone flags: spherical billboard, and cylindrical about X, Y, or Z.
 const BONE_BILLBOARD_FLAGS = 0x8 | 0x10 | 0x20 | 0x40;
-const M2_BLEND = ['opaque', 'alphaKey', 'alpha', 'add', 'add', 'mod', 'mod2x'];
-const IDENTITY_ROTATION = [0, 0, 0, 1];
 const EFFECT_TEXTURE_MAX = 256;
-
-const asBytes = (buffer) => new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
 
 // A library track ({ trackType, loopIndex, sequenceTimes, sequenceKeys }) in
 // the shape m2-effects.mjs reads its own tracks.
@@ -87,28 +84,6 @@ export function exportRibbon(ribbon, clips) {
   return exported;
 }
 
-// A bone's channels for one clip, as glTF node channels (translation offset
-// from the parent's pivot). `pick(track)` says which keys to use: those of
-// sequence `index`, or of loop `loop` for a global clip.
-function boneChannels(bone, parentPivot, pick) {
-  const offset = [0, 1, 2].map((axis) => bone.pivot[axis] - (parentPivot?.[axis] ?? 0));
-  const channels = {};
-  const keys = (track) => {
-    const sequence = pick(track);
-    return sequence?.times.length && sequence.values.length ? sequence : null;
-  };
-  const translation = keys(bone.translationTrack);
-  if (translation) {
-    const values = Float32Array.from(translation.values, (value, index) => value + offset[index % 3]);
-    channels.translation = { times: translation.times, values, step: translation.step };
-  }
-  const rotation = keys(bone.rotationTrack);
-  if (rotation) channels.rotation = { times: rotation.times, values: decompressQuaternions(rotation.values), step: rotation.step };
-  const scale = keys(bone.scaleTrack);
-  if (scale) channels.scale = { times: scale.times, values: Float32Array.from(scale.values), step: scale.step };
-  return channels;
-}
-
 const sequenceKeys = (index) => (track) => (track.loopIndex === M2_NO_LOOP && track.sequenceTimes[index]
   ? { times: track.sequenceTimes[index], values: track.sequenceKeys[index], step: track.trackType === M2_TRACK_INTERPOLATION_NONE }
   : null);
@@ -140,13 +115,13 @@ export function loadEffectM2(modelName, readFile) {
       name: clip.name,
       index: clip.index,
       duration: clip.duration,
-      bones: model.bones.map((bone) => boneChannels(bone, model.bones[bone.parentIndex]?.pivot, sequenceKeys(clip.index))),
+      bones: model.bones.map((bone) => boneChannelsFrom(bone, model.bones[bone.parentIndex]?.pivot, sequenceKeys(clip.index))),
     })),
     globalClips: [...usedLoops].map((loop) => ({
       name: `global${loop}`,
       loop,
       duration: loops[loop],
-      bones: model.bones.map((bone) => boneChannels(bone, model.bones[bone.parentIndex]?.pivot, loopKeys(loop))),
+      bones: model.bones.map((bone) => boneChannelsFrom(bone, model.bones[bone.parentIndex]?.pivot, loopKeys(loop))),
     })),
     bones: model.bones.map((bone) => ({ parentIndex: bone.parentIndex, pivot: Array.from(bone.pivot), flags: bone.flags })),
     textures: model.textures.map((texture) => ({ type: texture.component, filename: texture.filename, flags: texture.flags })),

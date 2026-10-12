@@ -3,11 +3,16 @@
 
 import { M2Model, M2SkinProfile } from '@wowserhq/format';
 
+import { asBytes } from './chunks.mjs';
+
 export const M2_MATERIAL_FLAG_TWO_SIDED = 0x4;
 export const M2_TEXTURE_FLAG_WRAP_S = 0x1;
 export const M2_TEXTURE_FLAG_WRAP_T = 0x2;
 
-const M2_VERTEX_SIZE = 48;
+export const M2_VERTEX_SIZE = 48;
+// How an M2 batch blends, by its material's blend mode.
+export const M2_BLEND = ['opaque', 'alphaKey', 'alpha', 'add', 'add', 'mod', 'mod2x'];
+export const IDENTITY_ROTATION = [0, 0, 0, 1];
 const M2_TEXTURE_COMPONENT_HARDCODED = 0;
 const M2_NO_INDEX = 0xFFFF;
 const M2_FIXED16_ONE = 0x7FFF;
@@ -33,8 +38,6 @@ export function staticBatchColor(model, colorIndex, textureWeightIndex) {
     opacity: Math.min(1, Math.max(0, opacity)),
   };
 }
-
-const asBytes = (buffer) => new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
 
 export function skinFileName(modelName) {
   return modelName.replace(/\.m2$/i, '00.skin');

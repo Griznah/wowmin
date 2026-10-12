@@ -228,12 +228,12 @@ export function compositeBody(characterData, look, items, { maxSize = 512 } = {}
   if (!base) return null;
   const body = { width: base.width, height: base.height, rgba: base.rgba };
   const scale = body.width / 256;
-  const paint = (region, name) => {
-    const image = characterData.readImage(name, maxSize);
+  const paintImage = (region, image) => {
     if (!image) return;
     const [x, y, width, height] = REGIONS[region];
     drawImage(body, image, Math.round(x * scale), Math.round(y * scale), Math.round(width * scale), Math.round(height * scale));
   };
+  const paint = (region, name) => paintImage(region, characterData.readImage(name, maxSize));
   const face = characterData.section(race, gender, SECTION_FACE, look.face, look.skin);
   if (face) {
     paint('faceLower', face[0]);
@@ -261,8 +261,7 @@ export function compositeBody(characterData, look, items, { maxSize = 512 } = {}
       if (!name) return;
       const [region, folder] = ITEM_REGIONS[index];
       const [gendered, unisex] = itemTexturePath(folder, name, gender);
-      const image = characterData.readImage(gendered, maxSize) ? gendered : unisex;
-      paint(region, image);
+      paintImage(region, characterData.readImage(gendered, maxSize) ?? characterData.readImage(unisex, maxSize));
     });
   }
   return body;

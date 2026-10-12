@@ -123,10 +123,14 @@ export class UnitModels {
   // is no model for this look.
   async ensure(request: UnitModelRequest): Promise<string | null> {
     const filePath = this.pathFor(request);
-    if (fs.existsSync(filePath)) return filePath;
+    if (await fs.promises.access(filePath).then(() => true, () => false)) return filePath;
     if (!this.enabled) return null;
     const id = `${request.kind}/${request.key}`;
-    if (Date.now() - (this.failedAt.get(id) ?? 0) < FAILURE_RETRY_MS) return null;
+    const failedAt = this.failedAt.get(id);
+    if (failedAt !== undefined) {
+      if (Date.now() - failedAt < FAILURE_RETRY_MS) return null;
+      this.failedAt.delete(id);
+    }
     let build = this.building.get(id);
     if (!build) {
       build = this.build(request, filePath).finally(() => this.building.delete(id));
@@ -146,7 +150,7 @@ export class UnitModels {
         resolve(false);
       }, BUILD_TIMEOUT_MS);
       this.pending.set(id, { resolve, timer });
-      worker.send({ id, kind: request.kind, key: request.key, params: request.params, outputPath });
+      worker.send({ id, kind: request.kind, params: request.params, outputPath });
     });
   }
 

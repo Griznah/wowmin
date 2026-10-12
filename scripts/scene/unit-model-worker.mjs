@@ -1,6 +1,6 @@
 // Child process of the web server that builds unit models, spell effect
 // models (GLB), spell art and name lookups (JSON), and icons (PNG) from the WoW client's Data
-// directory on request, writing each to the cache path it is given. Messages in: { id, kind, key, params, outputPath }; out:
+// directory on request, writing each to the cache path it is given. Messages in: { id, kind, params, outputPath }; out:
 // { id, ok, error? }. Client archives are opened once, on the first request.
 
 import fs from 'node:fs';

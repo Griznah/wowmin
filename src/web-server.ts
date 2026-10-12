@@ -19,6 +19,19 @@ const maxRequestBytes = 2 * 1024 * 1024;
 const managed = Boolean(process.env.WOWMIN_SOAP_USERNAME && process.env.WOWMIN_SOAP_PASSWORD && process.env.WOWMIN_DB_PASSWORD);
 const configuredDungeonClearUrl = normalizeDungeonClearUrl(process.env.WOWMIN_DUNGEON_CLEAR_URL);
 
+// A watched instance's updates go to every page watching it, so each is
+// serialized once however many pages there are.
+const serializedEvents = new WeakMap<object, string>();
+function eventJson(data: unknown): string {
+  if (typeof data !== 'object' || data === null) return JSON.stringify(data);
+  let json = serializedEvents.get(data);
+  if (json === undefined) {
+    json = JSON.stringify(data);
+    serializedEvents.set(data, json);
+  }
+  return json;
+}
+
 function managedSoapConfig(): SoapConfig {
   return {
     host: process.env.WOWMIN_SOAP_HOST || '127.0.0.1',
@@ -245,7 +258,7 @@ const server = createServer(async (request, response) => {
       'X-Accel-Buffering': 'no',
     });
     response.write('retry: 3000\n\n');
-    const send = (event: string, data: unknown) => response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    const send = (event: string, data: unknown) => response.write(`event: ${event}\ndata: ${eventJson(data)}\n\n`);
     const unwatch = telemetryStream.watch(mapId, instanceId, {
       onFrame: (frame) => send('frame', frame),
       onStatus: (status) => send('status', status),

@@ -5,7 +5,7 @@
 
 import { MapObj, MapObjGroup } from '@wowserhq/format';
 
-import { findChunk, readChunks, readCString, readFloats } from './chunks.mjs';
+import { asBytes, findChunk, readChunks, readCString, readFloats } from './chunks.mjs';
 import { readWmoLiquid } from './liquids.mjs';
 import { toM2Path } from './placement.mjs';
 
@@ -21,8 +21,6 @@ const MOGP_HEADER_SIZE = 0x44;
 const MOMT_ENTRY_SIZE = 64;
 const MODS_ENTRY_SIZE = 32;
 const MODD_ENTRY_SIZE = 40;
-
-const asBytes = (buffer) => new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
 
 export function groupFileName(rootName, index) {
   return rootName.replace(/\.wmo$/i, `_${String(index).padStart(3, '0')}.wmo`);

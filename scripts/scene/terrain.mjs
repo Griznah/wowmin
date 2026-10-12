@@ -9,7 +9,7 @@
 
 import { createRequire } from 'node:module';
 
-import { readChunks } from './chunks.mjs';
+import { asBytes, readChunks } from './chunks.mjs';
 
 const require = createRequire(import.meta.url);
 const { MapArea } = require('@wowserhq/format');
@@ -150,7 +150,7 @@ export function readVertexShading(adtBuffer) {
 }
 
 export function loadMapArea(adtBuffer, bigAlpha) {
-  return new MapArea(bigAlpha ? 8 : 4).load(new Uint8Array(adtBuffer.buffer, adtBuffer.byteOffset, adtBuffer.byteLength));
+  return new MapArea(bigAlpha ? 8 : 4).load(asBytes(adtBuffer));
 }
 
 // A flat, untextured stand-in tile (Azjol-Nerub, Gundrak): every chunk at one

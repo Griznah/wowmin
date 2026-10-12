@@ -4,9 +4,9 @@
 
 import { M2Model, M2SkinProfile } from '@wowserhq/format';
 
-import { skinFileName, staticBatchColor } from './m2.mjs';
+import { asBytes } from './chunks.mjs';
+import { expandSkinVertices, M2_VERTEX_SIZE, skinFileName, staticBatchColor } from './m2.mjs';
 
-const M2_VERTEX_SIZE = 48;
 const M2_NO_LOOP = 0xFFFF;
 // Set on sequences whose keyframes are inside the .m2 rather than a .anim file.
 const M2_SEQUENCE_FLAG_INLINE = 0x20;
@@ -56,8 +56,6 @@ export const UNIT_ANIMATIONS = {
   Hover: 193,
 };
 
-const asBytes = (buffer) => new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-
 // M2 stores rotations as signed 16-bit quaternion components.
 export function decompressQuaternionComponent(value) {
   return (value < 0 ? value + 32768 : value - 32767) / 32767;
@@ -80,21 +78,13 @@ export function decompressQuaternions(values) {
 // Positions, normals, UVs, and up to four bone influences per vertex, with
 // weights normalised to sum to 1.
 export function expandSkinnedVertices(modelVertices, skinVertexLookup) {
+  const { positions, normals, uvs } = expandSkinVertices(modelVertices, skinVertexLookup);
   const view = new DataView(modelVertices);
   const count = skinVertexLookup.length;
-  const positions = new Float32Array(count * 3);
-  const normals = new Float32Array(count * 3);
-  const uvs = new Float32Array(count * 2);
   const joints = new Uint16Array(count * 4);
   const weights = new Float32Array(count * 4);
   for (let index = 0; index < count; index += 1) {
     const base = skinVertexLookup[index] * M2_VERTEX_SIZE;
-    for (let axis = 0; axis < 3; axis += 1) {
-      positions[index * 3 + axis] = view.getFloat32(base + axis * 4, true);
-      normals[index * 3 + axis] = view.getFloat32(base + 20 + axis * 4, true);
-    }
-    uvs[index * 2] = view.getFloat32(base + 32, true);
-    uvs[index * 2 + 1] = view.getFloat32(base + 36, true);
     let total = 0;
     for (let influence = 0; influence < 4; influence += 1) total += view.getUint8(base + 12 + influence);
     for (let influence = 0; influence < 4; influence += 1) {
@@ -134,17 +124,27 @@ function trackKeys(track, sequenceIndex) {
 // Keyframes for one bone in one sequence, as glTF node channels: translation
 // is offset from the parent's pivot so the bone turns about its own pivot.
 export function boneChannels(bone, parentPivot, sequenceIndex) {
+  return boneChannelsFrom(bone, parentPivot, (track) => trackKeys(track, sequenceIndex));
+}
+
+// The same, with `pick(track)` choosing each track's keys ({ times, values,
+// step }, or null for none).
+export function boneChannelsFrom(bone, parentPivot, pick) {
   const offset = [0, 1, 2].map((axis) => bone.pivot[axis] - (parentPivot?.[axis] ?? 0));
   const channels = {};
-  const translation = trackKeys(bone.translationTrack, sequenceIndex);
+  const keys = (track) => {
+    const picked = pick(track);
+    return picked?.times.length && picked.values.length ? picked : null;
+  };
+  const translation = keys(bone.translationTrack);
   if (translation) {
     const values = new Float32Array(translation.values.length);
     for (let index = 0; index < values.length; index += 1) values[index] = translation.values[index] + offset[index % 3];
     channels.translation = { times: translation.times, values, step: translation.step };
   }
-  const rotation = trackKeys(bone.rotationTrack, sequenceIndex);
+  const rotation = keys(bone.rotationTrack);
   if (rotation) channels.rotation = { times: rotation.times, values: decompressQuaternions(rotation.values), step: rotation.step };
-  const scale = trackKeys(bone.scaleTrack, sequenceIndex);
+  const scale = keys(bone.scaleTrack);
   if (scale) channels.scale = { times: scale.times, values: Float32Array.from(scale.values), step: scale.step };
   return channels;
 }

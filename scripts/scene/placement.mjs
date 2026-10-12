@@ -56,7 +56,8 @@ export function readWdt(buffer) {
     // Depths, and the Outland dungeons all line up with their map floors).
     wmo.position = [wmo.position[0] - MAP_CENTRE, wmo.position[1] - MAP_CENTRE, wmo.position[2]];
   }
-  return { wmoOnly: Boolean(wmo), tiles, wmo };
+  // `flags` is MPHD's (WDT_FLAG_BIG_ALPHA and the like).
+  return { wmoOnly: Boolean(wmo), tiles, wmo, flags: header.readUInt32LE(0) };
 }
 
 export function readAdtPlacements(buffer) {

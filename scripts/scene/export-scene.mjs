@@ -11,8 +11,7 @@ import { Document, NodeIO, TextureInfo } from '@gltf-transform/core';
 import { EXTMeshGPUInstancing, EXTMeshoptCompression } from '@gltf-transform/extensions';
 import { MeshoptEncoder } from 'meshoptimizer';
 
-import { loadM2, M2_MATERIAL_FLAG_TWO_SIDED, M2_TEXTURE_FLAG_WRAP_S, M2_TEXTURE_FLAG_WRAP_T } from './m2.mjs';
-import { findChunk, readChunks } from './chunks.mjs';
+import { loadM2, M2_BLEND, M2_MATERIAL_FLAG_TWO_SIDED, M2_TEXTURE_FLAG_WRAP_S, M2_TEXTURE_FLAG_WRAP_T } from './m2.mjs';
 import { dedupeByUniqueId, readAdtPlacements, readWdt } from './placement.mjs';
 import { PNG } from 'pngjs';
 
@@ -38,9 +37,8 @@ const TERRAIN_TEXTURE_MAX = 256;
 const LIQUID_TEXTURE_MAX = 128;
 
 const WMO_BLEND = ['opaque', 'alphaKey', 'alpha', 'add', 'mod', 'mod2x'];
-const M2_BLEND = ['opaque', 'alphaKey', 'alpha', 'add', 'add', 'mod', 'mod2x'];
 
-export function rotateByQuaternion([x, y, z], [qx, qy, qz, qw]) {
+function rotateByQuaternion([x, y, z], [qx, qy, qz, qw]) {
   const tx = 2 * (qy * z - qz * y);
   const ty = 2 * (qz * x - qx * z);
   const tz = 2 * (qx * y - qy * x);
@@ -49,6 +47,18 @@ export function rotateByQuaternion([x, y, z], [qx, qy, qz, qw]) {
     y + qw * ty + qz * tx - qx * tz,
     z + qw * tz + qx * ty - qy * tx,
   ];
+}
+
+// The box around `boxes` ({ minX, maxX, minY, maxY, minZ, maxZ } each);
+// infinite bounds when there are none.
+function unionBounds(boxes) {
+  const bounds = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity };
+  for (const box of boxes) {
+    bounds.minX = Math.min(bounds.minX, box.minX); bounds.maxX = Math.max(bounds.maxX, box.maxX);
+    bounds.minY = Math.min(bounds.minY, box.minY); bounds.maxY = Math.max(bounds.maxY, box.maxY);
+    bounds.minZ = Math.min(bounds.minZ, box.minZ); bounds.maxZ = Math.max(bounds.maxZ, box.maxZ);
+  }
+  return bounds;
 }
 
 export function transformBoundingBox([minX, minY, minZ, maxX, maxY, maxZ], { position, rotation, scale = 1 }) {
@@ -163,10 +173,7 @@ export function buildingReach(groups, area, points = []) {
     ...groups.filter((group) => inArea(group) || nearPoint(group)),
     ...points.map(([x, y, z]) => ({ minX: x, maxX: x, minY: y, maxY: y, minZ: z, maxZ: z })),
   ];
-  if (!boxes.length) return null;
-  const low = (key) => Math.min(...boxes.map((box) => box[key]));
-  const high = (key) => Math.max(...boxes.map((box) => box[key]));
-  return { minX: low('minX'), maxX: high('maxX'), minY: low('minY'), maxY: high('maxY'), minZ: low('minZ'), maxZ: high('maxZ') };
+  return boxes.length ? unionBounds(boxes) : null;
 }
 
 // The map's graveyards and start points (WorldSafeLocs.dbc: map, x, y, z),
@@ -281,6 +288,15 @@ class SceneBuilder {
       this.waterColours = lights && bands ? mapLiquidColours(readDbc(lights), readDbc(bands).byId(), this.mapId) : null;
     }
     return this.waterColours;
+  }
+
+  // A liquid surface (positions, uvs, indices) as a one-primitive mesh.
+  liquidMesh(name, surface, material) {
+    return this.document.createMesh(name).addPrimitive(this.document.createPrimitive()
+      .setAttribute('POSITION', this.accessor('VEC3', surface.positions))
+      .setAttribute('TEXCOORD_0', this.accessor('VEC2', surface.uvs))
+      .setIndices(this.accessor('SCALAR', surface.indices))
+      .setMaterial(material));
   }
 
   accessor(type, array, normalized = false) {
@@ -460,12 +476,7 @@ export async function exportMapScene({
       const typeId = wmoLiquidType(group.liquid.groupLiquid, wmo.rootFlags, group.flags, firstTileType(group.liquid));
       const material = surface && builder.liquidMaterial(typeId);
       if (!material) return;
-      const mesh = document.createMesh(`liquid-${group.groupId}`).addPrimitive(document.createPrimitive()
-        .setAttribute('POSITION', builder.accessor('VEC3', surface.positions))
-        .setAttribute('TEXCOORD_0', builder.accessor('VEC2', surface.uvs))
-        .setIndices(builder.accessor('SCALAR', surface.indices))
-        .setMaterial(material));
-      wmoNode.addChild(document.createNode(`liquid-${group.index}`).setMesh(mesh)
+      wmoNode.addChild(document.createNode(`liquid-${group.index}`).setMesh(builder.liquidMesh(`liquid-${group.groupId}`, surface, material))
         .setExtras({ kind: 'liquid', wmoGroupId: group.groupId }));
       liquidCount += 1;
     });
@@ -498,9 +509,9 @@ export async function exportMapScene({
   // A map with no floors, world map bounds, or buildings to go by gets none.
   const terrain = { tiles: 0, chunks: 0, bounds: null };
   if (area.length) {
-    const bigAlpha = Boolean(findChunk(readChunks(wdtBuffer), 'MPHD').readUInt32LE(0) & WDT_FLAG_BIG_ALPHA);
-    const buffer = document.getRoot().listBuffers()[0] ?? document.createBuffer();
-    const accessor = (type, array) => document.createAccessor().setType(type).setArray(array).setBuffer(buffer);
+    const bigAlpha = Boolean(wdt.flags & WDT_FLAG_BIG_ALPHA);
+    const accessor = (type, array, normalized) => builder.accessor(type, array, normalized);
+    const tileBounds = [];
     // Each ground texture once, as a material named for its layer index.
     const layerNames = [];
     const layerIndex = new Map();
@@ -531,11 +542,7 @@ export async function exportMapScene({
         for (const [typeId, surface] of adtLiquidSurfaces(adt, { inArea: (position) => chunkInArea(position, area) })) {
           const liquidMaterial = builder.liquidMaterial(typeId);
           if (!liquidMaterial) continue;
-          const liquidMesh = document.createMesh(`liquid-${x}-${y}-${typeId}`).addPrimitive(document.createPrimitive()
-            .setAttribute('POSITION', accessor('VEC3', surface.positions))
-            .setAttribute('TEXCOORD_0', accessor('VEC2', surface.uvs))
-            .setIndices(accessor('SCALAR', surface.indices))
-            .setMaterial(liquidMaterial));
+          const liquidMesh = builder.liquidMesh(`liquid-${x}-${y}-${typeId}`, surface, liquidMaterial);
           root.addChild(document.createNode(`liquid-${x}-${y}-${typeId}`).setMesh(liquidMesh).setExtras({ kind: 'liquid', tile: [x, y] }));
           liquidCount += 1;
         }
@@ -559,7 +566,7 @@ export async function exportMapScene({
       const mesh = document.createMesh(`terrain-${x}-${y}`).addPrimitive(document.createPrimitive()
         .setAttribute('POSITION', accessor('VEC3', tile.positions))
         .setAttribute('NORMAL', accessor('VEC3', tile.normals))
-        .setAttribute('COLOR_0', accessor('VEC3', tile.colors).setNormalized(true))
+        .setAttribute('COLOR_0', accessor('VEC3', tile.colors, true))
         .setAttribute('_LAYERS', accessor('VEC4', tile.layers))
         .setAttribute('_CELL', accessor('VEC2', tile.cells))
         .setIndices(accessor('SCALAR', tile.indices))
@@ -568,14 +575,12 @@ export async function exportMapScene({
         .setExtras({ kind: 'terrain', tile: [x, y], minZ: tile.bounds.minZ, maxZ: tile.bounds.maxZ }));
       terrain.tiles += 1;
       terrain.chunks += tile.chunkCount;
-      const b = tile.bounds;
-      terrain.bounds = terrain.bounds ? {
-        minX: Math.min(terrain.bounds.minX, b.minX), maxX: Math.max(terrain.bounds.maxX, b.maxX),
-        minY: Math.min(terrain.bounds.minY, b.minY), maxY: Math.max(terrain.bounds.maxY, b.maxY),
-        minZ: Math.min(terrain.bounds.minZ, b.minZ), maxZ: Math.max(terrain.bounds.maxZ, b.maxZ),
-      } : b;
+      tileBounds.push(tile.bounds);
     }
-    if (terrain.tiles) root.setExtras({ ...root.getExtras(), wowTerrainLayers: layerNames });
+    if (terrain.tiles) {
+      terrain.bounds = unionBounds(tileBounds);
+      root.setExtras({ ...root.getExtras(), wowTerrainLayers: layerNames });
+    }
   }
 
   if (!groups.length && !doodadCount && !terrain.tiles) throw new Error(`${internalName} produced no drawable geometry.`);
@@ -588,11 +593,7 @@ export async function exportMapScene({
   const boundsSources = groups.length ? groups : looseDoodads.map(({ position: [x, y, z] }) => ({
     minX: x - 50, maxX: x + 50, minY: y - 50, maxY: y + 50, minZ: z - 50, maxZ: z + 50,
   }));
-  const bounds = boundsSources.reduce((total, group) => ({
-    minX: Math.min(total.minX, group.minX), maxX: Math.max(total.maxX, group.maxX),
-    minY: Math.min(total.minY, group.minY), maxY: Math.max(total.maxY, group.maxY),
-    minZ: Math.min(total.minZ, group.minZ), maxZ: Math.max(total.maxZ, group.maxZ),
-  }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity });
+  const bounds = unionBounds(boundsSources);
 
   return {
     scene: {

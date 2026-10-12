@@ -436,6 +436,65 @@ interface WatchedSession {
   watchedAt: number;
 }
 
+// How each kind of datagram after the player frame reaches a watched
+// session's listeners: parsed, kept if it carries anything (an empty marker
+// list matters: it clears the markers), and passed to its listener.
+type Route = (message: Buffer, session: WatchedSession) => void;
+
+function route<T>(parse: (buffer: Buffer, session: WatchedSession) => T | null, keep: (update: T) => boolean,
+  deliver: (listener: StreamListeners, update: T) => void): Route {
+  return (message, session) => {
+    const update = parse(message, session);
+    if (!update || !keep(update)) return;
+    for (const listener of session.listeners) deliver(listener, update);
+  };
+}
+
+function namePaths(buffer: Buffer, session: WatchedSession): StreamPathUpdate | null {
+  const datagram = parsePathDatagram(buffer);
+  if (!datagram) return null;
+  const paths: StreamPath[] = [];
+  for (const path of datagram.paths) {
+    const name = path.creature ? '' : session.names.get(path.guid);
+    if (path.creature || name) paths.push(Object.assign(path, { name: name ?? '' }));
+  }
+  return { ...datagram, paths };
+}
+
+function nameBots(buffer: Buffer, session: WatchedSession): StreamBotUpdate | null {
+  const datagram = parseBotDatagram(buffer);
+  if (!datagram) return null;
+  const bots: StreamBotDecision[] = [];
+  for (const bot of datagram.bots) {
+    const name = session.names.get(bot.guid);
+    if (name) bots.push(Object.assign(bot, { name }));
+  }
+  return { ...datagram, bots };
+}
+
+const ROUTES: Record<string, Route> = {
+  // Player paths are named from the latest frame; those for players not yet
+  // seen in one are dropped, as the module re-sends paths every second.
+  [PATH_MAGIC]: route(namePaths, (update) => update.paths.length > 0, (listener, update) => listener.onPaths?.(update)),
+  [CREATURE_MAGIC]: route(parseCreatureDatagram, (update) => update.creatures.length > 0,
+    (listener, update) => listener.onCreatures?.(update)),
+  // Bots are named the same way; those not yet seen in a frame are dropped.
+  [BOT_MAGIC]: route(nameBots, (update) => update.bots.length > 0, (listener, update) => listener.onBots?.(update)),
+  [APPEARANCE_MAGIC]: route(parseAppearanceDatagram, (update) => update.units.length > 0,
+    (listener, update) => listener.onAppearances?.(update)),
+  [COMBAT_MAGIC]: route(parseCombatEventDatagram, (update) => update.events.length > 0 || update.dropped > 0,
+    (listener, update) => listener.onCombatEvents?.(update)),
+  [DEBUFF_MAGIC]: route(parseDebuffDatagram, (update) => update.units.length > 0,
+    (listener, update) => listener.onDebuffs?.(update)),
+  [MARKER_MAGIC]: route(parseMarkerDatagram, () => true, (listener, update) => listener.onMarkers?.(update)),
+  [GAMEOBJECT_MAGIC]: route(parseGameObjectDatagram, (update) => update.objects.length > 0,
+    (listener, update) => listener.onGameObjects?.(update)),
+  [PASSENGER_MAGIC]: route(parsePassengerDatagram, (update) => update.passengers.length > 0,
+    (listener, update) => listener.onPassengers?.(update)),
+  [UNIT_AURA_MAGIC]: route(parseUnitAuraDatagram, (update) => update.units.length > 0,
+    (listener, update) => listener.onUnitAuras?.(update)),
+};
+
 export class TelemetryStream {
   private socket: dgram.Socket | null = null;
   private readonly sessions = new Map<string, WatchedSession>();
@@ -515,45 +574,13 @@ export class TelemetryStream {
   }
 
   private receive(message: Buffer): void {
-    const magic = message.toString('latin1', 0, 4);
-    if (magic === PATH_MAGIC) {
-      this.receivePaths(message);
-      return;
-    }
-    if (magic === CREATURE_MAGIC) {
-      this.receiveCreatures(message);
-      return;
-    }
-    if (magic === BOT_MAGIC) {
-      this.receiveBots(message);
-      return;
-    }
-    if (magic === APPEARANCE_MAGIC) {
-      this.receiveAppearances(message);
-      return;
-    }
-    if (magic === COMBAT_MAGIC) {
-      this.receiveCombatEvents(message);
-      return;
-    }
-    if (magic === PASSENGER_MAGIC) {
-      this.receivePassengers(message);
-      return;
-    }
-    if (magic === GAMEOBJECT_MAGIC) {
-      this.receiveGameObjects(message);
-      return;
-    }
-    if (magic === DEBUFF_MAGIC) {
-      this.receiveDebuffs(message);
-      return;
-    }
-    if (magic === MARKER_MAGIC) {
-      this.receiveMarkers(message);
-      return;
-    }
-    if (magic === UNIT_AURA_MAGIC) {
-      this.receiveUnitAuras(message);
+    const route = ROUTES[message.toString('latin1', 0, 4)];
+    if (route) {
+      // Only a watched session's datagrams are read in full; every kind but
+      // the player frame shares a header with the map and instance at 8, 12.
+      if (message.length < PATH_HEADER_SIZE) return;
+      const session = this.sessions.get(`${message.readUInt32LE(8)}:${message.readUInt32LE(12)}`);
+      if (session) route(message, session);
       return;
     }
     const datagram = parseStreamDatagram(message);
@@ -586,107 +613,6 @@ export class TelemetryStream {
       players,
     };
     for (const listener of session.listeners) listener.onFrame(frame);
-  }
-
-  // Player paths are named from the latest frame; those for players not yet
-  // seen in one are dropped, as the module re-sends paths every second.
-  private receivePaths(message: Buffer): void {
-    const datagram = parsePathDatagram(message);
-    if (!datagram) return;
-    const session = this.sessions.get(`${datagram.mapId}:${datagram.instanceId}`);
-    if (!session) return;
-    const paths = datagram.paths.flatMap((path) => {
-      if (path.creature) return [{ ...path, name: '' }];
-      const name = session.names.get(path.guid);
-      return name ? [{ ...path, name }] : [];
-    });
-    if (!paths.length) return;
-    const update: StreamPathUpdate = {
-      mapId: datagram.mapId, instanceId: datagram.instanceId, serverTimeMs: datagram.serverTimeMs, paths,
-    };
-    for (const listener of session.listeners) listener.onPaths?.(update);
-  }
-
-  private receiveCreatures(message: Buffer): void {
-    const update = parseCreatureDatagram(message);
-    if (!update?.creatures.length) return;
-    const session = this.sessions.get(`${update.mapId}:${update.instanceId}`);
-    if (!session) return;
-    for (const listener of session.listeners) listener.onCreatures?.(update);
-  }
-
-  // Named like player paths; bots not yet seen in a frame are dropped.
-  private receiveBots(message: Buffer): void {
-    const datagram = parseBotDatagram(message);
-    if (!datagram) return;
-    const session = this.sessions.get(`${datagram.mapId}:${datagram.instanceId}`);
-    if (!session) return;
-    const bots = datagram.bots.flatMap((bot) => {
-      const name = session.names.get(bot.guid);
-      return name ? [{ ...bot, name }] : [];
-    });
-    if (!bots.length) return;
-    const update: StreamBotUpdate = {
-      mapId: datagram.mapId, instanceId: datagram.instanceId, serverTimeMs: datagram.serverTimeMs, bots,
-    };
-    for (const listener of session.listeners) listener.onBots?.(update);
-  }
-
-  private receiveAppearances(message: Buffer): void {
-    const update = parseAppearanceDatagram(message);
-    if (!update?.units.length) return;
-    const session = this.sessions.get(`${update.mapId}:${update.instanceId}`);
-    if (!session) return;
-    for (const listener of session.listeners) listener.onAppearances?.(update);
-  }
-
-  private receiveCombatEvents(message: Buffer): void {
-    const update = parseCombatEventDatagram(message);
-    if (!update || (!update.events.length && !update.dropped)) return;
-    const session = this.sessions.get(`${update.mapId}:${update.instanceId}`);
-    if (!session) return;
-    for (const listener of session.listeners) listener.onCombatEvents?.(update);
-  }
-
-  private receiveDebuffs(message: Buffer): void {
-    const update = parseDebuffDatagram(message);
-    if (!update?.units.length) return;
-    const session = this.sessions.get(`${update.mapId}:${update.instanceId}`);
-    if (!session) return;
-    for (const listener of session.listeners) listener.onDebuffs?.(update);
-  }
-
-  // An empty list matters: it clears the markers.
-  private receiveMarkers(message: Buffer): void {
-    const update = parseMarkerDatagram(message);
-    if (!update) return;
-    const session = this.sessions.get(`${update.mapId}:${update.instanceId}`);
-    if (!session) return;
-    for (const listener of session.listeners) listener.onMarkers?.(update);
-  }
-
-  private receiveGameObjects(message: Buffer): void {
-    const update = parseGameObjectDatagram(message);
-    if (!update?.objects.length) return;
-    const session = this.sessions.get(`${update.mapId}:${update.instanceId}`);
-    if (!session) return;
-    for (const listener of session.listeners) listener.onGameObjects?.(update);
-  }
-
-  private receivePassengers(message: Buffer): void {
-    const update = parsePassengerDatagram(message);
-    if (!update?.passengers.length) return;
-    const session = this.sessions.get(`${update.mapId}:${update.instanceId}`);
-    if (!session) return;
-    for (const listener of session.listeners) listener.onPassengers?.(update);
-  }
-
-  private receiveUnitAuras(message: Buffer): void {
-    const update = parseUnitAuraDatagram(message);
-    if (!update?.units.length) return;
-    const session = this.sessions.get(`${update.mapId}:${update.instanceId}`);
-    if (!session) return;
-    for (const listener of session.listeners) listener.onUnitAuras?.(update);
   }
 
   private setStatus(session: WatchedSession, status: StreamStatus): void {

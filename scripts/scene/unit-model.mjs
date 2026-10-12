@@ -1,4 +1,4 @@
-// Builds an animated GLB for one unit look: a creature display, or (later) a
+// Builds an animated GLB for one unit look: a creature display, or a
 // character with its gear. The model stays in M2 space (Z up, facing +X) with
 // the display's scale on the root node; the renderer places it in the world.
 
@@ -6,7 +6,7 @@ import path from 'node:path';
 
 import { Document, NodeIO, TextureInfo } from '@gltf-transform/core';
 
-import { M2_MATERIAL_FLAG_TWO_SIDED, M2_TEXTURE_FLAG_WRAP_S, M2_TEXTURE_FLAG_WRAP_T } from './m2.mjs';
+import { IDENTITY_ROTATION, M2_BLEND, M2_MATERIAL_FLAG_TWO_SIDED, M2_TEXTURE_FLAG_WRAP_S, M2_TEXTURE_FLAG_WRAP_T } from './m2.mjs';
 import { loadSkinnedM2 } from './m2-skinned.mjs';
 import {
   CharacterData, creatureWeaponAttachments, loadCharacter, readM2Attachments, SLOT, VISIBLE_SLOTS,
@@ -14,10 +14,8 @@ import {
 import { encodeTexture } from './textures.mjs';
 import { readDbc } from './dbc.mjs';
 
-const M2_BLEND = ['opaque', 'alphaKey', 'alpha', 'add', 'add', 'mod', 'mod2x'];
 const TEXTURE_TYPE_HARDCODED = 0;
 const TEXTURE_TYPE_MONSTER_1 = 11;
-const IDENTITY_ROTATION = [0, 0, 0, 1];
 // Points spell effects are drawn at, by M2 attachment ID; the first one the
 // model has wins. 22/21 are the spell hands, 1/2 the hands, 15 the chest, 11
 // the helm (20 the head), 17 the mouth (breath), and 18 the name point above
@@ -49,7 +47,7 @@ export function keyframeTimes(times, values, width) {
 
 // Which channels each bone needs: any a clip animates, so every clip sets
 // them and switching clips never leaves a bone where the last one put it.
-export function animatedChannels(clips, boneCount) {
+function animatedChannels(clips, boneCount) {
   const paths = Array.from({ length: boneCount }, () => new Set());
   for (const clip of clips) {
     clip.bones.forEach((channels, bone) => {
@@ -285,7 +283,7 @@ export class UnitData {
 
 // Builds the GLB for a non-humanoid creature display, or null if the display
 // or its model is missing.
-export async function buildCreatureGlb(unitData, displayId, { textureMax, weapons = {} } = {}) {
+async function buildCreatureGlb(unitData, displayId, { weapons = {} } = {}) {
   const display = unitData.creatureDisplay(displayId);
   if (!display) return null;
   if (display.extraId) return buildHumanoidCreatureGlb(unitData, display, weapons);
@@ -306,7 +304,7 @@ export async function buildCreatureGlb(unitData, displayId, { textureMax, weapon
   const attachments = creatureWeaponAttachments(unitData.characters, display.modelName, weapons);
   const points = effectPoints(readM2Attachments(unitData.readFile(display.modelName)));
   const document = buildUnitDocument(model, {
-    name: `creature-${displayId}`, textureFor, scale: display.scale, textureMax, attachments, points,
+    name: `creature-${displayId}`, textureFor, scale: display.scale, attachments, points,
   });
   return writeGlb(document);
 }
@@ -340,12 +338,12 @@ export function parseCharacterKey(key) {
   return { race, gender, skin, face, hairStyle, hairColor, facialStyle, helmHidden: Boolean(flags & 1), cloakHidden: Boolean(flags & 2), items };
 }
 
-async function buildCharacterGlb(unitData, look, { name = 'character', scale = 1, textureMax = 512 } = {}) {
+async function buildCharacterGlb(unitData, look) {
   unitData.characters ??= new CharacterData(unitData);
-  const character = loadCharacter(unitData.characters, look, { textureMax });
+  const character = loadCharacter(unitData.characters, look);
   if (!character) return null;
   const document = buildUnitDocument(character.model, {
-    name, textureFor: character.textureFor, scale, textureMax: 256, attachments: character.attachments,
+    name: 'character', textureFor: character.textureFor, textureMax: 256, attachments: character.attachments,
     points: effectPoints(readM2Attachments(unitData.characters.readFile(character.modelName))),
   });
   return writeGlb(document);

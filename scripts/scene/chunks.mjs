@@ -1,6 +1,9 @@
 // Minimal reader for the IFF-style chunk containers used by WDT, ADT, and WMO
 // files. Chunk IDs are stored byte-reversed on disk ("REVM" for MVER).
 
+// A Node Buffer as a plain byte view over the same memory.
+export const asBytes = (buffer) => new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+
 export function readChunks(buffer, start = 0, end = buffer.length) {
   const chunks = [];
   let offset = start;

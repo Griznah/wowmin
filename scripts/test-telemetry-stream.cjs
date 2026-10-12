@@ -12,13 +12,14 @@ function loadModule(relativePath) {
     platform: 'node',
     format: 'cjs',
   }).outputFiles[0].text;
-  const context = { module: { exports: {} }, require, Buffer };
+  const context = { module: { exports: {} }, require, Buffer, console, setInterval, clearInterval };
   context.exports = context.module.exports;
   vm.runInNewContext(output, context);
   return context.module.exports;
 }
 
 const {
+  TelemetryStream,
   parseBotDatagram, parseCombatEventDatagram, parseCreatureDatagram, parseDebuffDatagram, parseGameObjectDatagram, parseMarkerDatagram, parsePassengerDatagram, parsePathDatagram, parseStreamDatagram, parseUnitAuraDatagram,
 } = loadModule('../src/telemetry-stream.ts');
 const {
@@ -607,4 +608,54 @@ test('parses raid markers, and an empty list clears them', () => {
   assert.equal(store.get('c900', 2500), null);
   store.push(parsed, 3000);
   assert.equal(store.get('c900', 3000 + LIVE_MARKER_STALE_MS + 1), null);
+});
+
+test('passes a watched session\'s datagrams to its listeners, naming paths from the latest frame', async () => {
+  const dgram = require('node:dgram');
+  const probe = dgram.createSocket('udp4');
+  await new Promise((resolve) => probe.bind(0, '127.0.0.1', resolve));
+  const port = probe.address().port;
+  await new Promise((resolve) => probe.close(resolve));
+
+  const stream = new TelemetryStream(async () => ({ success: true, message: 'WSTREAM|ok' }), '127.0.0.1', port);
+  const seen = { frames: [], paths: [], creatures: [], markers: [] };
+  const listeners = (into) => ({
+    onStatus: () => {}, onFrame: (frame) => into.frames.push(frame), onPaths: (update) => into.paths.push(update),
+    onCreatures: (update) => into.creatures.push(update), onMarkers: (update) => into.markers.push(update),
+  });
+  const marked = { frames: [], paths: [], creatures: [], markers: [] };
+  const unwatch = stream.watch(601, 7, listeners(seen));
+  const unwatchMarkers = stream.watch(533, 3, listeners(marked));
+  const sender = dgram.createSocket('udp4');
+  const send = (buffer) => new Promise((resolve) => sender.send(buffer, port, '127.0.0.1', resolve));
+  const creature = { guid: 900, entry: 29120, x: 1, y: 2, z: 3, orientation: 0, healthPct: 50, flags: 0, targetGuid: 0, wmoGroupId: -1 };
+  try {
+    await send(datagram({ players: [tankard] }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await send(pathDatagram({ paths: [
+      { guid: 42, splineId: 1, points: [[1, 2, 3]] },
+      // Not in a frame yet: dropped.
+      { guid: 77, splineId: 2, points: [[4, 5, 6]] },
+      { guid: 900, splineId: 3, creature: true, points: [[7, 8, 9]] },
+    ] }));
+    // Another instance, not watched: ignored.
+    await send(creatureDatagram({ instanceId: 8, creatures: [creature] }));
+    await send(creatureDatagram({ creatures: [creature] }));
+    // Nothing to pass on: no call.
+    await send(creatureDatagram({ creatures: [] }));
+    // An empty marker list still goes out: it clears the markers.
+    await send(entriesDatagram('WMR1', []));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  } finally {
+    sender.close();
+    unwatch();
+    unwatchMarkers();
+  }
+  assert.equal(seen.frames.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(seen.paths.map((update) => update.paths.map(({ guid, name }) => [guid, name])))), [[[42, 'Tankard'], [900, '']]]);
+  assert.equal(seen.creatures.length, 1);
+  assert.equal(seen.creatures[0].instanceId, 7);
+  assert.equal(marked.markers.length, 1);
+  assert.equal(marked.markers[0].markers.length, 0);
+  assert.equal(seen.markers.length, 0);
 });

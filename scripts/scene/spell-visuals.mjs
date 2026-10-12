@@ -49,6 +49,7 @@ export class SpellVisuals {
   constructor(readFile) {
     this.readFile = readFile;
     this.tables = new Map();
+    this.present = new Map();
   }
 
   table(name) {
@@ -66,7 +67,7 @@ export class SpellVisuals {
     const file = this.table('GameObjectDisplayInfo').get(displayId)?.string(GAMEOBJECT_MODEL_FIELD);
     if (!file || /\.wmo$/i.test(file) || /invisible/i.test(file)) return null;
     const modelName = file.replace(/\.md[xl]$/i, '.m2');
-    return this.readFile(modelName) ? modelName : null;
+    return this.hasFile(modelName) ? modelName : null;
   }
 
   // The model file for an effect, or null if it isn't in the client.
@@ -75,7 +76,17 @@ export class SpellVisuals {
     const file = effect?.string(EFFECT_FILE);
     if (!file) return null;
     const modelName = file.replace(/\.md[xl]$/i, '.m2');
-    return this.readFile(modelName) ? modelName : null;
+    return this.hasFile(modelName) ? modelName : null;
+  }
+
+  // Whether the client has a file, remembered (reading one decompresses it).
+  hasFile(name) {
+    let known = this.present.get(name);
+    if (known === undefined) {
+      known = Boolean(this.readFile(name));
+      this.present.set(name, known);
+    }
+    return known;
   }
 
   effect(effectId) {
