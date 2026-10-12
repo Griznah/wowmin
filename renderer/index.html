@@ -1301,6 +1301,16 @@ SELECT * FROM creature_template WHERE entry = 1;" spellcheck="false"></textarea>
             <button id="instance-rotate-left-btn" class="btn btn-tiny" title="Rotate left (Q). Middle-drag or Shift+drag to rotate and tilt freely." aria-label="Rotate view left">⟲</button>
             <button id="instance-rotate-right-btn" class="btn btn-tiny" title="Rotate right (E). Middle-drag or Shift+drag to rotate and tilt freely." aria-label="Rotate view right">⟳</button>
             <button id="instance-view-3d-btn" class="btn btn-tiny" title="Switch between the 3D scene and the flat map" aria-pressed="true">3D</button>
+            <svg id="instance-compass" class="instance-compass" viewBox="-32 -32 64 64" role="img" aria-label="Compass" hidden>
+              <title>Map orientation</title>
+              <ellipse id="instance-compass-ring" class="instance-compass-ring" rx="15" ry="15"></ellipse>
+              <polygon id="instance-compass-north" class="instance-compass-north"></polygon>
+              <polygon id="instance-compass-south" class="instance-compass-south"></polygon>
+              <text data-point="N" class="instance-compass-label north">N</text>
+              <text data-point="E" class="instance-compass-label">E</text>
+              <text data-point="S" class="instance-compass-label">S</text>
+              <text data-point="W" class="instance-compass-label">W</text>
+            </svg>
           </div>
           <div id="instance-watch-empty" class="instance-watch-empty">
             <strong>No active instance or battleground sessions</strong>

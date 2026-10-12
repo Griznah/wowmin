@@ -269,6 +269,24 @@ test('quarter turns step between standard angles and snap back after free rotati
   near(getNextQuarterTurn(DEFAULT_ISO_YAW - 3 * quarter - 0.2, -1), DEFAULT_ISO_YAW - 4 * quarter, 'several turns away');
 });
 
+test('the compass points the way the scene is drawn', () => {
+  const { getCompassDirections } = loadModule('../renderer/scripts/utils/map-projection.ts');
+  for (const [yaw, pitch] of [[DEFAULT_ISO_YAW, ISO_PITCH], [2.1, ISO_PITCH_MAX], [-0.4, ISO_PITCH_MIN]]) {
+    const view = createIsoView(sceneBox, 900, 600, yaw, pitch, { zoom: 1.5, panX: 20, panY: -10 });
+    const from = view.projection.worldToScreen(100, 200, 0);
+    const steps = { N: [1, 0], E: [0, -1], S: [-1, 0], W: [0, 1] };
+    const compass = getCompassDirections(yaw, pitch);
+    for (const [point, [dx, dy]] of Object.entries(steps)) {
+      const to = view.projection.worldToScreen(100 + dx, 200 + dy, 0);
+      near(compass[point].x, (to.x - from.x) / view.pixelsPerUnit, `${point} x at yaw ${yaw}`);
+      near(compass[point].y, (to.y - from.y) / view.pixelsPerUnit, `${point} y at yaw ${yaw}`);
+    }
+  }
+  // The default view looks north-east: north is up and to the left.
+  const { N } = getCompassDirections(DEFAULT_ISO_YAW, ISO_PITCH);
+  assert.ok(N.x < 0 && N.y < 0);
+});
+
 test('tilt is limited to between a low oblique view and straight down', () => {
   assert.equal(clampIsoPitch(-1), ISO_PITCH_MIN);
   assert.equal(clampIsoPitch(3), ISO_PITCH_MAX);

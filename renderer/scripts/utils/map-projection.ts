@@ -327,3 +327,24 @@ export function getNextQuarterTurn(yaw: number, direction: 1 | -1): number {
   const next = direction > 0 ? Math.floor(steps + epsilon) + 1 : Math.ceil(steps - epsilon) - 1;
   return DEFAULT_ISO_YAW + next * quarter;
 }
+
+export type CompassPoint = 'N' | 'E' | 'S' | 'W';
+
+// Server azimuths of the compass points: north is +X, west +Y.
+const COMPASS_AZIMUTHS: Record<CompassPoint, number> = { N: 0, E: -Math.PI / 2, S: Math.PI, W: Math.PI / 2 };
+
+// Where a unit step along the ground towards each compass point lands on
+// screen (x right, y down) in the iso view with this yaw and pitch.
+export function getCompassDirections(yaw: number, pitch: number): Record<CompassPoint, { x: number; y: number }> {
+  const { right, up } = getIsoBasis(yaw, pitch);
+  const toScreen = (azimuth: number) => {
+    const step: Vec3 = [Math.cos(azimuth), Math.sin(azimuth), 0];
+    return { x: dot(step, right), y: -dot(step, up) };
+  };
+  return {
+    N: toScreen(COMPASS_AZIMUTHS.N),
+    E: toScreen(COMPASS_AZIMUTHS.E),
+    S: toScreen(COMPASS_AZIMUTHS.S),
+    W: toScreen(COMPASS_AZIMUTHS.W),
+  };
+}

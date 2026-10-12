@@ -2,7 +2,7 @@
 import { ts, escapeHtml, showResult, debounce, getMapName, CLASS_COLORS, RACE_NAMES, CLASS_NAMES } from './utils/helpers';
 import { parseOnlineList, playersFromDatabase } from './utils/online-players';
 import { type ActiveInstanceSession, type DungeonFloor, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getInstanceCoordinateBounds, getInstanceFactionColor, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, groupActiveInstanceSessions, parseInstanceSessionKey, zoomInstanceViewAt, INSTANCE_MAX_ZOOM, isSceneryCreature } from './utils/instance-watch';
-import { clampIsoPitch, createFlatProjection, createIsoView, DEFAULT_ISO_YAW, type FadeSettings, getFadeVolumes, getHeightBand, getIsoPanForCenter, getNextQuarterTurn, ISO_PITCH, type IsoView, type MapProjection, resolveMinimapTileProjection, type SceneBox } from './utils/map-projection';
+import { clampIsoPitch, type CompassPoint, createFlatProjection, createIsoView, DEFAULT_ISO_YAW, type FadeSettings, getCompassDirections, getFadeVolumes, getHeightBand, getIsoPanForCenter, getNextQuarterTurn, ISO_PITCH, type IsoView, type MapProjection, resolveMinimapTileProjection, type SceneBox } from './utils/map-projection';
 import { InstanceSceneView } from './instance-scene/scene-view';
 import type { UnitModelPose } from './instance-scene/unit-models';
 import type { GameObjectPose } from './instance-scene/game-objects';
@@ -6465,6 +6465,7 @@ const $instanceViewControls = $<HTMLElement>('instance-view-controls');
 const $instanceRotateLeftBtn = $<HTMLButtonElement>('instance-rotate-left-btn');
 const $instanceRotateRightBtn = $<HTMLButtonElement>('instance-rotate-right-btn');
 const $instanceView3dBtn = $<HTMLButtonElement>('instance-view-3d-btn');
+const $instanceCompass = document.getElementById('instance-compass') as SVGSVGElement | null;
 const $instanceFadeRange = $<HTMLInputElement>('instance-fade-range');
 const $instanceFadeRangeValue = $<HTMLOutputElement>('instance-fade-range-value');
 const $instanceHorizontalFade = $<HTMLInputElement>('instance-horizontal-fade');
@@ -7576,6 +7577,37 @@ function renderInstanceScene(
   return view;
 }
 
+// Below this tilt the compass would flatten into a line, so it stops tilting.
+const COMPASS_MIN_PITCH = Math.PI / 8;
+const COMPASS_RING_RADIUS = 15;
+const COMPASS_NEEDLE_LENGTH = 13;
+const COMPASS_NEEDLE_WIDTH = 3.5;
+const COMPASS_LABEL_RADIUS = 23;
+let instanceCompassOrientation = '';
+
+// Turns and tilts the compass with the camera, as if it lay on the ground.
+function updateInstanceCompass(): void {
+  if (!$instanceCompass) return;
+  const yaw = getInstanceViewYaw();
+  const pitch = Math.max(getInstanceViewPitch(), COMPASS_MIN_PITCH);
+  const orientation = `${yaw.toFixed(4)},${pitch.toFixed(4)}`;
+  if (orientation === instanceCompassOrientation) return;
+  instanceCompassOrientation = orientation;
+  const directions = getCompassDirections(yaw, pitch);
+  const at = (point: CompassPoint, distance: number) => ({ x: directions[point].x * distance, y: directions[point].y * distance });
+  const points = (...corners: Array<{ x: number; y: number }>) => corners.map(({ x, y }) => `${x.toFixed(2)},${y.toFixed(2)}`).join(' ');
+  const east = at('E', COMPASS_NEEDLE_WIDTH);
+  const west = at('W', COMPASS_NEEDLE_WIDTH);
+  $instanceCompass.querySelector('#instance-compass-ring')?.setAttribute('ry', (COMPASS_RING_RADIUS * Math.sin(pitch)).toFixed(2));
+  $instanceCompass.querySelector('#instance-compass-north')?.setAttribute('points', points(at('N', COMPASS_NEEDLE_LENGTH), east, west));
+  $instanceCompass.querySelector('#instance-compass-south')?.setAttribute('points', points(at('S', COMPASS_NEEDLE_LENGTH), east, west));
+  for (const label of $instanceCompass.querySelectorAll<SVGTextElement>('[data-point]')) {
+    const { x, y } = at(label.dataset.point as CompassPoint, COMPASS_LABEL_RADIUS);
+    label.setAttribute('x', x.toFixed(2));
+    label.setAttribute('y', y.toFixed(2));
+  }
+}
+
 function rotateInstanceView(quarterTurns: number): void {
   const session = getSelectedInstanceSession();
   if (!session || !instanceIsoContext || !isInstanceSceneShowing(session.mapId)) return;
@@ -8193,6 +8225,8 @@ function drawInstanceCanvas(followPass: boolean): void {
   if ($instanceRotateLeftBtn) $instanceRotateLeftBtn.disabled = !isoView;
   if ($instanceRotateRightBtn) $instanceRotateRightBtn.disabled = !isoView;
   if ($instanceView3dBtn) $instanceView3dBtn.setAttribute('aria-pressed', String(instanceView3d));
+  $instanceCompass?.toggleAttribute('hidden', !isoView);
+  if (isoView) updateInstanceCompass();
   let projection: MapProjection;
   if (isoView) {
     instanceBaseViewport = isoView.baseViewport;
