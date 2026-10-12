@@ -30,6 +30,7 @@ import {
 } from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 
 import type { Point3, StrikeKind } from '../utils/spell-events';
 import {
@@ -216,6 +217,49 @@ const SELECTED_COLOR = '#fbbf24';
 export function getMarkerRadius(sizeX: number, sizeY: number, displayScale: number): number {
   const radius = Math.max(sizeX, sizeY) * 0.45;
   return Math.min(MARKER_MAX_RADIUS, Math.max(MARKER_MIN_RADIUS, radius)) * (displayScale || 1);
+}
+
+// Merges a model's skinned parts that share a material into one mesh, so a
+// character is drawn in about as many calls as it has materials rather than
+// one per part. See-through parts keep their own draws (and so their
+// blending order); parts whose attributes differ are left as they are.
+function mergeSkinnedParts(scene: Object3D): void {
+  const parents = new Set<Object3D>();
+  scene.traverse((object) => {
+    if (object instanceof SkinnedMesh && object.parent) parents.add(object.parent);
+  });
+  for (const parent of parents) {
+    const groups = new Map<string, SkinnedMesh[]>();
+    for (const child of parent.children) {
+      if (!(child instanceof SkinnedMesh) || Array.isArray(child.material) || child.material.transparent) continue;
+      const geometry = child.geometry;
+      const signature = [
+        child.material.uuid, child.skeleton.uuid, child.renderOrder, child.matrix.elements.join(','), Boolean(geometry.index),
+        ...Object.entries(geometry.attributes as Record<string, { itemSize: number; normalized: boolean }>).map(([name, attribute]) => `${name}:${attribute.itemSize}:${attribute.normalized}`).sort(),
+      ].join('|');
+      const group = groups.get(signature);
+      if (group) group.push(child);
+      else groups.set(signature, [child]);
+    }
+    for (const parts of groups.values()) {
+      if (parts.length < 2) continue;
+      const geometry = mergeGeometries(parts.map((part) => part.geometry));
+      if (!geometry) continue;
+      const [first] = parts;
+      const merged = new SkinnedMesh(geometry, first.material);
+      merged.name = first.name;
+      merged.matrix.copy(first.matrix);
+      merged.matrix.decompose(merged.position, merged.quaternion, merged.scale);
+      merged.frustumCulled = first.frustumCulled;
+      merged.renderOrder = first.renderOrder;
+      merged.bind(first.skeleton, first.bindMatrix);
+      for (const part of parts) {
+        parent.remove(part);
+        part.geometry.dispose();
+      }
+      parent.add(merged);
+    }
+  }
 }
 
 const scratchVector = new Vector3();
@@ -492,6 +536,7 @@ export class UnitModelLayer {
           footprint.union(object.geometry.boundingBox!);
         }
       });
+      mergeSkinnedParts(gltf.scene);
       const root = gltf.scene.children[0];
       loading.radius = footprint.isEmpty()
         ? MARKER_MIN_RADIUS
@@ -559,13 +604,23 @@ export class UnitModelLayer {
       if (object.userData.wowPoint) unit.points.set(object.userData.wowPoint as string, object);
     });
     this.pose(unit);
-    // Bone matrices go to the GPU only on frames the unit was posed.
+    // The clone gives each skinned part its own copy of the skeleton; parts
+    // of one skin share one again, so its bones go to the GPU once a frame.
+    // That happens only on frames the unit was posed.
+    const skeletons: Skeleton[] = [];
     model.traverse((object) => {
       if (!(object instanceof SkinnedMesh)) return;
+      const shared = skeletons.find((skeleton) => skeleton.bones.length === object.skeleton.bones.length
+        && skeleton.bones.every((bone, index) => bone === object.skeleton.bones[index]));
+      if (shared) {
+        object.bind(shared, object.bindMatrix);
+        return;
+      }
       const bones = object.skeleton;
       bones.update = () => {
         if (unit.posed) Skeleton.prototype.update.call(bones);
       };
+      skeletons.push(bones);
     });
     this.units.set(pose.id, unit);
     return unit;
