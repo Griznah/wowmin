@@ -43,6 +43,7 @@ import {
   type UnitStance,
   type UnitWeapons,
 } from '../utils/unit-animation';
+import { threeToServer, useServerAxes } from './iso-camera';
 
 // A pet's model scale above this is a giant's (see UnitModelPose.pet).
 const PET_OVERSIZED_DISPLAY_SCALE = 2;
@@ -89,10 +90,10 @@ export interface UnitModelPose {
 }
 
 // The id a rider's mount is drawn under.
-export const mountUnitId = (riderId: string): string => `${riderId}#mount`;
+const mountUnitId = (riderId: string): string => `${riderId}#mount`;
 
 // Effect points the converter exports on the skeleton.
-export type UnitPointRole = 'handRight' | 'handLeft' | 'chest' | 'head' | 'breath' | 'overhead' | 'mount';
+type UnitPointRole = 'handRight' | 'handLeft' | 'chest' | 'head' | 'breath' | 'overhead' | 'mount';
 
 // The ring on the floor under a model, with a pointer the way it faces.
 export interface UnitMarkerStyle {
@@ -116,6 +117,8 @@ interface ModelTemplate {
   radius?: number;
   // Standing height in model units (times the display scale).
   height?: number;
+  // The model's own display scale (its top node's).
+  displayScale?: number;
 }
 
 interface UnitMarker {
@@ -127,6 +130,8 @@ interface UnitMarker {
   health: Mesh<RingGeometry, MeshBasicMaterial>;
   radius: number;
   healthShown: number | null;
+  // The ring's colour as last set, so it is parsed only on a change.
+  color: string | null;
 }
 
 // A rigid model (helm, weapon) the converter hangs on a bone. Bones live
@@ -216,7 +221,7 @@ const COMBAT_COLOR = '#ef4444';
 const SELECTED_COLOR = '#fbbf24';
 
 // Floor ring radius for a model: a little under half its widest footprint.
-export function getMarkerRadius(sizeX: number, sizeY: number, displayScale: number): number {
+function getMarkerRadius(sizeX: number, sizeY: number, displayScale: number): number {
   const radius = Math.max(sizeX, sizeY) * 0.45;
   return Math.min(MARKER_MAX_RADIUS, Math.max(MARKER_MIN_RADIUS, radius)) * (displayScale || 1);
 }
@@ -335,6 +340,7 @@ function createMarker(radius: number): UnitMarker {
     health: markerMesh(new RingGeometry(radius * 0.7, radius * 0.8, 48), healthColor(1)),
     radius,
     healthShown: null,
+    color: null,
   };
   marker.health.visible = false;
   group.add(marker.ring, marker.pointer, marker.combat, marker.selected, marker.health);
@@ -343,8 +349,11 @@ function createMarker(radius: number): UnitMarker {
 
 function updateMarker(marker: UnitMarker, style: UnitMarkerStyle, alive: boolean): void {
   marker.group.visible = !style.hidden;
-  marker.ring.material.color.set(style.color);
-  marker.pointer.material.color.set(style.color);
+  if (style.color !== marker.color) {
+    marker.color = style.color;
+    marker.ring.material.color.set(style.color);
+    marker.pointer.material.color.set(style.color);
+  }
   // A corpse faces nowhere in particular.
   marker.pointer.visible = alive;
   marker.combat.visible = alive && style.inCombat;
@@ -378,8 +387,7 @@ export class UnitModelLayer {
   private lastUpdateAt = 0;
 
   constructor(private readonly onLoaded: () => void) {
-    // Server (x, y, z) Z-up becomes (x, z, -y) Y-up, as for the scene.
-    this.group.rotation.x = -Math.PI / 2;
+    useServerAxes(this.group);
   }
 
   get count(): number {
@@ -392,8 +400,7 @@ export class UnitModelLayer {
     const unit = this.units.get(id);
     const point = unit?.points.get(role);
     if (!unit || !point) return null;
-    const position = this.group.worldToLocal(this.pointWorld(unit, point, scratchVector));
-    return [position.x, position.y, position.z];
+    return threeToServer(this.pointWorld(unit, point, scratchVector));
   }
 
   // A point in a unit's skeleton, in world space.
@@ -410,7 +417,7 @@ export class UnitModelLayer {
   scaleOf(id: string): number | null {
     const unit = this.units.get(id);
     if (!unit) return null;
-    return unit.root.scale.x * (unit.template.scene?.children[0]?.scale.x ?? 1);
+    return unit.root.scale.x * (unit.template.displayScale ?? 1);
   }
 
   // A drawn unit's standing height in yards, or null.
@@ -460,7 +467,7 @@ export class UnitModelLayer {
     if (candidates.length > FULL_RATE_UNITS) candidates.sort((a, b) => a.distance - b.distance);
     candidates.forEach(({ unit }, index) => {
       if (index >= FULL_RATE_UNITS && nowMs < unit.nextPoseAt) return;
-      // Spread the reduced-rate units' frames by their jitter.
+      // Spread the reduced-rate units' frames by their phase.
       unit.nextPoseAt = nowMs + REDUCED_RATE_MS * (0.75 + unit.phase * 0.5);
       unit.mixer.update(unit.pending);
       unit.pending = 0;
@@ -510,10 +517,10 @@ export class UnitModelLayer {
     const saddle = mount.points.get('mount');
     if (!saddle) return null;
     // The saddle as of the mount's last pose, where the mount is now.
-    mount.root.updateWorldMatrix(false, true);
-    const position = this.group.worldToLocal(this.pointWorld(mount, saddle, scratchVector));
+    mount.top.updateWorldMatrix(true, false);
+    const [x, y, z] = threeToServer(this.pointWorld(mount, saddle, scratchVector));
     return {
-      ...pose, x: position.x, y: position.y, z: position.z, orientation: mount.root.rotation.z, riding: true,
+      ...pose, x, y, z, orientation: mount.root.rotation.z, riding: true,
       marker: { ...pose.marker, hidden: true },
     };
   }
@@ -540,10 +547,12 @@ export class UnitModelLayer {
       });
       mergeSkinnedParts(gltf.scene);
       const root = gltf.scene.children[0];
+      const displayScale = root?.scale.x ?? 1;
+      loading.displayScale = displayScale;
       loading.radius = footprint.isEmpty()
         ? MARKER_MIN_RADIUS
-        : getMarkerRadius(footprint.max.x - footprint.min.x, footprint.max.y - footprint.min.y, root?.scale.x ?? 1);
-      loading.height = footprint.isEmpty() ? undefined : footprint.max.z * (root?.scale.x ?? 1);
+        : getMarkerRadius(footprint.max.x - footprint.min.x, footprint.max.y - footprint.min.y, displayScale);
+      loading.height = footprint.isEmpty() ? undefined : footprint.max.z * displayScale;
       const durations = (root?.userData.wowClipDurations ?? {}) as Record<string, number>;
       loading.clips = new Map(gltf.animations.map((clip) => {
         if (durations[clip.name]) clip.duration = durations[clip.name];
@@ -567,6 +576,13 @@ export class UnitModelLayer {
     root.add(marker.group, model);
     this.group.add(root);
     const { top, skeleton, skeletonToTop, attachments } = detachSkeleton(model);
+    // The model's nodes keep their place under the root (items on bones are
+    // posed by hand), so their local matrices are made once.
+    model.traverse((object) => {
+      if (!object.matrixAutoUpdate) return;
+      object.updateMatrix();
+      object.matrixAutoUpdate = false;
+    });
     const jitter = Math.random();
     const unit: UnitInstance = {
       url: pose.url,
@@ -643,7 +659,7 @@ export class UnitModelLayer {
   private place(unit: UnitInstance, pose: UnitModelPose, nowMs: number): void {
     unit.root.position.set(pose.x, pose.y, pose.z);
     unit.root.rotation.z = pose.orientation;
-    const displayScale = unit.template.scene?.children[0]?.scale.x ?? 1;
+    const displayScale = unit.template.displayScale ?? 1;
     const oversized = pose.pet && displayScale > PET_OVERSIZED_DISPLAY_SCALE;
     unit.root.scale.setScalar((pose.scale || 1) / (oversized ? displayScale : 1));
 

@@ -1,8 +1,9 @@
 import { type Camera, Group } from 'three';
 
 import type { AreaEffect, AreaRing, Beam, CastGlow, CombatEffectStore, Impact, Point3, Projectile, UnitKey } from '../utils/spell-events';
-import { EffectInstance, type EffectPlacement, type EffectTemplate, getEffectView, loadEffectTemplate } from './m2-effect';
-import type { UnitAnchorRole } from './spell-effects';
+import { useServerAxes } from './iso-camera';
+import { EffectInstance, type EffectPlacement, type EffectTemplate, EffectTemplateCache, getEffectView } from './m2-effect';
+import type { UnitAnchor } from './spell-effects';
 import {
   AREA_ART_SCALE, castKit, kitAnimationName, pointInDisc, RAIN_SPREAD, rainRate, slotAnchor, type SpellVisual, type VisualKit,
 } from '../utils/spell-kits';
@@ -18,7 +19,7 @@ import {
 // What the layer needs to know about units: where a point on one is, its
 // overall scale, and which way it faces.
 export interface UnitInfo {
-  anchor: (unit: UnitKey, role: UnitAnchorRole) => Point3 | null;
+  anchor: UnitAnchor;
   scale: (unit: UnitKey) => number;
   facing: (unit: UnitKey) => number;
 }
@@ -40,12 +41,12 @@ interface PlayingEffect {
 }
 
 // Global particle budget: past it, emitters stop spawning until room frees.
-export const PARTICLE_BUDGET = 4000;
+const PARTICLE_BUDGET = 4000;
 
 export class SpellVisualLayer {
   readonly group = new Group();
   private readonly visuals = new Map<number, SpellVisual | null | 'loading'>();
-  private readonly templates = new Map<number, EffectTemplate | null | 'loading'>();
+  private readonly templates: EffectTemplateCache;
   private readonly playing: PlayingEffect[] = [];
   private readonly missiles = new Map<Projectile, PlayingEffect>();
   private readonly casts = new Map<CastGlow, { kit: VisualKit; effects: PlayingEffect[] }>();
@@ -63,8 +64,8 @@ export class SpellVisualLayer {
   private particleCount = 0;
 
   constructor(private readonly onLoaded: () => void) {
-    // Server (x, y, z) Z-up becomes (x, z, -y) Y-up, as for the scene.
-    this.group.rotation.x = -Math.PI / 2;
+    this.templates = new EffectTemplateCache(onLoaded, 'spell effect');
+    useServerAxes(this.group);
   }
 
   get count(): number {
@@ -147,7 +148,7 @@ export class SpellVisualLayer {
       rain.carry += rain.rate * seconds;
       for (; rain.carry >= 1; rain.carry -= 1) {
         const position = pointInDisc(rain.center, area.radius * RAIN_SPREAD, Math.random(), Math.random());
-        const drop = this.play(rain.template, now, false, () => ({ position, yaw: rain.yaw, scale: rain.scale }), null);
+        const drop = this.play(rain.template, now, false, () => ({ position, yaw: rain.yaw, scale: rain.scale }));
         drop.stopAt = now + drop.instance.duration;
       }
     }
@@ -159,7 +160,8 @@ export class SpellVisualLayer {
       }
     }
 
-    this.group.updateMatrixWorld(true);
+    // Effects bring their own nodes up to date; the scene view does the rest.
+    this.group.updateWorldMatrix(true, false);
     const view = getEffectView(camera, this.group);
     const budget = { left: PARTICLE_BUDGET };
     for (let index = this.playing.length - 1; index >= 0; index -= 1) {
@@ -200,18 +202,7 @@ export class SpellVisualLayer {
   }
 
   private template(effectId: number): EffectTemplate | null | undefined {
-    const known = this.templates.get(effectId);
-    if (known === 'loading') return undefined;
-    if (known !== undefined) return known;
-    this.templates.set(effectId, 'loading');
-    loadEffectTemplate(`assets/models/effect/${effectId}.glb`)
-      .then((template) => this.templates.set(effectId, template))
-      .catch((error) => {
-        console.warn(`Could not load spell effect ${effectId}`, error);
-        this.templates.set(effectId, null);
-      })
-      .finally(() => this.onLoaded());
-    return undefined;
+    return this.templates.get(`assets/models/effect/${effectId}.glb`);
   }
 
   // The kit's templates once all are in (null for any that failed), or
@@ -221,11 +212,10 @@ export class SpellVisualLayer {
     return templates.some((template) => template === undefined) ? undefined : templates as Array<EffectTemplate | null>;
   }
 
-  private play(template: EffectTemplate, now: number, loop: boolean, place: PlayingEffect['place'],
-    stopAt: number | null): PlayingEffect {
+  private play(template: EffectTemplate, now: number, loop: boolean, place: PlayingEffect['place']): PlayingEffect {
     const instance = new EffectInstance(template, now, loop);
     this.group.add(instance.root, instance.particles);
-    const effect: PlayingEffect = { instance, place, stopAt, last: null };
+    const effect: PlayingEffect = { instance, place, stopAt: null, last: null };
     this.playing.push(effect);
     return effect;
   }
@@ -240,7 +230,7 @@ export class SpellVisualLayer {
       const playing = this.play(template, now, loop, () => {
         const point = units.anchor(unit, role);
         return point ? { position: point, yaw: units.facing(unit), scale: effect.scale * units.scale(unit) } : null;
-      }, null);
+      });
       if (!loop) playing.stopAt = now + playing.instance.duration;
       return [playing];
     });
@@ -308,14 +298,14 @@ export class SpellVisualLayer {
     once.forEach((kit, index) => kit.effects.forEach((effect, slot) => {
       const template = kitTemplates[index]![slot];
       if (!template) return;
-      const playing = this.play(template, now, false, placeAt(effect.scale), null);
+      const playing = this.play(template, now, false, placeAt(effect.scale));
       playing.stopAt = now + playing.instance.duration;
     }));
     const lasts = area.endAt > area.startAt;
     const lastingEffects = lasting ? lasting.effects.flatMap((effect, slot) => {
       const template = kitTemplates[once.length]![slot];
       if (!template) return [];
-      const playing = this.play(template, now, lasts, placeAt(effect.scale), null);
+      const playing = this.play(template, now, lasts, placeAt(effect.scale));
       if (!lasts) playing.stopAt = now + playing.instance.duration;
       return lasts ? [playing] : [];
     }) : [];
@@ -340,7 +330,7 @@ export class SpellVisualLayer {
       const dx = to[0] - from[0];
       const dy = to[1] - from[1];
       return { position, yaw: Math.atan2(dy, dx), pitch: Math.atan2(to[2] - from[2], Math.hypot(dx, dy)), scale: missile.scale };
-    }, null);
+    });
     this.missiles.set(projectile, effect);
   }
 

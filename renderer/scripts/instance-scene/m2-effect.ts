@@ -146,6 +146,30 @@ const EFFECT_RENDER_ORDER = 4;
 
 const loader = new GLTFLoader();
 
+// Effect templates by URL, each loaded once: the template, null if it could
+// not be loaded, or undefined while loading. `onLoaded` runs when a load
+// finishes; a failure is logged as `warnAs` (e.g. 'spell effect') if given.
+export class EffectTemplateCache {
+  private readonly templates = new Map<string, EffectTemplate | null | 'loading'>();
+
+  constructor(private readonly onLoaded: () => void, private readonly warnAs: string | null = null) {}
+
+  get(url: string): EffectTemplate | null | undefined {
+    const known = this.templates.get(url);
+    if (known === 'loading') return undefined;
+    if (known !== undefined) return known;
+    this.templates.set(url, 'loading');
+    loadEffectTemplate(url)
+      .then((template) => this.templates.set(url, template))
+      .catch((error) => {
+        if (this.warnAs) console.warn(`Could not load ${this.warnAs} ${url}`, error);
+        this.templates.set(url, null);
+      })
+      .finally(() => this.onLoaded());
+    return undefined;
+  }
+}
+
 export async function loadEffectTemplate(url: string): Promise<EffectTemplate> {
   const gltf = await loader.loadAsync(url);
   const root = gltf.scene.children[0];
@@ -231,10 +255,9 @@ class QuadBatch {
   add(corners: Vec3[], uv: [number, number, number, number], color: [number, number, number, number]): void {
     if (this.count >= this.capacity) return;
     const quad = this.count;
-    corners.forEach((corner, index) => this.positions.set(corner, quad * 12 + index * 3));
+    for (let corner = 0; corner < 4; corner += 1) this.setVertex(quad, corner, corners[corner], color);
     const [u0, v0, u1, v1] = uv;
-    this.uvs.set([u0, v1, u1, v1, u1, v0, u0, v0], quad * 8);
-    for (let vertex = 0; vertex < 4; vertex += 1) this.colors.set(color, quad * 16 + vertex * 4);
+    this.setUvs(quad, u0, v1, u1, v1, u1, v0, u0, v0);
     this.count += 1;
   }
 
@@ -242,17 +265,47 @@ class QuadBatch {
   addSegment(a: Vec3, b: Vec3, c: Vec3, d: Vec3, u0: number, u1: number, color: [number, number, number, number]): void {
     if (this.count >= this.capacity) return;
     const quad = this.count;
-    this.positions.set([...a, ...c, ...d, ...b], quad * 12);
-    this.uvs.set([u0, 0, u1, 0, u1, 1, u0, 1], quad * 8);
-    for (let vertex = 0; vertex < 4; vertex += 1) this.colors.set(color, quad * 16 + vertex * 4);
+    this.setVertex(quad, 0, a, color);
+    this.setVertex(quad, 1, c, color);
+    this.setVertex(quad, 2, d, color);
+    this.setVertex(quad, 3, b, color);
+    this.setUvs(quad, u0, 0, u1, 0, u1, 1, u0, 1);
     this.count += 1;
+  }
+
+  private setVertex(quad: number, corner: number, [x, y, z]: Vec3, [r, g, b, a]: [number, number, number, number]): void {
+    const position = quad * 12 + corner * 3;
+    this.positions[position] = x;
+    this.positions[position + 1] = y;
+    this.positions[position + 2] = z;
+    const color = quad * 16 + corner * 4;
+    this.colors[color] = r;
+    this.colors[color + 1] = g;
+    this.colors[color + 2] = b;
+    this.colors[color + 3] = a;
+  }
+
+  // Each corner's (u, v), in the corners' order.
+  private setUvs(quad: number, ua: number, va: number, ub: number, vb: number, uc: number, vc: number, ud: number, vd: number): void {
+    const uvs = this.uvs;
+    const start = quad * 8;
+    uvs[start] = ua; uvs[start + 1] = va; uvs[start + 2] = ub; uvs[start + 3] = vb;
+    uvs[start + 4] = uc; uvs[start + 5] = vc; uvs[start + 6] = ud; uvs[start + 7] = vd;
   }
 
   end(): void {
     const geometry = this.mesh.geometry;
     geometry.setDrawRange(0, this.count * 6);
-    for (const name of ['position', 'uv', 'color']) (geometry.getAttribute(name) as BufferAttribute).needsUpdate = true;
     this.mesh.visible = this.count > 0;
+    // Only the quads written this frame go to the GPU; nothing when empty.
+    if (this.count) {
+      for (const name of ['position', 'uv', 'color']) {
+        const attribute = geometry.getAttribute(name) as BufferAttribute;
+        attribute.clearUpdateRanges();
+        attribute.addUpdateRange(0, this.count * 4 * attribute.itemSize);
+        attribute.needsUpdate = true;
+      }
+    }
   }
 
   dispose(): void {
@@ -319,6 +372,13 @@ const tempVector = new Vector3();
 const tempQuaternion = new Quaternion();
 const tempParent = new Quaternion();
 const basis = new Matrix4();
+const emitterScratch = new Matrix4();
+const pivotScratch = new Matrix4();
+const facingScratch = new Quaternion();
+const layerQuaternionScratch = new Quaternion();
+const axisX = new Vector3();
+const axisY = new Vector3();
+const axisZ = new Vector3();
 
 const transformPoint = (matrix: Matrix4, point: number[]): Vec3 => {
   tempVector.set(point[0], point[1], point[2]).applyMatrix4(matrix);
@@ -451,10 +511,6 @@ export class EffectInstance {
     action.play();
   }
 
-  get particleCount(): number {
-    return this.emitters.reduce((sum, emitter) => sum + emitter.particles.length, 0);
-  }
-
   // Ends the effect: a lasting one plays its Decay first; then it stops
   // emitting and hides the model, and particles and ribbons live out.
   stop(now = this.lastAt): void {
@@ -573,13 +629,12 @@ export class EffectInstance {
   // towards it, +Z up the screen.
   private faceBillboards(layer: Object3D, view: EffectView): void {
     if (!this.billboards.length) return;
-    const layerQuaternion = layer.getWorldQuaternion(new Quaternion());
-    const toWorld = (v: Vec3) => new Vector3(...v).applyQuaternion(layerQuaternion);
-    const x = toWorld(view.toCamera);
-    const z = toWorld(view.up);
-    const y = new Vector3().crossVectors(z, x);
+    const layerQuaternion = layer.getWorldQuaternion(layerQuaternionScratch);
+    const x = axisX.fromArray(view.toCamera).applyQuaternion(layerQuaternion);
+    const z = axisZ.fromArray(view.up).applyQuaternion(layerQuaternion);
+    const y = axisY.crossVectors(z, x);
     basis.makeBasis(x, y, z);
-    const facing = new Quaternion().setFromRotationMatrix(basis);
+    const facing = facingScratch.setFromRotationMatrix(basis);
     for (const bone of this.billboards) {
       bone.parent?.getWorldQuaternion(tempParent);
       bone.quaternion.copy(tempParent.invert().multiply(facing).multiply(bone.quaternion));
@@ -588,9 +643,10 @@ export class EffectInstance {
   }
 
   // The emitter's matrix in layer coordinates: its bone, less the pivot.
+  // A shared scratch matrix, valid until the next call.
   private emitterMatrix(joint: Object3D | null, pivot: number[], layerInverse: Matrix4): Matrix4 {
-    const matrix = new Matrix4().copy(layerInverse).multiply(joint ? joint.matrixWorld : this.root.matrixWorld);
-    if (joint) matrix.multiply(new Matrix4().makeTranslation(-pivot[0], -pivot[1], -pivot[2]));
+    const matrix = emitterScratch.copy(layerInverse).multiply(joint ? joint.matrixWorld : this.root.matrixWorld);
+    if (joint) matrix.multiply(pivotScratch.makeTranslation(-pivot[0], -pivot[1], -pivot[2]));
     return matrix;
   }
 

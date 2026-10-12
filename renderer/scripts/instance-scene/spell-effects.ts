@@ -24,6 +24,7 @@ import {
   type Projectile,
   type UnitKey,
 } from '../utils/spell-events';
+import { useServerAxes } from './iso-camera';
 
 // Draws the combat effect store's live effects as glowing additive sprites
 // and floor rings, in server coordinates under a Z-up group like the unit
@@ -33,6 +34,7 @@ import {
 // Where on a unit an effect sits.
 export type { UnitAnchorRole } from '../utils/spell-kits';
 import type { UnitAnchorRole } from '../utils/spell-kits';
+
 // A unit's anchor point in server coordinates, or null if it isn't shown.
 export type UnitAnchor = (unit: UnitKey, role: UnitAnchorRole) => Point3 | null;
 
@@ -178,8 +180,7 @@ export class SpellEffectLayer {
   private drawn = 0;
 
   constructor() {
-    // Server (x, y, z) Z-up becomes (x, z, -y) Y-up, as for the scene.
-    this.group.rotation.x = -Math.PI / 2;
+    useServerAxes(this.group);
   }
 
   // Effects drawn in the last update, for the debug overlay.

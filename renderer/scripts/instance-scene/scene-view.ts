@@ -37,7 +37,7 @@ import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.j
 
 import { type FadeSettings, type FadeVolume, getSceneFade, type IsoView, MAX_FADE_VOLUMES } from '../utils/map-projection';
 import type { CombatEffectStore, Point3, UnitKey } from '../utils/spell-events';
-import { applyIsoCamera } from './iso-camera';
+import { applyIsoCamera, threeToServer } from './iso-camera';
 import { SpellEffectLayer, type UnitAnchorRole } from './spell-effects';
 import { buildLayerArray, BYTE_SHADING_SCALE, createTerrainMaterial, prepareAlphaAtlas } from './terrain-material';
 import { GameObjectLayer, type GameObjectPose } from './game-objects';
@@ -196,9 +196,8 @@ interface InstanceBounds {
   matrices: Float32Array;
   // Each copy's box in server coordinates: minX, maxX, minY, maxY, minZ, maxZ.
   boxes: Float32Array;
-  // The copies drawn now, by index, and how many.
+  // The copies drawn now, by index (the mesh's count says how many).
   shown: Uint32Array;
-  count: number;
 }
 
 // Server-coordinate box of `geometry` placed by `matrix`; three.js is Y-up,
@@ -211,7 +210,8 @@ function serverBox(geometry: BufferGeometry, matrix: Matrix4): [number, number, 
 }
 
 function instanceBounds(mesh: InstancedMesh): { bounds: InstanceBounds; union: number[] } {
-  const count = mesh.count;
+  // Every copy the file holds (count may already be the visible ones).
+  const count = mesh.instanceMatrix.count;
   const matrices = new Float32Array(mesh.instanceMatrix.array);
   const boxes = new Float32Array(count * 6);
   const union = [Infinity, -Infinity, Infinity, -Infinity, Infinity, -Infinity];
@@ -227,10 +227,19 @@ function instanceBounds(mesh: InstancedMesh): { bounds: InstanceBounds; union: n
   }
   const shown = new Uint32Array(count);
   shown.forEach((_, index) => { shown[index] = index; });
-  return { bounds: { matrices, boxes, shown, count }, union };
+  return { bounds: { matrices, boxes, shown }, union };
 }
 
 export type SceneLoadState = 'loading' | 'ready' | 'failed';
+
+// Whether the scene is drawn at a point (server coordinates) under a frame's
+// fade: inside the reach box and at least half faded in.
+function isDrawnAt(point: Point3, { volumes, fade }: { volumes: FadeVolume[]; fade: FadeSettings }): boolean {
+  const [x, y, z] = point;
+  const reach = fade.reach;
+  if (reach && (x < reach.minX || x > reach.maxX || y < reach.minY || y > reach.maxY || z < reach.minZ || z > reach.maxZ)) return false;
+  return getSceneFade(point, volumes, fade) >= 0.5;
+}
 
 // Draws an exported instance scene with an orthographic camera that matches
 // the overlay's IsoView projection. Renders only when asked.
@@ -283,21 +292,12 @@ export class InstanceSceneView {
     // and render() updates only the live layers, rather than three.js walking
     // every node of a big map each frame.
     this.scene.matrixWorldAutoUpdate = false;
-    this.units = new UnitModelLayer(() => {
-      this.lastFrameKey = '';
-      this.onChange();
-    });
+    this.units = new UnitModelLayer(this.redraw);
     this.scene.add(this.units.group);
     this.scene.add(this.effects.group);
-    this.spellVisuals = new SpellVisualLayer(() => {
-      this.lastFrameKey = '';
-      this.onChange();
-    });
+    this.spellVisuals = new SpellVisualLayer(this.redraw);
     this.scene.add(this.spellVisuals.group);
-    this.gameObjects = new GameObjectLayer(() => {
-      this.lastFrameKey = '';
-      this.onChange();
-    });
+    this.gameObjects = new GameObjectLayer(this.redraw);
     this.scene.add(this.gameObjects.group);
     this.scene.add(new AmbientLight(0xffffff, 2.2));
     const sun = new DirectionalLight(0xffffff, 1.6);
@@ -306,10 +306,15 @@ export class InstanceSceneView {
     canvas.addEventListener('webglcontextlost', (event) => {
       event.preventDefault();
       this.lost = true;
-      this.lastFrameKey = '';
-      this.onChange();
+      this.redraw();
     });
   }
+
+  // Draws the next frame in full (a model loaded, the context was lost).
+  private readonly redraw = (): void => {
+    this.lastFrameKey = '';
+    this.onChange();
+  };
 
   static isSupported(): boolean {
     try {
@@ -390,10 +395,7 @@ export class InstanceSceneView {
   setGameObjects(poses: GameObjectPose[], now: number): number {
     if (this.lost) return 0;
     const fade = this.lastFade;
-    const reach = fade?.fade.reach;
-    const shown = poses.filter(({ position: [x, y, z] }) => !fade || (
-      (!reach || (x >= reach.minX && x <= reach.maxX && y >= reach.minY && y <= reach.maxY && z >= reach.minZ && z <= reach.maxZ))
-      && getSceneFade([x, y, z], fade.volumes, fade.fade) >= 0.5));
+    const shown = fade ? poses.filter(({ position }) => isDrawnAt(position, fade)) : poses;
     this.gameObjects.update(shown, now, this.camera);
     return this.gameObjects.count;
   }
@@ -557,19 +559,19 @@ export class InstanceSceneView {
         continue;
       }
       const { boxes, matrices } = instances;
+      const mesh = bounds.mesh as InstancedMesh;
       const total = matrices.length / 16;
       let count = 0;
       let changed = false;
       for (let index = 0; index < total; index += 1) {
         const box = index * 6;
         if (!shown(boxes[box], boxes[box + 1], boxes[box + 2], boxes[box + 3], boxes[box + 4], boxes[box + 5])) continue;
-        if (instances.shown[count] !== index || count >= instances.count) changed = true;
+        if (instances.shown[count] !== index || count >= mesh.count) changed = true;
         instances.shown[count] = index;
         count += 1;
       }
-      changed ||= count !== instances.count;
-      instances.count = count;
-      const mesh = bounds.mesh as InstancedMesh;
+      changed ||= count !== mesh.count;
+      mesh.count = count;
       mesh.visible = count > 0;
       if (!changed || !count) continue;
       const array = mesh.instanceMatrix.array as Float32Array;
@@ -577,7 +579,6 @@ export class InstanceSceneView {
         const from = instances.shown[slot] * 16;
         array.set(matrices.subarray(from, from + 16), slot * 16);
       }
-      mesh.count = count;
       mesh.instanceMatrix.needsUpdate = true;
       mesh.computeBoundingSphere();
     }
@@ -588,22 +589,17 @@ export class InstanceSceneView {
   // fade or the reach cut leaves out. Null over empty space.
   pick(view: IsoView, width: number, height: number, x: number, y: number): Point3 | null {
     const root = this.shown;
-    if (!root || !this.lastFade) return null;
-    const { volumes, fade } = this.lastFade;
+    const fade = this.lastFade;
+    if (!root || !fade) return null;
     applyIsoCamera(this.camera, view, width, height);
     this.camera.updateMatrixWorld();
     this.raycaster.setFromCamera(new Vector2((x / width) * 2 - 1, 1 - (y / height) * 2), this.camera);
-    const reach = fade.reach;
     for (const hit of this.raycaster.intersectObject(root, true)) {
       let shown = true;
       for (let object: Object3D | null = hit.object; object; object = object.parent) shown &&= object.visible;
       if (!shown) continue;
-      // Three.js is Y-up: server (x, y, z) is (x, -z, y) here.
-      const point: Point3 = [hit.point.x, -hit.point.z, hit.point.y];
-      if (reach && (point[0] < reach.minX || point[0] > reach.maxX || point[1] < reach.minY || point[1] > reach.maxY
-        || point[2] < reach.minZ || point[2] > reach.maxZ)) continue;
-      if (getSceneFade(point, volumes, fade) < 0.5) continue;
-      return point;
+      const point = threeToServer(hit.point);
+      if (isDrawnAt(point, fade)) return point;
     }
     return null;
   }
@@ -671,7 +667,7 @@ export class InstanceSceneView {
     return { layers, alphas };
   }
 
-  private convertMaterial(mesh: Mesh, terrain: TerrainTextures | null = null): Material | Material[] {
+  private convertMaterial(mesh: Mesh, terrain: TerrainTextures | null): Material | Material[] {
     const vertexLit = Boolean(mesh.geometry.getAttribute('color'));
     const convert = (source: Material): Material => {
       // Terrain: its texture layers blended through its alpha atlas, lit by

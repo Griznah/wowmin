@@ -112,7 +112,7 @@ function plateHeight(theme: Theme, plate: Nameplate): number {
   const debuffs = plate.debuffs?.length ? DEBUFF_ROW : 0;
   const power = plate.power ? theme.powerHeight + 1 : 0;
   const name = debuffs + power + (theme.nameInside ? 0 : 12 + theme.gap);
-  const cast = plate.cast ? theme.gap + theme.castHeight + (theme.castHeight < 8 ? 11 : 0) : 0;
+  const cast = plate.cast ? theme.gap + castBlockHeight(theme) : 0;
   const note = plate.note ? 13 : 0;
   return name + theme.barHeight + cast + note + 2;
 }
@@ -179,7 +179,7 @@ export function drawNameplate(ctx: CanvasRenderingContext2D, style: PlateStyle, 
   if (plate.cast) {
     top += theme.gap;
     drawCastBar(ctx, style, theme, plate.cast, left, top);
-    top += theme.castHeight + (theme.castHeight < 8 ? 11 : 0);
+    top += castBlockHeight(theme);
   }
   if (plate.note) {
     ctx.font = NOTE_FONT;
@@ -251,9 +251,18 @@ function drawQuatreBar(ctx: CanvasRenderingContext2D, theme: Theme, plate: Namep
   outlinedText(ctx, `${Math.round(plate.healthPct)}%`, left + width - 3, top + height / 2 + 0.5, '#ffffff');
 }
 
+// Cast bars thinner than this put the spell's name under them, in this
+// much room; thicker ones put it inside.
+const THIN_CAST_HEIGHT = 8;
+const CAST_NAME_ROOM = 11;
+const isThinCast = (theme: Theme): boolean => theme.castHeight < THIN_CAST_HEIGHT;
+// The cast bar's height with the room for its name.
+const castBlockHeight = (theme: Theme): number => theme.castHeight + (isThinCast(theme) ? CAST_NAME_ROOM : 0);
+
 function drawCastBar(ctx: CanvasRenderingContext2D, style: PlateStyle, theme: Theme, cast: NonNullable<Nameplate['cast']>, left: number, top: number): void {
   const width = theme.width;
   const height = theme.castHeight;
+  const thin = isThinCast(theme);
   const filled = cast.channeled ? 1 - fraction(cast.fraction * 100) : fraction(cast.fraction * 100);
   const color = cast.channeled ? CHANNEL_COLOR : CAST_COLOR;
   ctx.fillStyle = style === 'neon' ? 'rgba(0,0,0,0.65)' : 'rgba(20,20,20,0.85)';
@@ -265,8 +274,8 @@ function drawCastBar(ctx: CanvasRenderingContext2D, style: PlateStyle, theme: Th
   ctx.strokeRect(left - 0.5, top - 0.5, width + 1, height + 1);
   if (cast.icon) {
     // A square as tall as the cast bar and its name, left of the bar.
-    const size = height < 8 ? height + 11 : height + 4;
-    const iconTop = height < 8 ? top - 1 : top - 2;
+    const size = thin ? height + CAST_NAME_ROOM : height + 4;
+    const iconTop = thin ? top - 1 : top - 2;
     ctx.drawImage(cast.icon, left - size - 3, iconTop, size, size);
     ctx.strokeStyle = '#000000';
     ctx.lineWidth = 1;
@@ -274,7 +283,7 @@ function drawCastBar(ctx: CanvasRenderingContext2D, style: PlateStyle, theme: Th
   }
   if (!cast.name) return;
   // Thin cast bars put the spell's name under them; thick ones inside.
-  if (height < 8) {
+  if (thin) {
     ctx.font = '600 9px system-ui, sans-serif';
     ctx.textAlign = 'center';
     outlinedText(ctx, cast.name, 0, top + height + 6, '#ffffff');
@@ -394,12 +403,27 @@ function outlinedText(ctx: CanvasRenderingContext2D, text: string, x: number, y:
   ctx.fillText(text, x, y);
 }
 
+// Plates redraw every frame with the same names and bar colours, so clipped
+// text and colour shades are worked out once per input.
+const memo = new Map<string, string>();
+function remember(key: string, make: () => string): string {
+  let value = memo.get(key);
+  if (value === undefined) {
+    if (memo.size > 4000) memo.clear();
+    value = make();
+    memo.set(key, value);
+  }
+  return value;
+}
+
 // The text cut to fit `width`, ending in an ellipsis when cut.
 function clip(ctx: CanvasRenderingContext2D, text: string, width: number): string {
-  if (ctx.measureText(text).width <= width) return text;
-  let end = text.length;
-  while (end > 1 && ctx.measureText(`${text.slice(0, end)}…`).width > width) end -= 1;
-  return `${text.slice(0, end)}…`;
+  return remember(`clip|${ctx.font}|${width}|${text}`, () => {
+    if (ctx.measureText(text).width <= width) return text;
+    let end = text.length;
+    while (end > 1 && ctx.measureText(`${text.slice(0, end)}…`).width > width) end -= 1;
+    return `${text.slice(0, end)}…`;
+  });
 }
 
 const fraction = (percent: number): number => Math.max(0, Math.min(1, percent / 100));
@@ -414,20 +438,26 @@ function parseHex(color: string): [number, number, number] {
 const rgb = ([r, g, b]: [number, number, number]): string => `rgb(${Math.round(r)},${Math.round(g)},${Math.round(b)})`;
 
 function lighten(color: string, amount: number): string {
-  return rgb(parseHex(color).map((channel) => channel + (255 - channel) * amount) as [number, number, number]);
+  return remember(`lighten|${color}|${amount}`, () =>
+    rgb(parseHex(color).map((channel) => channel + (255 - channel) * amount) as [number, number, number]));
 }
 
 function darken(color: string, amount: number): string {
-  return rgb(parseHex(color).map((channel) => channel * (1 - amount)) as [number, number, number]);
+  return remember(`darken|${color}|${amount}`, () =>
+    rgb(parseHex(color).map((channel) => channel * (1 - amount)) as [number, number, number]));
 }
 
 function desaturate(color: string, amount: number): string {
-  const channels = parseHex(color);
-  const grey = (channels[0] + channels[1] + channels[2]) / 3;
-  return rgb(channels.map((channel) => channel + (grey - channel) * amount) as [number, number, number]);
+  return remember(`desaturate|${color}|${amount}`, () => {
+    const channels = parseHex(color);
+    const grey = (channels[0] + channels[1] + channels[2]) / 3;
+    return rgb(channels.map((channel) => channel + (grey - channel) * amount) as [number, number, number]);
+  });
 }
 
 function withAlpha(color: string, alpha: number): string {
-  const [r, g, b] = parseHex(color);
-  return `rgba(${r},${g},${b},${alpha})`;
+  return remember(`alpha|${color}|${alpha}`, () => {
+    const [r, g, b] = parseHex(color);
+    return `rgba(${r},${g},${b},${alpha})`;
+  });
 }

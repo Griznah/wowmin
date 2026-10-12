@@ -1,4 +1,4 @@
-import { OrthographicCamera, Vector3 } from 'three';
+import { type Object3D, OrthographicCamera, Vector3 } from 'three';
 
 import type { IsoView, Vec3 } from '../utils/map-projection';
 
@@ -6,6 +6,16 @@ import type { IsoView, Vec3 } from '../utils/map-projection';
 // coordinates (x, y, z) sit at (x, z, -y) in three.js space.
 export function serverToThree([x, y, z]: Vec3): Vector3 {
   return new Vector3(x, z, -y);
+}
+
+export function threeToServer({ x, y, z }: Vector3): Vec3 {
+  return [x, -z, y];
+}
+
+// Turns a layer group so its children are placed in server coordinates
+// (Z up), like the scene under its exported root rotation.
+export function useServerAxes(group: Object3D): void {
+  group.rotation.x = -Math.PI / 2;
 }
 
 const CAMERA_DISTANCE = 20000;
