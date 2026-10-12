@@ -72,7 +72,7 @@ export interface WowminAPI {
     getPlayerPositions(mapId?: number, instanceId?: number): Promise<MapPlayerSnapshot>;
     // The live position stream (mod-wowmin-telemetry) for one instance;
     // returns a function that closes it.
-    streamPositions?(mapId: number, instanceId: number, listeners: StreamListeners): () => void;
+    streamPositions(mapId: number, instanceId: number, listeners: StreamListeners): () => void;
     getOnlineCounts(): Promise<MapOnlineCounts>;
     getBotWaypoint(request: MapBotWaypointRequest): Promise<MapBotWaypoint | null>;
     getCreatureInfo(entries: number[]): Promise<CreatureInfo[]>;

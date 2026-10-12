@@ -6551,7 +6551,7 @@ let instanceBaseViewport: InstanceProjectionViewport | null = null;
 let instanceMarkerHitAreas: Array<{ name: string; x: number; y: number; radius: number }> = [];
 let instancePanStart: { x: number; y: number; panX: number; panY: number; moved: boolean } | null = null;
 const instanceMapAssets = new Map<number, LoadedInstanceMapAsset | null>();
-// Live position stream for the selected session (web service only).
+// Live position stream for the selected session.
 const instanceLivePositions = new LivePositionBuffer();
 const instanceLivePaths = new LivePathStore();
 const instanceLiveCreatures = new LiveCreatureBuffer();
@@ -6684,9 +6684,8 @@ const INSTANCE_DISCOVERY_INTERVAL_MS = 10_000;
 // Opens the stream for the selected session while Instance Watch is showing
 // with auto-refresh on, and closes it otherwise.
 function syncInstanceLiveStream(): void {
-  const streamPositions = window.wowminAPI.map.streamPositions;
   const session = getSelectedInstanceSession();
-  const wanted = streamPositions && session && session.instanceId > 0 && state.connected
+  const wanted = session && session.instanceId > 0 && state.connected
     && getActiveMainTabId() === 'instances' && $instanceAutoRefresh?.checked
     ? session
     : null;
@@ -6705,9 +6704,9 @@ function syncInstanceLiveStream(): void {
   instanceLiveMarkers.clear();
   instanceCombatEffects.clear();
   instanceDebugEvents.clear();
-  if (!wanted || !streamPositions) return;
+  if (!wanted) return;
   const stream: { key: string; stop: () => void; status: StreamStatus } = { key: wanted.key, stop: () => {}, status: 'starting' };
-  stream.stop = streamPositions(wanted.mapId, wanted.instanceId, {
+  stream.stop = window.wowminAPI.map.streamPositions(wanted.mapId, wanted.instanceId, {
     onFrame: (frame) => {
       if (instanceLiveStream !== stream) return;
       const now = performance.now();
@@ -6826,42 +6825,30 @@ function getInstanceMetadataUrl(mapId: number): URL {
 
 function clampInstanceFadeRange(yards: number): number {
   return Number.isFinite(yards)
-    ? Math.max(INSTANCE_FADE_RANGE_MIN, Math.min(INSTANCE_FADE_RANGE_MAX, yards))
+    ? clamp(yards, INSTANCE_FADE_RANGE_MIN, INSTANCE_FADE_RANGE_MAX)
     : INSTANCE_FADE_RANGE_DEFAULT;
 }
 
 function readStoredInstanceFadeRange(): number {
-  try {
-    const stored = window.localStorage.getItem(INSTANCE_FADE_RANGE_STORAGE_KEY);
-    return clampInstanceFadeRange(stored === null ? INSTANCE_FADE_RANGE_DEFAULT : Number(stored));
-  } catch {
-    return INSTANCE_FADE_RANGE_DEFAULT;
-  }
+  const stored = readStoredSetting(INSTANCE_FADE_RANGE_STORAGE_KEY);
+  return clampInstanceFadeRange(stored === null ? INSTANCE_FADE_RANGE_DEFAULT : Number(stored));
 }
 
 function setInstanceFadeRange(yards: number, render = true): void {
   instanceFadeRange = clampInstanceFadeRange(yards);
   if ($instanceFadeRange) $instanceFadeRange.value = String(instanceFadeRange);
   if ($instanceFadeRangeValue) $instanceFadeRangeValue.textContent = `${instanceFadeRange} yd`;
-  try {
-    window.localStorage.setItem(INSTANCE_FADE_RANGE_STORAGE_KEY, String(instanceFadeRange));
-  } catch {
-    // Preference is per-session only when storage is unavailable.
-  }
+  storeSetting(INSTANCE_FADE_RANGE_STORAGE_KEY, String(instanceFadeRange));
   if (render) renderInstanceCanvas();
 }
 
 function clampInstanceHorizontalFade(yards: number): number {
-  return Number.isFinite(yards) ? Math.max(0, Math.min(INSTANCE_HORIZONTAL_FADE_MAX, yards)) : INSTANCE_HORIZONTAL_FADE_DEFAULT;
+  return Number.isFinite(yards) ? clamp(yards, 0, INSTANCE_HORIZONTAL_FADE_MAX) : INSTANCE_HORIZONTAL_FADE_DEFAULT;
 }
 
 function readStoredInstanceHorizontalFade(): number {
-  try {
-    const stored = window.localStorage.getItem(INSTANCE_HORIZONTAL_FADE_STORAGE_KEY);
-    return clampInstanceHorizontalFade(stored === null ? INSTANCE_HORIZONTAL_FADE_DEFAULT : Number(stored));
-  } catch {
-    return INSTANCE_HORIZONTAL_FADE_DEFAULT;
-  }
+  const stored = readStoredSetting(INSTANCE_HORIZONTAL_FADE_STORAGE_KEY);
+  return clampInstanceHorizontalFade(stored === null ? INSTANCE_HORIZONTAL_FADE_DEFAULT : Number(stored));
 }
 
 function setInstanceHorizontalFade(yards: number, render = true): void {
@@ -6870,35 +6857,47 @@ function setInstanceHorizontalFade(yards: number, render = true): void {
   if ($instanceHorizontalFadeValue) {
     $instanceHorizontalFadeValue.textContent = instanceHorizontalFade ? `${instanceHorizontalFade} yd` : 'Off';
   }
-  try {
-    window.localStorage.setItem(INSTANCE_HORIZONTAL_FADE_STORAGE_KEY, String(instanceHorizontalFade));
-  } catch {
-    // Preference is per-session only when storage is unavailable.
-  }
+  storeSetting(INSTANCE_HORIZONTAL_FADE_STORAGE_KEY, String(instanceHorizontalFade));
   if (render) renderInstanceCanvas();
 }
 
-function readStoredInstanceView3d(): boolean {
+// Instance Watch settings in localStorage, per browser; without storage
+// (private windows, blocked site data) they last for the page only.
+function readStoredSetting(key: string): string | null {
   try {
-    return window.localStorage.getItem(INSTANCE_VIEW_3D_STORAGE_KEY) !== 'false';
+    return window.localStorage.getItem(key);
   } catch {
-    return true;
+    return null;
   }
+}
+
+// A stored on/off setting, `fallback` until one is stored.
+function readStoredFlag(key: string, fallback: boolean): boolean {
+  const stored = readStoredSetting(key);
+  return stored === null ? fallback : fallback ? stored !== 'false' : stored === 'true';
+}
+
+function storeSetting(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // Per-page only when storage is unavailable.
+  }
+}
+
+function readStoredInstanceView3d(): boolean {
+  return readStoredFlag(INSTANCE_VIEW_3D_STORAGE_KEY, true);
 }
 
 function clampInstanceRenderScale(scale: number): number {
   return Number.isFinite(scale)
-    ? Math.max(INSTANCE_RENDER_SCALE_MIN, Math.min(1, scale))
+    ? clamp(scale, INSTANCE_RENDER_SCALE_MIN, 1)
     : INSTANCE_RENDER_SCALE_DEFAULT;
 }
 
 function readStoredInstanceRenderScale(): number {
-  try {
-    const stored = window.localStorage.getItem(INSTANCE_RENDER_SCALE_STORAGE_KEY);
-    return clampInstanceRenderScale(stored === null ? INSTANCE_RENDER_SCALE_DEFAULT : Number(stored));
-  } catch {
-    return INSTANCE_RENDER_SCALE_DEFAULT;
-  }
+  const stored = readStoredSetting(INSTANCE_RENDER_SCALE_STORAGE_KEY);
+  return clampInstanceRenderScale(stored === null ? INSTANCE_RENDER_SCALE_DEFAULT : Number(stored));
 }
 
 function setInstanceRenderScale(scale: number, render = true): void {
@@ -6906,11 +6905,7 @@ function setInstanceRenderScale(scale: number, render = true): void {
   if ($instanceRenderScale) $instanceRenderScale.value = String(instanceRenderScale);
   if ($instanceRenderScaleValue) $instanceRenderScaleValue.textContent = `${Math.round(instanceRenderScale * 100)}%`;
   instanceSceneView?.setRenderScale(instanceRenderScale);
-  try {
-    window.localStorage.setItem(INSTANCE_RENDER_SCALE_STORAGE_KEY, String(instanceRenderScale));
-  } catch {
-    // Preference is per-session only when storage is unavailable.
-  }
+  storeSetting(INSTANCE_RENDER_SCALE_STORAGE_KEY, String(instanceRenderScale));
   if (render) renderInstanceCanvas();
 }
 
@@ -6943,77 +6938,45 @@ function getInstanceViewPitch(): number {
 }
 
 function readStoredInstanceFollow(): boolean {
-  try {
-    return window.localStorage.getItem(INSTANCE_FOLLOW_STORAGE_KEY) === 'true';
-  } catch {
-    return false;
-  }
+  return readStoredFlag(INSTANCE_FOLLOW_STORAGE_KEY, false);
 }
 
 function setInstanceFollowSelected(enabled: boolean): void {
   instanceFollowSelected = enabled;
   if (!enabled) instanceFollowAnimation = null;
   $instanceFollowBtn?.setAttribute('aria-pressed', String(enabled));
-  try {
-    window.localStorage.setItem(INSTANCE_FOLLOW_STORAGE_KEY, String(enabled));
-  } catch {
-    // Preference is per-session only when storage is unavailable.
-  }
+  storeSetting(INSTANCE_FOLLOW_STORAGE_KEY, String(enabled));
   renderInstanceCanvas();
 }
 
 function readStoredInstancePaths(): boolean {
-  try {
-    return window.localStorage.getItem(INSTANCE_PATHS_STORAGE_KEY) !== 'false';
-  } catch {
-    return true;
-  }
+  return readStoredFlag(INSTANCE_PATHS_STORAGE_KEY, true);
 }
 
 function readStoredInstanceTrails(): boolean {
-  try {
-    return window.localStorage.getItem(INSTANCE_TRAILS_STORAGE_KEY) !== 'false';
-  } catch {
-    return true;
-  }
+  return readStoredFlag(INSTANCE_TRAILS_STORAGE_KEY, true);
 }
 
 function setInstanceShowTrails(enabled: boolean): void {
   instanceShowTrails = enabled;
   $instanceTrailsBtn?.setAttribute('aria-pressed', String(enabled));
-  try {
-    window.localStorage.setItem(INSTANCE_TRAILS_STORAGE_KEY, String(enabled));
-  } catch {
-    // Preference is per-session only when storage is unavailable.
-  }
+  storeSetting(INSTANCE_TRAILS_STORAGE_KEY, String(enabled));
   renderInstanceCanvas();
 }
 
 function setInstanceShowPaths(enabled: boolean): void {
   instanceShowPaths = enabled;
   $instancePathsBtn?.setAttribute('aria-pressed', String(enabled));
-  try {
-    window.localStorage.setItem(INSTANCE_PATHS_STORAGE_KEY, String(enabled));
-  } catch {
-    // Preference is per-session only when storage is unavailable.
-  }
+  storeSetting(INSTANCE_PATHS_STORAGE_KEY, String(enabled));
   renderInstanceCanvas();
 }
 
 function readStoredInstanceModels(): boolean {
-  try {
-    return window.localStorage.getItem(INSTANCE_MODELS_STORAGE_KEY) !== 'false';
-  } catch {
-    return true;
-  }
+  return readStoredFlag(INSTANCE_MODELS_STORAGE_KEY, true);
 }
 
 function readStoredInstanceFades(): boolean {
-  try {
-    return window.localStorage.getItem(INSTANCE_FADES_STORAGE_KEY) !== 'false';
-  } catch {
-    return true;
-  }
+  return readStoredFlag(INSTANCE_FADES_STORAGE_KEY, true);
 }
 
 function setInstanceFades(enabled: boolean, render = true): void {
@@ -7021,47 +6984,28 @@ function setInstanceFades(enabled: boolean, render = true): void {
   $instanceFadesBtn?.setAttribute('aria-pressed', String(enabled));
   if ($instanceFadeRange) $instanceFadeRange.disabled = !enabled;
   if ($instanceHorizontalFade) $instanceHorizontalFade.disabled = !enabled;
-  try {
-    window.localStorage.setItem(INSTANCE_FADES_STORAGE_KEY, String(enabled));
-  } catch {
-    // Preference is per-session only when storage is unavailable.
-  }
+  storeSetting(INSTANCE_FADES_STORAGE_KEY, String(enabled));
   if (render) renderInstanceCanvas();
 }
 
 function readStoredInstanceNumbers(): boolean {
-  try {
-    return window.localStorage.getItem(INSTANCE_NUMBERS_STORAGE_KEY) === 'true';
-  } catch {
-    return false;
-  }
+  return readStoredFlag(INSTANCE_NUMBERS_STORAGE_KEY, false);
 }
 
 function setInstanceShowNumbers(enabled: boolean): void {
   instanceShowNumbers = enabled;
   $instanceNumbersBtn?.setAttribute('aria-pressed', String(enabled));
-  try {
-    window.localStorage.setItem(INSTANCE_NUMBERS_STORAGE_KEY, String(enabled));
-  } catch {
-    // Preference is per-session only when storage is unavailable.
-  }
+  storeSetting(INSTANCE_NUMBERS_STORAGE_KEY, String(enabled));
   renderInstanceCanvas();
 }
 
 function setInstanceShowModels(enabled: boolean): void {
   instanceShowModels = enabled;
   $instanceModelsBtn?.setAttribute('aria-pressed', String(enabled));
-  try {
-    window.localStorage.setItem(INSTANCE_MODELS_STORAGE_KEY, String(enabled));
-  } catch {
-    // Preference is per-session only when storage is unavailable.
-  }
+  storeSetting(INSTANCE_MODELS_STORAGE_KEY, String(enabled));
   renderInstanceCanvas();
 }
 
-// Players and creatures with a client model for their current look, posed
-// from the stream.
-// Marker colour for a player: team in battlegrounds, otherwise class (bots grey).
 // A player's marker colour: their side's, as in the participant list.
 function getInstancePlayerColor(player: MapPlayerPosition): string {
   return getInstanceFactionColor(player.teamId) ?? '#94a3b8';
@@ -7073,6 +7017,8 @@ function getCreatureMarkerColor(creature: StreamCreatureSample): string {
       : creature.hostile ? '#ef4444' : '#facc15';
 }
 
+// Players and creatures with a client model for their current look, posed
+// from the stream.
 function getInstanceUnitPoses(
   players: MapPlayerPosition[],
   creatures: StreamCreatureSample[],
@@ -7099,7 +7045,7 @@ function getInstanceUnitPoses(
     const passenger = instanceLivePassengers.get(guid, now);
     if (!appearance || !url || passenger?.hidden) continue;
     poses.push({
-      id: `p${guid}`,
+      id: unitKey(guid, false),
       url,
       x: player.position_x,
       y: player.position_y,
@@ -7119,7 +7065,7 @@ function getInstanceUnitPoses(
       mountUrl: passenger ? null : getMountModelUrl(appearance, Boolean(player.mounted)),
       riding: passenger ? true : undefined,
       flying: Boolean(player.flying),
-      ...combat(`p${guid}`),
+      ...combat(unitKey(guid, false)),
       marker: {
         color: player.alive ? getInstancePlayerColor(player) : '#475569',
         inCombat: player.inCombat,
@@ -7137,7 +7083,7 @@ function getInstanceUnitPoses(
     if (!appearance || !url) continue;
     const target = creature.targetIsPlayer ? playersByGuid.get(creature.targetGuid) : undefined;
     poses.push({
-      id: `c${creature.guid}`,
+      id: unitKey(creature.guid, true),
       url,
       x: creature.x,
       y: creature.y,
@@ -7151,7 +7097,7 @@ function getInstanceUnitPoses(
         target ? Math.hypot(target.position_x - creature.x, target.position_y - creature.y) : null, true),
       weapons: appearance,
       sheathState: appearance.sheathState,
-      ...combat(`c${creature.guid}`),
+      ...combat(unitKey(creature.guid, true)),
       marker: {
         color: getCreatureMarkerColor(creature),
         inCombat: creature.inCombat,
@@ -7179,62 +7125,38 @@ function getInstanceGameObjectPoses(now: number): GameObjectPose[] {
 }
 
 function readStoredInstanceDecisions(): boolean {
-  try {
-    return window.localStorage.getItem(INSTANCE_DECISIONS_STORAGE_KEY) !== 'false';
-  } catch {
-    return true;
-  }
+  return readStoredFlag(INSTANCE_DECISIONS_STORAGE_KEY, true);
 }
 
 function setInstanceShowDecisions(enabled: boolean): void {
   instanceShowDecisions = enabled;
   $instanceDecisionsBtn?.setAttribute('aria-pressed', String(enabled));
-  try {
-    window.localStorage.setItem(INSTANCE_DECISIONS_STORAGE_KEY, String(enabled));
-  } catch {
-    // Preference is per-session only when storage is unavailable.
-  }
+  storeSetting(INSTANCE_DECISIONS_STORAGE_KEY, String(enabled));
   instanceBotCardRenderedAt = 0;
   renderInstanceCanvas();
 }
 
 function readStoredInstanceMobsMode(): InstanceMobsMode {
-  try {
-    const stored = window.localStorage.getItem(INSTANCE_MOBS_STORAGE_KEY);
-    return stored === 'all' || stored === 'off' ? stored : 'near';
-  } catch {
-    return 'near';
-  }
+  const stored = readStoredSetting(INSTANCE_MOBS_STORAGE_KEY);
+  return stored === 'all' || stored === 'off' ? stored : 'near';
 }
 
 function readStoredInstancePlatesMode(): InstancePlatesMode {
-  try {
-    const stored = window.localStorage.getItem(INSTANCE_PLATES_STORAGE_KEY);
-    return stored === 'grey' || stored === 'quatre' || stored === 'labels' ? stored : 'neon';
-  } catch {
-    return 'neon';
-  }
+  const stored = readStoredSetting(INSTANCE_PLATES_STORAGE_KEY);
+  return stored === 'grey' || stored === 'quatre' || stored === 'labels' ? stored : 'neon';
 }
 
 function setInstancePlatesMode(mode: InstancePlatesMode): void {
   instancePlatesMode = mode;
   if ($instancePlatesMode) $instancePlatesMode.value = mode;
-  try {
-    window.localStorage.setItem(INSTANCE_PLATES_STORAGE_KEY, mode);
-  } catch {
-    // Preference is per-session only when storage is unavailable.
-  }
+  storeSetting(INSTANCE_PLATES_STORAGE_KEY, mode);
   renderInstanceCanvas();
 }
 
 function setInstanceMobsMode(mode: InstanceMobsMode): void {
   instanceMobsMode = mode;
   if ($instanceMobsMode) $instanceMobsMode.value = mode;
-  try {
-    window.localStorage.setItem(INSTANCE_MOBS_STORAGE_KEY, mode);
-  } catch {
-    // Preference is per-session only when storage is unavailable.
-  }
+  storeSetting(INSTANCE_MOBS_STORAGE_KEY, mode);
   renderInstanceCanvas();
 }
 
@@ -7263,9 +7185,6 @@ function requestInstanceCreatureInfo(entries: number[]): void {
 const isBossCreature = (creature: StreamCreatureSample, info: CreatureInfo | null | undefined): boolean =>
   creature.boss || info?.rank === 3;
 
-// Creature marker: red if hostile, yellow otherwise, green for players' pets,
-// grey when dead. Elites get a gold rim, bosses a larger skull marker, and a
-// health ring shows once a creature is hurt.
 // Which auras the 3D view shows as client art, so their tint gives way; in
 // the flat view (`drawn3d` false) there is no art and every tint shows.
 function instanceAuraShownAsArt(drawn3d: unknown = instanceView3d): (spellId: number) => boolean {
@@ -7312,7 +7231,7 @@ function drawInstanceCombatNumbers(
     const t = Math.min(1, (now - number.at) / NUMBER_LIFETIME_MS);
     const index = perUnit.get(number.target) ?? 0;
     perUnit.set(number.target, index + 1);
-    const size = Math.round((number.periodic ? 11 : 14) * Math.max(0.8, Math.min(1.4, scale)));
+    const size = Math.round((number.periodic ? 11 : 14) * clamp(scale, 0.8, 1.4));
     ctx.font = `700 ${size}px system-ui, sans-serif`;
     ctx.globalAlpha = 1 - t * t;
     const [offsetX, offsetY] = INSTANCE_NUMBER_OFFSETS[index % INSTANCE_NUMBER_OFFSETS.length];
@@ -7375,6 +7294,9 @@ function drawInstancePlates(
   for (const entry of shown.reverse()) drawNameplate(ctx, style, entry.plate, entry.x, entry.y, scale * (entry.size ?? 1));
 }
 
+// Creature marker: red if hostile, yellow otherwise, green for players' pets,
+// grey when dead. Elites get a gold rim, bosses a larger skull marker, and a
+// health ring shows once a creature is hurt.
 function drawInstanceCreature(
   ctx: CanvasRenderingContext2D,
   creature: StreamCreatureSample,
@@ -7652,11 +7574,7 @@ function stepInstanceRotation(now: number): void {
 
 function setInstanceView3d(enabled: boolean): void {
   instanceView3d = enabled;
-  try {
-    window.localStorage.setItem(INSTANCE_VIEW_3D_STORAGE_KEY, String(enabled));
-  } catch {
-    // Preference is per-session only when storage is unavailable.
-  }
+  storeSetting(INSTANCE_VIEW_3D_STORAGE_KEY, String(enabled));
   setInstanceViewTransform({ zoom: 1, panX: 0, panY: 0 });
   renderInstanceWatcher();
 }
@@ -8285,7 +8203,7 @@ function drawInstanceCanvas(followPass: boolean): void {
     // A cast's end includes a grace in case the "fired" event is late.
     const length = cast.endAt - cast.startAt - (cast.channeled ? 0 : CAST_GRACE_MS);
     return {
-      fraction: length > 0 ? Math.max(0, Math.min(1, (liveNow - cast.startAt) / length)) : 1,
+      fraction: length > 0 ? clamp((liveNow - cast.startAt) / length, 0, 1) : 1,
       name: instanceSpellNames.get(cast.spellId),
       channeled: cast.channeled,
       icon: instanceClientIcons.get(`spell-${cast.spellId}`),
@@ -8349,20 +8267,22 @@ function drawInstanceCanvas(followPass: boolean): void {
     for (const creature of ordered) {
       const info = instanceCreatureInfo.get(creature.entry);
       const point = projection.worldToScreen(creature.x, creature.y, creature.z);
-      const model = modelShown(`c${creature.guid}`);
+      const key = unitKey(creature.guid, true);
+      const marker = live ? instanceLiveMarkers.get(key, liveNow) : null;
+      const model = modelShown(key);
       const boss = isBossCreature(creature, info);
       const scenery = sceneryGuids.has(creature.guid);
       // A model has its own ring on the floor, with health and combat.
       if (!model) {
         if (!scenery) {
-          drawInstanceAuraHalo(ctx, live ? instanceCombatEffects.tint(unitKey(creature.guid, true), instanceAuraShownAsArt(isoView)) : null,
+          drawInstanceAuraHalo(ctx, live ? instanceCombatEffects.tint(key, instanceAuraShownAsArt(isoView)) : null,
             point, 9 * markerScale);
         }
         drawInstanceCreature(ctx, creature, info, point, markerScale, scenery);
       }
       if (plateStyle) {
-        const extras = live ? getInstancePlateExtras(unitKey(creature.guid, true), liveNow) : {};
-        const marked = Boolean(live && instanceLiveMarkers.get(unitKey(creature.guid, true), liveNow) !== null);
+        const extras = live ? getInstancePlateExtras(key, liveNow) : {};
+        const marked = marker !== null;
         if (info && creature.alive && !scenery && (boss || marked || creature.inCombat || viewTransform.zoom >= INSTANCE_MOB_LABEL_ZOOM)) {
           const plateY = model
             ? projection.worldToScreen(creature.x, creature.y, creature.z + INSTANCE_CREATURE_MODEL_HEIGHT).y - 2
@@ -8380,7 +8300,7 @@ function drawInstanceCanvas(followPass: boolean): void {
               alive: true,
               threat: creature.inCombat && creature.targetIsPlayer,
               selected: false,
-              cast: castOf(unitKey(creature.guid, true)),
+              cast: castOf(key),
               note: null,
               ...extras,
             },
@@ -8391,12 +8311,10 @@ function drawInstanceCanvas(followPass: boolean): void {
             size: creature.playerControlled ? INSTANCE_PET_PLATE_SIZE : 1,
           });
         }
-      } else if (info && creature.alive && !scenery && (boss || (live && instanceLiveMarkers.get(unitKey(creature.guid, true), liveNow) !== null)
-        || viewTransform.zoom >= INSTANCE_MOB_LABEL_ZOOM)) {
+      } else if (info && creature.alive && !scenery && (boss || marker !== null || viewTransform.zoom >= INSTANCE_MOB_LABEL_ZOOM)) {
         const labelY = model
           ? projection.worldToScreen(creature.x, creature.y, creature.z + INSTANCE_CREATURE_MODEL_HEIGHT).y
           : point.y - 4 * markerScale;
-        const marker = live ? instanceLiveMarkers.get(unitKey(creature.guid, true), liveNow) : null;
         pendingLabels.push({ name: info.name, x: point.x + 6 * markerScale, y: labelY, priority: boss || marker !== null ? 1 : -1, marker });
       }
     }
@@ -8417,7 +8335,8 @@ function drawInstanceCanvas(followPass: boolean): void {
 
     const point = project(player);
     const playerGuid = live ? instanceLivePositions.guidOf(player.name) : null;
-    const model = playerGuid !== null && modelShown(`p${playerGuid}`);
+    const model = playerGuid !== null && modelShown(unitKey(playerGuid, false));
+    const faction = factionOf(player);
     // With a model, labels and the click target sit over its head.
     // A rider sits higher: its model's own overhead point. A passenger the
     // client hides is drawn as its vehicle: no marker of its own, and its
@@ -8493,8 +8412,8 @@ function drawInstanceCanvas(followPass: boolean): void {
           selected: player.name === selectedInstancePlayerName,
           cast: playerGuid !== null ? castOf(unitKey(playerGuid, false)) : null,
           note: getCurrentBotAction(decisions.get(player.name)) ?? null,
-          faction: factionOf(player),
-          factionIcon: factionOf(player) ? instanceClientIcons.get(`faction-${factionOf(player)}`) : null,
+          faction,
+          factionIcon: faction ? instanceClientIcons.get(`faction-${faction}`) : null,
           power: player.alive && player.powerPct !== undefined && POWER_COLORS[player.powerType ?? -1]
             ? { pct: player.powerPct, color: POWER_COLORS[player.powerType ?? 0] } : null,
           ...(playerGuid !== null ? getInstancePlateExtras(unitKey(playerGuid, false), liveNow) : {}),
@@ -8511,7 +8430,7 @@ function drawInstanceCanvas(followPass: boolean): void {
         x: point.x + markerRadius + 4,
         y: labelY,
         priority: (!player.isBot ? 2 : 0) + (player.inCombat ? 1 : 0),
-        faction: factionOf(player),
+        faction,
         marker: playerGuid !== null ? instanceLiveMarkers.get(unitKey(playerGuid, false), liveNow) : null,
         color: getInstanceFactionColor(player.teamId) ?? undefined,
       });
@@ -8593,7 +8512,7 @@ function drawInstanceMoveTarget(
 ): void {
   const size = 4.5 * scale;
   ctx.save();
-  ctx.globalAlpha = Math.max(0.2, Math.min(1, opacity));
+  ctx.globalAlpha = clamp(opacity, 0.2, 1);
   ctx.strokeStyle = color;
   ctx.lineWidth = 1.25;
   ctx.setLineDash([2, 4]);
@@ -9020,18 +8939,14 @@ $instanceView3dBtn?.addEventListener('click', () => setInstanceView3d(!instanceV
 $instanceFollowBtn?.setAttribute('aria-pressed', String(instanceFollowSelected));
 $instanceFollowBtn?.addEventListener('click', () => setInstanceFollowSelected(!instanceFollowSelected));
 $instancePathsBtn?.setAttribute('aria-pressed', String(instanceShowPaths));
-if ($instancePathsBtn && !window.wowminAPI.map.streamPositions) $instancePathsBtn.disabled = true;
 $instancePathsBtn?.addEventListener('click', () => setInstanceShowPaths(!instanceShowPaths));
 $instanceTrailsBtn?.setAttribute('aria-pressed', String(instanceShowTrails));
 $instanceTrailsBtn?.addEventListener('click', () => setInstanceShowTrails(!instanceShowTrails));
 $instanceDecisionsBtn?.setAttribute('aria-pressed', String(instanceShowDecisions));
-if ($instanceDecisionsBtn && !window.wowminAPI.map.streamPositions) $instanceDecisionsBtn.disabled = true;
 $instanceDecisionsBtn?.addEventListener('click', () => setInstanceShowDecisions(!instanceShowDecisions));
 $instanceModelsBtn?.setAttribute('aria-pressed', String(instanceShowModels));
-if ($instanceModelsBtn && !window.wowminAPI.map.streamPositions) $instanceModelsBtn.disabled = true;
 $instanceModelsBtn?.addEventListener('click', () => setInstanceShowModels(!instanceShowModels));
 $instanceNumbersBtn?.setAttribute('aria-pressed', String(instanceShowNumbers));
-if ($instanceNumbersBtn && !window.wowminAPI.map.streamPositions) $instanceNumbersBtn.disabled = true;
 $instanceNumbersBtn?.addEventListener('click', () => setInstanceShowNumbers(!instanceShowNumbers));
 // Pointer-down too, as the card redraws every second and a click could
 // straddle a redraw.
@@ -9053,7 +8968,6 @@ if ($instancePlatesMode) {
 }
 if ($instanceMobsMode) {
   $instanceMobsMode.value = instanceMobsMode;
-  $instanceMobsMode.disabled = !window.wowminAPI.map.streamPositions;
   $instanceMobsMode.addEventListener('change', () => setInstanceMobsMode($instanceMobsMode.value as InstanceMobsMode));
 }
 setInstanceFadeRange(instanceFadeRange, false);
