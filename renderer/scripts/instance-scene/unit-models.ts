@@ -109,6 +109,8 @@ interface ModelTemplate {
   state: 'loading' | 'ready' | 'failed';
   scene?: Object3D;
   clips?: Map<string, AnimationClip>;
+  // The clips' names, for choosing stance clips.
+  clipNames?: ReadonlySet<string>;
   speeds?: Record<string, number>;
   // Floor ring radius in model units, from the model's footprint.
   radius?: number;
@@ -547,6 +549,7 @@ export class UnitModelLayer {
         if (durations[clip.name]) clip.duration = durations[clip.name];
         return [clip.name, clip];
       }));
+      loading.clipNames = new Set(loading.clips.keys());
       loading.speeds = (root?.userData.wowClipSpeeds ?? {}) as Record<string, number>;
       loading.scene = gltf.scene;
       loading.state = 'ready';
@@ -669,7 +672,7 @@ export class UnitModelLayer {
       ? (unit.speed > FLY_MOVING_SPEED || !clips.has(HOVER_CLIP) ? FLY_CLIP : HOVER_CLIP) : null;
     const chosen = riding
       ? { loop: RIDING_CLIP, strike: null }
-      : flight ? { loop: flight, strike: null } : getStanceClips(stance, pose.weapons, new Set(clips.keys()));
+      : flight ? { loop: flight, strike: null } : getStanceClips(stance, pose.weapons, unit.template.clipNames!);
     // Standing or fighting, a cast or channel holds the pose its kit names.
     const still = stance !== 'walk' && stance !== 'run' && stance !== 'dead';
     const kitLoop = still && !riding && pose.kitLoop && clips.has(pose.kitLoop) ? pose.kitLoop : null;
@@ -688,7 +691,7 @@ export class UnitModelLayer {
       this.playStrike(unit, pose.kitOnce);
     } else if (pose.strike && (fighting || stance === 'stand')) {
       // A real attack: the clip for what was done, whatever the stance.
-      const strike = getStanceClips(pose.strike, pose.weapons, new Set(clips.keys())).strike;
+      const strike = getStanceClips(pose.strike, pose.weapons, unit.template.clipNames!).strike;
       if (strike) this.playStrike(unit, strike);
     } else if (!pose.eventDriven && !kitLoop && chosen.strike && fighting && nowMs >= unit.nextStrikeAt) {
       unit.nextStrikeAt = nowMs + getStrikeInterval(stance, unit.jitter) * 1000;

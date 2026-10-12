@@ -228,7 +228,7 @@ function mergeVolumes(a: FadeVolume, b: FadeVolume): FadeVolume {
 // clusters look the same with fewer volumes. Large groups keep merging their
 // closest pair until they fit the shader's limit.
 export function getFadeVolumes(positions: Vec3[], settings: FadeSettings): FadeVolume[] {
-  const volumes: FadeVolume[] = positions
+  const volumes: Array<FadeVolume | null> = positions
     .filter((position) => position.every(Number.isFinite))
     .map(([x, y, z]) => ({ minX: x, maxX: x, minY: y, maxY: y, minZ: z, maxZ: z }));
   const mergeHorizontal = settings.horizontal ? settings.horizontal / 2 : Infinity;
@@ -239,19 +239,56 @@ export function getFadeVolumes(positions: Vec3[], settings: FadeSettings): FadeV
     axisGap(a.minZ, a.maxZ, b.minZ, b.maxZ) / mergeVertical,
   );
 
-  while (volumes.length > 1) {
-    let best = { first: 0, second: 1, separation: Infinity };
-    for (let first = 0; first < volumes.length; first += 1) {
-      for (let second = first + 1; second < volumes.length; second += 1) {
-        const current = separation(volumes[first], volumes[second]);
-        if (current < best.separation) best = { first, second, separation: current };
+  // Each volume's closest later volume (the first of equals), so a merge
+  // rescans only the rows it touches; merged-away volumes become null so
+  // the rest keep their order. Picks the same pairs as scanning every pair.
+  const count = volumes.length;
+  const nearest = new Int32Array(count).fill(-1);
+  const nearestSeparation = new Float64Array(count).fill(Infinity);
+  const scanRow = (first: number): void => {
+    nearest[first] = -1;
+    nearestSeparation[first] = Infinity;
+    const volume = volumes[first];
+    if (!volume) return;
+    for (let second = first + 1; second < count; second += 1) {
+      const other = volumes[second];
+      if (!other) continue;
+      const current = separation(volume, other);
+      if (current < nearestSeparation[first]) {
+        nearest[first] = second;
+        nearestSeparation[first] = current;
       }
     }
-    if (best.separation > 1 && volumes.length <= MAX_FADE_VOLUMES) break;
-    volumes[best.first] = mergeVolumes(volumes[best.first], volumes[best.second]);
-    volumes.splice(best.second, 1);
+  };
+  for (let first = 0; first < count; first += 1) scanRow(first);
+  let live = count;
+  while (live > 1) {
+    let first = -1;
+    for (let row = 0; row < count; row += 1) {
+      if (nearest[row] >= 0 && (first < 0 || nearestSeparation[row] < nearestSeparation[first])) first = row;
+    }
+    if (first < 0 || (nearestSeparation[first] > 1 && live <= MAX_FADE_VOLUMES)) break;
+    const second = nearest[first];
+    const merged = mergeVolumes(volumes[first]!, volumes[second]!);
+    volumes[first] = merged;
+    volumes[second] = null;
+    live -= 1;
+    for (let row = 0; row < count; row += 1) {
+      if (!volumes[row]) continue;
+      if (row === first || nearest[row] === first || nearest[row] === second) {
+        scanRow(row);
+      } else if (row < first) {
+        // The merged volume is no farther from this one than its parts were.
+        const current = separation(volumes[row]!, merged);
+        if (current < nearestSeparation[row] || (current === nearestSeparation[row] && first < nearest[row])) {
+          nearest[row] = first;
+          nearestSeparation[row] = current;
+        }
+      }
+    }
+    scanRow(second);
   }
-  return volumes;
+  return volumes.filter((volume): volume is FadeVolume => volume !== null);
 }
 
 function getVolumeFade([x, y, z]: Vec3, volume: FadeVolume, settings: FadeSettings): number {

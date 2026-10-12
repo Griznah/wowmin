@@ -195,6 +195,43 @@ test('large groups merge their closest clusters until they fit the shader limit'
   }
 });
 
+test('merges the same pairs as scanning every pair each time', () => {
+  // The straightforward version: merge the closest pair (the first of
+  // equals) until nothing is close enough and the volumes fit the limit.
+  const gap = (minA, maxA, minB, maxB) => Math.max(0, minB - maxA, minA - maxB);
+  const reference = (positions, settings) => {
+    const volumes = positions.map(([x, y, z]) => ({ minX: x, maxX: x, minY: y, maxY: y, minZ: z, maxZ: z }));
+    const horizontal = settings.horizontal ? settings.horizontal / 2 : Infinity;
+    const separation = (a, b) => Math.max(Math.hypot(gap(a.minX, a.maxX, b.minX, b.maxX), gap(a.minY, a.maxY, b.minY, b.maxY)) / horizontal,
+      gap(a.minZ, a.maxZ, b.minZ, b.maxZ) / (settings.height / 2));
+    while (volumes.length > 1) {
+      let best = { first: 0, second: 1, separation: Infinity };
+      for (let first = 0; first < volumes.length; first += 1) {
+        for (let second = first + 1; second < volumes.length; second += 1) {
+          const current = separation(volumes[first], volumes[second]);
+          if (current < best.separation) best = { first, second, separation: current };
+        }
+      }
+      if (best.separation > 1 && volumes.length <= MAX_FADE_VOLUMES) break;
+      const [a, b] = [volumes[best.first], volumes[best.second]];
+      volumes[best.first] = { minX: Math.min(a.minX, b.minX), maxX: Math.max(a.maxX, b.maxX), minY: Math.min(a.minY, b.minY),
+        maxY: Math.max(a.maxY, b.maxY), minZ: Math.min(a.minZ, b.minZ), maxZ: Math.max(a.maxZ, b.maxZ) };
+      volumes.splice(best.second, 1);
+    }
+    return volumes;
+  };
+  let seed = 11;
+  const random = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32;
+  for (let round = 0; round < 60; round += 1) {
+    // Whole yards on a small field, so equal separations (ties) happen.
+    const spread = [20, 80, 400][round % 3];
+    const crowd = Array.from({ length: 1 + Math.floor(random() * 90) }, () =>
+      [Math.floor(random() * spread), Math.floor(random() * spread), Math.floor(random() * 30)]);
+    const settings = round % 4 === 3 ? { height: 15, horizontal: null } : { height: 15, horizontal: 40 };
+    assert.deepEqual(Array.from(getFadeVolumes(crowd, settings), (volume) => ({ ...volume })), reference(crowd, settings), `round ${round}`);
+  }
+});
+
 test('the height fade falls off linearly over its range above and below the party', () => {
   const settings = { height: 10, horizontal: null };
   const volumes = getFadeVolumes([[0, 0, 100]], settings);
