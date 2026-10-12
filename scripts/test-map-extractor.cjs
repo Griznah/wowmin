@@ -128,3 +128,20 @@ test('WorldMapArea resolves patched artwork directory without sub-area bounds re
   assert.deepEqual(area.directories, ['ShadowfangKeep', 'OtherFloor']);
   assert.deepEqual(area.bounds, { minX: 50, maxX: 300, minY: 100, maxY: 400 });
 });
+
+test('WorldMapArea keeps the artwork directory of a record without bounds', async () => {
+  const { parseWorldMapAreaDbc } = await extractor;
+  const strings = Buffer.from('\0TheTempleOfAtalHakkar\0');
+  const buffer = Buffer.alloc(20 + 44 + strings.length);
+  buffer.write('WDBC');
+  buffer.writeUInt32LE(1, 4);
+  buffer.writeUInt32LE(11, 8);
+  buffer.writeUInt32LE(44, 12);
+  buffer.writeUInt32LE(strings.length, 16);
+  strings.copy(buffer, 64);
+  buffer.writeUInt32LE(109, 24);
+  buffer.writeUInt32LE(1477, 28);
+  buffer.writeUInt32LE(1, 32);
+  const area = parseWorldMapAreaDbc(buffer).get(109);
+  assert.deepEqual(area, { bounds: null, directories: ['TheTempleOfAtalHakkar'] });
+});

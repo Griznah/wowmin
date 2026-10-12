@@ -437,25 +437,22 @@ export function parseWorldMapAreaDbc(buffer) {
     const y2 = buffer.readFloatLE(offset + 20);
     const x1 = buffer.readFloatLE(offset + 24);
     const x2 = buffer.readFloatLE(offset + 28);
-    if (![x1, x2, y1, y2].every(Number.isFinite) || x1 === x2 || y1 === y2) continue;
     const directory = readDbcString(buffer, stringBlockOffset, buffer.readUInt32LE(offset + 12));
-    const existing = boundsByMap.get(mapId);
-    // Preserve all directory aliases without letting a sub-area overwrite the
-    // full-map projection (N adds many microdungeon WorldMapArea entries).
-    const aliases = [...new Set([...(existing?.directories ?? []), directory].filter(Boolean))];
-    if (existing && buffer.readUInt32LE(offset + 8) !== 0) {
-      existing.directories = aliases;
-      continue;
-    }
-    boundsByMap.set(mapId, {
-      bounds: {
-        minX: Math.min(x1, x2),
-        maxX: Math.max(x1, x2),
-        minY: Math.min(y1, y2),
-        maxY: Math.max(y1, y2),
-      },
-      directories: aliases,
-    });
+    const area = boundsByMap.get(mapId) ?? { bounds: null, directories: [] };
+    boundsByMap.set(mapId, area);
+    // Keep the directory even without bounds: a dungeon's art folder can sit
+    // on a record whose bounds are zero, its floors placed by DungeonMap.dbc.
+    if (directory && !area.directories.includes(directory)) area.directories.push(directory);
+    if (![x1, x2, y1, y2].every(Number.isFinite) || x1 === x2 || y1 === y2) continue;
+    // Don't let a sub-area overwrite the full-map projection (N adds many
+    // microdungeon WorldMapArea entries).
+    if (area.bounds && buffer.readUInt32LE(offset + 8) !== 0) continue;
+    area.bounds = {
+      minX: Math.min(x1, x2),
+      maxX: Math.max(x1, x2),
+      minY: Math.min(y1, y2),
+      maxY: Math.max(y1, y2),
+    };
   }
   return boundsByMap;
 }
