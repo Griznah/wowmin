@@ -4,7 +4,7 @@ import type {
   MapInstanceState,
   MapPlayerPosition,
   MapSessionEvent,
-} from './types/electron';
+} from './types/api';
 
 const TELEMETRY_FIELDS_V1 = 15;
 const TELEMETRY_FIELDS_V2 = 29;

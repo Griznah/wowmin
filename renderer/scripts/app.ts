@@ -1,7 +1,7 @@
 /// <reference path="./types/window.d.ts" />
 import { ts, escapeHtml, showResult, debounce, getMapName, CLASS_COLORS, RACE_NAMES, CLASS_NAMES } from './utils/helpers';
 import { parseOnlineList, playersFromDatabase } from './utils/online-players';
-import { type ActiveInstanceSession, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getInstanceCoordinateBounds, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, groupActiveInstanceSessions, INSTANCE_MAX_ZOOM, isSceneryCreature, parseInstanceSessionKey, zoomInstanceViewAt } from './utils/instance-watch';
+import { type ActiveInstanceSession, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getInstanceCoordinateBounds, getInstanceFactionColor, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, groupActiveInstanceSessions, parseInstanceSessionKey, zoomInstanceViewAt, INSTANCE_MAX_ZOOM, isSceneryCreature } from './utils/instance-watch';
 import { clampIsoPitch, createFlatProjection, createIsoView, DEFAULT_ISO_YAW, type FadeSettings, getFadeVolumes, getHeightBand, getIsoPanForCenter, getNextQuarterTurn, ISO_PITCH, type IsoView, type MapProjection, resolveMinimapTileProjection, type SceneBox } from './utils/map-projection';
 import { InstanceSceneView } from './instance-scene/scene-view';
 import type { UnitModelPose } from './instance-scene/unit-models';
@@ -20,8 +20,8 @@ import { calculateSessionTotalsAt, formatSessionReplayTime, isSessionRouteDiscon
 import { getClassIconHtml, getClassIconImage, getPlayerStateIconsHtml, getPlayerStateIndicators, getRacePortraitHtml, getResponsivePlayerIconScale, getStateIconImage, loadPlayerIconManifest } from './utils/player-icons';
 import { formatBattlegroundOutcome } from '../../src/session-outcome';
 import { AppState, createInitialState, PlayerInfo } from './types/state';
-import type { CreatureInfo, StreamBotDecision, StreamCreatureSample, StreamStatus } from '../../src/types/electron';
-import type { ConnectionProfile, DbConfig, SoapConfig, UpdateCheckResult, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, MapBattlegroundState, MapInstanceDeath, MapInstanceState, MapPlayerPosition, MapBotWaypoint, CharacterInventoryResult, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow, SessionIndexEntry, SessionRecord, SessionRoutePoint } from '../../src/types/electron';
+import type { CreatureInfo, StreamBotDecision, StreamCreatureSample, StreamStatus } from '../../src/types/api';
+import type { ConnectionProfile, DbConfig, SoapConfig, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, MapBattlegroundState, MapInstanceDeath, MapInstanceState, MapPlayerPosition, MapBotWaypoint, CharacterInventoryResult, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow, SessionIndexEntry, SessionRecord, SessionRoutePoint } from '../../src/types/api';
 import { bindInventoryTableTooltips, formatInventoryLocation, ITEM_QUALITY_COLOR } from './inventory/wow-item-tooltip';
 
 // ── Application State ────────────────────────────────────────────────────
@@ -31,6 +31,10 @@ const state: AppState = createInitialState();
 const $ = <T extends HTMLElement>(id: string): T | null => document.getElementById(id) as T | null;
 const $$ = <T extends HTMLElement>(sel: string): NodeListOf<T> => document.querySelectorAll<T>(sel);
 
+const TEAM_ALLIANCE = 0;
+const TEAM_HORDE = 1;
+const PVP_TEAM_HORDE = 0;
+const PVP_TEAM_ALLIANCE = 1;
 const PLAYER_ICON_SCALE_STORAGE_KEY = 'wowmin.playerIconScale';
 function readStoredPlayerIconScale(): number {
   try {
@@ -100,13 +104,13 @@ const $output = $<HTMLElement>('output');
 const $form = $<HTMLFormElement>('command-form');
 const $cmdInput = $<HTMLInputElement>('command-input');
 const $btnSend = document.querySelector<HTMLButtonElement>('.btn-send');
-const $updateBanner = $<HTMLElement>('update-banner');
-const $appVersion = $<HTMLElement>('app-version');
-const $updateStatusText = $<HTMLElement>('update-status-text');
-const $btnCheckUpdates = $<HTMLButtonElement>('btn-check-updates');
-const $btnOpenUpdate = $<HTMLButtonElement>('btn-open-update');
-
-let latestReleaseUrl: string | null = null;
+const $dungeonClearFrame = $<HTMLIFrameElement>('dungeon-clear-frame');
+const $dungeonClearLoading = $<HTMLElement>('dungeon-clear-loading');
+const $dungeonClearStatus = $<HTMLElement>('dungeon-clear-status');
+const $dungeonClearReload = $<HTMLButtonElement>('dungeon-clear-reload');
+const $dungeonClearOpen = $<HTMLButtonElement>('dungeon-clear-open');
+let dungeonClearUrl: string | null = null;
+let dungeonClearInitialized = false;
 
 const DEFAULT_SOAP_PROFILE_CONFIG: SoapConfig = {
   host: '127.0.0.1',
@@ -348,7 +352,7 @@ function setConnected(connected: boolean): void {
 async function exec(cmd: string): Promise<{ success: boolean; message: string }> {
   if (!state.connected) return { success: false, message: 'Not connected.' };
   try {
-    return await window.electronAPI.soap.command(cmd);
+    return await window.wowminAPI.soap.command(cmd);
   } catch (e) {
     const errorMessage = e instanceof Error ? e.message : String(e);
     return { success: false, message: errorMessage };
@@ -367,29 +371,6 @@ function logActivity(cmd: string, msg: string, ok: boolean): void {
   // Keep max 100 entries
   while ($activityLog && $activityLog.children.length > 100) {
     $activityLog.lastChild?.remove();
-  }
-}
-
-function renderUpdateStatus(result: UpdateCheckResult): void {
-  latestReleaseUrl = result.releaseUrl;
-
-  if ($appVersion) {
-    $appVersion.textContent = `v${result.currentVersion}`;
-  }
-
-  if ($updateBanner) {
-    $updateBanner.dataset.status = result.status;
-  }
-
-  if ($updateStatusText) {
-    const latestLabel = result.latestVersion ? ` Latest: v${result.latestVersion}.` : '';
-    $updateStatusText.textContent = `${result.message}${latestLabel}`;
-    $updateStatusText.title = $updateStatusText.textContent;
-  }
-
-  if ($btnOpenUpdate) {
-    const showOpenButton = Boolean(result.releaseUrl) && (result.updateAvailable || result.status === 'error');
-    $btnOpenUpdate.classList.toggle('hidden', !showOpenButton);
   }
 }
 
@@ -587,43 +568,8 @@ function resetLogMonitorView(message = 'Scan a server to see readable log files.
   }
 }
 
-async function refreshUpdateStatus(force = false): Promise<void> {
-  if ($updateBanner) {
-    $updateBanner.dataset.status = 'checking';
-  }
-  if ($updateStatusText) {
-    $updateStatusText.textContent = 'Checking GitHub for updates…';
-  }
-  if ($btnCheckUpdates) {
-    $btnCheckUpdates.disabled = true;
-  }
-
-  try {
-    if ($appVersion && $appVersion.textContent === 'v--') {
-      const currentVersion = await window.electronAPI.app.getVersion();
-      $appVersion.textContent = `v${currentVersion}`;
-    }
-
-    const result = await window.electronAPI.update.check(force);
-    renderUpdateStatus(result);
-  } catch (error) {
-    if ($updateBanner) {
-      $updateBanner.dataset.status = 'error';
-    }
-    if ($updateStatusText) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      $updateStatusText.textContent = `Unable to check for updates right now: ${errorMessage}`;
-      $updateStatusText.title = $updateStatusText.textContent;
-    }
-  } finally {
-    if ($btnCheckUpdates) {
-      $btnCheckUpdates.disabled = false;
-    }
-  }
-}
-
 // ── Main tab navigation ─────────────────────────────────────────────────────
-const MAIN_TAB_ORDER = ['dashboard', 'players', 'accounts', 'tickets', 'database', 'map', 'instances', 'history', 'economy', 'logs', 'console'] as const;
+const MAIN_TAB_ORDER = ['dashboard', 'players', 'accounts', 'tickets', 'database', 'map', 'instances', 'dungeon-clear', 'history', 'economy', 'logs', 'console'] as const;
 type MainTabId = (typeof MAIN_TAB_ORDER)[number];
 
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -645,8 +591,30 @@ function getActiveMainTabId(): MainTabId {
   return 'dashboard';
 }
 
+async function initializeDungeonClear(): Promise<void> {
+  if (dungeonClearInitialized) return;
+  dungeonClearInitialized = true;
+  try {
+    const bootstrap = await window.wowminAPI.app.getBootstrap();
+    dungeonClearUrl = bootstrap.dungeonClearUrl;
+    if ($dungeonClearStatus) $dungeonClearStatus.textContent = `Loading ${dungeonClearUrl}`;
+    if ($dungeonClearFrame) {
+      $dungeonClearFrame.hidden = false;
+      $dungeonClearFrame.src = dungeonClearUrl;
+    }
+  } catch (error) {
+    dungeonClearInitialized = false;
+    const message = error instanceof Error ? error.message : String(error);
+    if ($dungeonClearStatus) $dungeonClearStatus.textContent = `Unable to load configuration: ${message}`;
+    if ($dungeonClearLoading) {
+      $dungeonClearLoading.innerHTML = `<strong>Dungeon Clear is unavailable</strong><span>${escapeHtml(message)}</span>`;
+    }
+  }
+}
+
 function onMainTabActivated(tabId: MainTabId): void {
   if (tabId === 'dashboard' && state.connected) void refreshDashboard();
+  if (tabId === 'dungeon-clear') void initializeDungeonClear();
   if (tabId === 'players' && (state.connected || state.mapDbConnected)) void refreshPlayers();
   if (tabId === 'economy' && economyState.connected) void refreshEconomyData();
   if (tabId === 'history') void refreshSessionHistory();
@@ -671,6 +639,7 @@ function onMainTabActivated(tabId: MainTabId): void {
 function activateMainTab(tabId: string, options?: { focusTab?: boolean }): void {
   if (!(MAIN_TAB_ORDER as readonly string[]).includes(tabId)) return;
   const typed = tabId as MainTabId;
+  document.body.classList.toggle('dungeon-clear-active', typed === 'dungeon-clear');
   const buttons = getMainTabBarButtons();
   const panels = $$<HTMLElement>('.tab-content');
 
@@ -705,6 +674,36 @@ getMainTabBarButtons().forEach((btn) => {
   });
 });
 
+$dungeonClearFrame?.addEventListener('load', () => {
+  if ($dungeonClearLoading) $dungeonClearLoading.hidden = true;
+  if ($dungeonClearStatus && dungeonClearUrl) $dungeonClearStatus.textContent = dungeonClearUrl;
+});
+
+$dungeonClearFrame?.addEventListener('error', () => {
+  if ($dungeonClearLoading) {
+    $dungeonClearLoading.hidden = false;
+    $dungeonClearLoading.innerHTML = '<strong>Unable to load DC Test Deck</strong><span>Check the configured URL and Test Deck allowed_frame_ancestors setting.</span>';
+  }
+  if ($dungeonClearStatus) $dungeonClearStatus.textContent = 'DC Test Deck failed to load.';
+});
+
+$dungeonClearReload?.addEventListener('click', () => {
+  if (!dungeonClearUrl || !$dungeonClearFrame) {
+    void initializeDungeonClear();
+    return;
+  }
+  const reloadUrl = new URL(dungeonClearUrl);
+  reloadUrl.searchParams.set('_wowminReload', String(Date.now()));
+  if ($dungeonClearLoading) $dungeonClearLoading.hidden = false;
+  if ($dungeonClearStatus) $dungeonClearStatus.textContent = `Reloading ${dungeonClearUrl}`;
+  $dungeonClearFrame.src = reloadUrl.toString();
+});
+
+$dungeonClearOpen?.addEventListener('click', () => {
+  if (dungeonClearUrl) void window.wowminAPI.app.openExternal(dungeonClearUrl);
+  else void initializeDungeonClear();
+});
+
 document.getElementById('tab-bar')?.addEventListener('keydown', (e) => {
   if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'Home' && e.key !== 'End') return;
   const idx = MAIN_TAB_ORDER.indexOf(getActiveMainTabId());
@@ -728,10 +727,6 @@ document.addEventListener('keydown', (e) => {
   activateMainTab(MAIN_TAB_ORDER[digit - 1], { focusTab: true });
 });
 
-window.electronAPI.app.onNavigateTab((tabId) => {
-  activateMainTab(tabId, { focusTab: true });
-});
-
 // ── Connection Handlers ────────────────────────────────────────────────────
 $btnConnect?.addEventListener('click', async () => {
   const config = {
@@ -752,7 +747,7 @@ $btnConnect?.addEventListener('click', async () => {
   }
   if ($btnConnect) $btnConnect.disabled = true;
 
-  const result = await window.electronAPI.soap.connect(config);
+  const result = await window.wowminAPI.soap.connect(config);
 
   if (result.success) {
     setConnected(true);
@@ -775,7 +770,7 @@ $btnConnect?.addEventListener('click', async () => {
 });
 
 $btnDisconnect?.addEventListener('click', async () => {
-  await window.electronAPI.soap.disconnect();
+  await window.wowminAPI.soap.disconnect();
   setConnected(false);
   stopDashboardAutoRefresh();
   stopPlayersAutoRefresh();
@@ -872,21 +867,6 @@ appendOutput(
     `</div>`
 );
 
-$btnCheckUpdates?.addEventListener('click', () => {
-  void refreshUpdateStatus(true);
-});
-
-$btnOpenUpdate?.addEventListener('click', async () => {
-  const result = await window.electronAPI.update.openReleasePage(latestReleaseUrl ?? undefined);
-  if (!result.success && $updateStatusText) {
-    $updateStatusText.textContent = result.message;
-    $updateStatusText.title = result.message;
-    $updateBanner?.setAttribute('data-status', 'error');
-  }
-});
-
-void refreshUpdateStatus();
-
 // ── Dashboard ──────────────────────────────────────────────────────────────
 function resetDashboard(): void {
   if ($dashServerInfo) $dashServerInfo.innerHTML = '<p class="placeholder">Connect to view server information</p>';
@@ -907,13 +887,19 @@ async function refreshDashboard(): Promise<void> {
     if (info.success) parseServerInfo(info.message);
     if ($uptimeValue) $uptimeValue.textContent = info.success ? getServerUptime(info.message) || '--' : '--';
 
-    try {
-      const counts = await window.electronAPI.map.getOnlineCounts();
-      if ($playersCount) $playersCount.textContent = String(counts.players);
-      if ($botsCount) $botsCount.textContent = String(counts.bots);
-      if ($totalCount) $totalCount.textContent = String(counts.total);
-    } catch {
-      // The map connection may not be ready yet; the console list is available with SOAP alone.
+    let countsLoaded = false;
+    if (state.mapDbConnected) {
+      try {
+        const counts = await window.wowminAPI.map.getOnlineCounts();
+        if ($playersCount) $playersCount.textContent = String(counts.players);
+        if ($botsCount) $botsCount.textContent = String(counts.bots);
+        if ($totalCount) $totalCount.textContent = String(counts.total);
+        countsLoaded = true;
+      } catch {
+        // Fall through to SOAP when the optional characters database is unavailable.
+      }
+    }
+    if (!countsLoaded) {
       const online = await exec('account onlinelist');
       if (online.success) {
         const players = parseOnlineList(online.message);
@@ -1223,17 +1209,23 @@ async function refreshPlayers(): Promise<void> {
 
   playersRefreshInFlight = true;
   try {
-    try {
-      state.allPlayers = playersFromDatabase(await window.electronAPI.players.getOnline());
-    } catch (error) {
-      if (!state.connected) throw error;
+    if (state.mapDbConnected) {
+      try {
+        state.allPlayers = playersFromDatabase(await window.wowminAPI.players.getOnline());
+      } catch (error) {
+        if (!state.connected) throw error;
+        const result = await exec('account onlinelist');
+        if (!result.success) throw new Error(result.message);
+        state.allPlayers = parseOnlineList(result.message);
+      }
+    } else {
       const result = await exec('account onlinelist');
       if (!result.success) throw new Error(result.message);
       state.allPlayers = parseOnlineList(result.message);
     }
     if (state.connected) {
       try {
-        const liveSnapshot = await window.electronAPI.map.getPlayerPositions();
+        const liveSnapshot = await window.wowminAPI.map.getPlayerPositions();
         playersLiveStates = new Map(liveSnapshot.players.map((player) => [player.name, player]));
       } catch {
         playersLiveStates.clear();
@@ -1435,7 +1427,7 @@ async function openPlayerInventory(charName: string): Promise<void> {
   panel.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 
   try {
-    const r = await window.electronAPI.inventory.getCharacterInventory(charName);
+    const r = await window.wowminAPI.inventory.getCharacterInventory(charName);
     if (!r.success) {
       inventoryTooltipCleanup?.();
       inventoryTooltipCleanup = null;
@@ -1470,7 +1462,7 @@ $<HTMLElement>('wow-tooltip')?.addEventListener('click', (e) => {
   const a = (e.target as HTMLElement).closest<HTMLAnchorElement>('a[data-external-url]');
   if (!a?.dataset.externalUrl) return;
   e.preventDefault();
-  void window.electronAPI.app.openExternal(a.dataset.externalUrl);
+  void window.wowminAPI.app.openExternal(a.dataset.externalUrl);
 });
 
 // ── Event delegation for player table action buttons ───────────────────────
@@ -1659,7 +1651,7 @@ $('btn-online-accounts')?.addEventListener('click', async () => {
   try {
     let players: PlayerInfo[];
     try {
-      players = playersFromDatabase(await window.electronAPI.players.getOnline());
+      players = playersFromDatabase(await window.wowminAPI.players.getOnline());
     } catch (error) {
       if (!state.connected) throw error;
       const response = await exec('account onlinelist');
@@ -2168,8 +2160,8 @@ $('btn-ticket-toggle')?.addEventListener('click', async () => {
 // ── Profile Management ─────────────────────────────────────────────────────
 async function loadProfiles(): Promise<void> {
   try {
-    state.profiles = await window.electronAPI.config.getProfiles();
-    state.activeProfileId = await window.electronAPI.config.getActiveProfileId();
+    state.profiles = await window.wowminAPI.config.getProfiles();
+    state.activeProfileId = await window.wowminAPI.config.getActiveProfileId();
     renderProfiles();
   } catch (e) {
     console.error('Failed to load profiles:', e);
@@ -2217,7 +2209,7 @@ $profileSelect?.addEventListener('change', async () => {
   const profile = state.profiles.find((p) => p.id === id);
   if (profile) {
     loadProfileConfig(profile);
-    await window.electronAPI.config.setActiveProfile(id);
+    await window.wowminAPI.config.setActiveProfile(id);
     state.activeProfileId = id;
   }
 });
@@ -2231,7 +2223,7 @@ $btnSaveProfile?.addEventListener('click', async () => {
   
   if (!name || typeof name !== 'string' || !name.trim()) return;
   
-  const profile = await window.electronAPI.config.addProfile({
+  const profile = await window.wowminAPI.config.addProfile({
     name: name.trim(),
     type: 'soap',
     config: getCurrentSoapProfileConfig(),
@@ -2244,7 +2236,7 @@ $btnSaveProfile?.addEventListener('click', async () => {
   
   state.profiles.push(profile);
   state.activeProfileId = profile.id;
-  await window.electronAPI.config.setActiveProfile(profile.id);
+  await window.wowminAPI.config.setActiveProfile(profile.id);
   renderProfiles();
 });
 
@@ -2252,7 +2244,7 @@ $btnUpdateProfile?.addEventListener('click', async () => {
   const id = $profileSelect?.value;
   if (!id) return;
 
-  const updatedProfile = await window.electronAPI.config.updateProfile(id, {
+  const updatedProfile = await window.wowminAPI.config.updateProfile(id, {
     config: getCurrentSoapProfileConfig(),
     soapConfig: getCurrentSoapProfileConfig(),
     databaseConfig: getCurrentDatabaseProfileConfig(),
@@ -2265,7 +2257,7 @@ $btnUpdateProfile?.addEventListener('click', async () => {
 
   state.profiles = state.profiles.map((profile) => (profile.id === id ? updatedProfile : profile));
   state.activeProfileId = id;
-  await window.electronAPI.config.setActiveProfile(id);
+  await window.wowminAPI.config.setActiveProfile(id);
   renderProfiles();
 });
 
@@ -2280,7 +2272,7 @@ $btnDeleteProfile?.addEventListener('click', async () => {
   
   if (!confirmed) return;
   
-  await window.electronAPI.config.deleteProfile(id);
+  await window.wowminAPI.config.deleteProfile(id);
   state.profiles = state.profiles.filter((p) => p.id !== id);
   if (state.activeProfileId === id) {
     state.activeProfileId = null;
@@ -2548,7 +2540,7 @@ async function loadLogPreview(filePath: string, options: { silent?: boolean } = 
   if ($logRefreshPreviewBtn) $logRefreshPreviewBtn.disabled = true;
 
   try {
-    const result = await window.electronAPI.logs.readTail(config, filePath, 48 * 1024);
+    const result = await window.wowminAPI.logs.readTail(config, filePath, 48 * 1024);
     if (requestToken !== logMonitorState.previewRequestToken) {
       return;
     }
@@ -2590,7 +2582,7 @@ async function scanRemoteLogs(): Promise<void> {
   if ($logRefreshPreviewBtn) $logRefreshPreviewBtn.disabled = true;
   showResult($logStatus, false, 'Scanning remote worldserver.conf and log paths…');
 
-  const result = await window.electronAPI.logs.inspect(config);
+  const result = await window.wowminAPI.logs.inspect(config);
   logMonitorState.inspection = result;
   renderLogInspection(result);
   showResult($logStatus, result.success, result.message);
@@ -2809,7 +2801,7 @@ $dbConnectBtn?.addEventListener('click', async () => {
     $dbStatusText!.textContent = 'Connecting...';
     $dbStatusText!.className = 'text-status-accent';
     
-    const result = await window.electronAPI.db.connect(config);
+    const result = await window.wowminAPI.db.connect(config);
     
     if (result.connected) {
       dbState.connected = true;
@@ -2842,7 +2834,7 @@ $dbConnectBtn?.addEventListener('click', async () => {
 // Database disconnect
 $dbDisconnectBtn?.addEventListener('click', async () => {
   try {
-    await window.electronAPI.db.disconnect();
+    await window.wowminAPI.db.disconnect();
     dbState.connected = false;
     dbState.database = null;
     dbState.tables = [];
@@ -2871,7 +2863,7 @@ async function loadDatabaseTables(): Promise<void> {
   if (!dbState.connected) return;
   
   try {
-    const tables = await window.electronAPI.db.getTables();
+    const tables = await window.wowminAPI.db.getTables();
     dbState.tables = tables;
     renderTableList(tables);
   } catch (err) {
@@ -2916,7 +2908,7 @@ async function selectTable(tableName: string): Promise<void> {
   
   // Load table schema
   try {
-    const schema = await window.electronAPI.db.getSchema(tableName);
+    const schema = await window.wowminAPI.db.getSchema(tableName);
     dbState.tableSchema = schema.map(field => ({
       name: field.name,
       type: field.type,
@@ -2941,11 +2933,11 @@ async function loadTableData(): Promise<void> {
   const dataQuery = `SELECT * FROM \`${dbState.currentTable}\` LIMIT ${dbState.rowsPerPage} OFFSET ${offset}`;
   
   try {
-    const countResult = await window.electronAPI.db.query<{ count: number }>(countQuery);
+    const countResult = await window.wowminAPI.db.query<{ count: number }>(countQuery);
     dbState.totalRows = countResult.rows?.[0]?.count || 0;
     dbState.totalPages = Math.ceil(dbState.totalRows / dbState.rowsPerPage);
     
-    const dataResult = await window.electronAPI.db.query(dataQuery);
+    const dataResult = await window.wowminAPI.db.query(dataQuery);
     dbState.tableData = dataResult.rows || [];
     
     renderTableEditor();
@@ -3106,9 +3098,9 @@ async function executeSqlQuery(sql: string): Promise<void> {
     let result;
     
     if (isSelect) {
-      result = await window.electronAPI.db.query(sql);
+      result = await window.wowminAPI.db.query(sql);
     } else {
-      result = await window.electronAPI.db.execute(sql);
+      result = await window.wowminAPI.db.execute(sql);
     }
     
     const duration = Date.now() - startTime;
@@ -3710,7 +3702,7 @@ async function runSelectorSearch(term: string): Promise<void> {
         ? ', `minlevel`, `maxlevel`, `rank`'
         : ', `QuestLevel`, `MinLevel`';
 
-    const result = await window.electronAPI.db.query<Record<string, unknown>>(
+    const result = await window.wowminAPI.db.query<Record<string, unknown>>(
       `SELECT \`${config.primaryKey}\`, \`${config.nameField}\`${extraColumns} FROM \`${config.table}\` WHERE CAST(\`${config.primaryKey}\` AS CHAR) LIKE ? OR \`${config.nameField}\` LIKE ? ORDER BY \`${config.primaryKey}\` LIMIT 40`,
       [idLike, nameLike],
     );
@@ -3887,7 +3879,7 @@ function requestEntityMediaPreview(entityType: string, entity: Record<string, un
   dbState.entityMediaMessage = 'Fetching live reference media…';
   const token = ++dbState.entityMediaToken;
 
-  void window.electronAPI.app.getEntityMediaPreview({
+  void window.wowminAPI.app.getEntityMediaPreview({
     entityType,
     id: entityId,
     displayIds: getEntityMediaDisplayIds(entityType, entity),
@@ -4155,9 +4147,9 @@ async function loadEntityRelations(): Promise<void> {
   try {
     if (entityType === 'creature') {
       const [vendorRows, lootRows, saiRows] = await Promise.all([
-        window.electronAPI.db.query<Record<string, unknown>>("SELECT nv.item, it.name AS ItemName, it.Quality, nv.maxcount, nv.incrtime, nv.ExtendedCost, 'item' AS _loadEntityType, nv.item AS _loadEntityId FROM `npc_vendor` nv LEFT JOIN `item_template` it ON it.entry = nv.item WHERE nv.`entry` = ? ORDER BY nv.`item` LIMIT 25", [entityId]),
-        window.electronAPI.db.query<Record<string, unknown>>("SELECT clt.Item, it.name AS ItemName, it.Quality, clt.ChanceOrQuestChance, clt.GroupId, clt.MinCount, clt.MaxCount, clt.Reference, 'item' AS _loadEntityType, clt.Item AS _loadEntityId FROM `creature_loot_template` clt LEFT JOIN `item_template` it ON it.entry = clt.Item WHERE clt.`Entry` = ? ORDER BY clt.`GroupId`, clt.`Item` LIMIT 25", [entityId]),
-        window.electronAPI.db.query<Record<string, unknown>>('SELECT id, event_type, action_type, target_type, comment FROM `smart_scripts` WHERE `entryorguid` = ? ORDER BY `id` LIMIT 20', [entityId]),
+        window.wowminAPI.db.query<Record<string, unknown>>("SELECT nv.item, it.name AS ItemName, it.Quality, nv.maxcount, nv.incrtime, nv.ExtendedCost, 'item' AS _loadEntityType, nv.item AS _loadEntityId FROM `npc_vendor` nv LEFT JOIN `item_template` it ON it.entry = nv.item WHERE nv.`entry` = ? ORDER BY nv.`item` LIMIT 25", [entityId]),
+        window.wowminAPI.db.query<Record<string, unknown>>("SELECT clt.Item, it.name AS ItemName, it.Quality, clt.ChanceOrQuestChance, clt.GroupId, clt.MinCount, clt.MaxCount, clt.Reference, 'item' AS _loadEntityType, clt.Item AS _loadEntityId FROM `creature_loot_template` clt LEFT JOIN `item_template` it ON it.entry = clt.Item WHERE clt.`Entry` = ? ORDER BY clt.`GroupId`, clt.`Item` LIMIT 25", [entityId]),
+        window.wowminAPI.db.query<Record<string, unknown>>('SELECT id, event_type, action_type, target_type, comment FROM `smart_scripts` WHERE `entryorguid` = ? ORDER BY `id` LIMIT 20', [entityId]),
       ]);
 
       sections.push(
@@ -4167,9 +4159,9 @@ async function loadEntityRelations(): Promise<void> {
       );
     } else if (entityType === 'item') {
       const [vendorRows, lootRows, rewardRows] = await Promise.all([
-        window.electronAPI.db.query<Record<string, unknown>>("SELECT nv.entry, ct.name AS CreatureName, nv.maxcount, nv.incrtime, nv.ExtendedCost, 'creature' AS _loadEntityType, nv.entry AS _loadEntityId FROM `npc_vendor` nv LEFT JOIN `creature_template` ct ON ct.entry = nv.entry WHERE nv.`item` = ? ORDER BY nv.`entry` LIMIT 25", [entityId]),
-        window.electronAPI.db.query<Record<string, unknown>>("SELECT clt.`Entry`, ct.name AS CreatureName, clt.ChanceOrQuestChance, clt.GroupId, clt.MinCount, clt.MaxCount, clt.Reference, 'creature' AS _loadEntityType, clt.`Entry` AS _loadEntityId FROM `creature_loot_template` clt LEFT JOIN `creature_template` ct ON ct.entry = clt.`Entry` WHERE clt.`Item` = ? ORDER BY clt.`Entry` LIMIT 25", [entityId]),
-        window.electronAPI.db.query<Record<string, unknown>>("SELECT ID, LogTitle, QuestLevel, 'quest' AS _loadEntityType, ID AS _loadEntityId FROM `quest_template` WHERE RewardItem1 = ? OR RewardItem2 = ? OR RewardItem3 = ? OR RewardItem4 = ? OR RewardChoiceItemId1 = ? OR RewardChoiceItemId2 = ? OR RewardChoiceItemId3 = ? OR RewardChoiceItemId4 = ? OR RewardChoiceItemId5 = ? OR RewardChoiceItemId6 = ? LIMIT 25", [entityId, entityId, entityId, entityId, entityId, entityId, entityId, entityId, entityId, entityId]),
+        window.wowminAPI.db.query<Record<string, unknown>>("SELECT nv.entry, ct.name AS CreatureName, nv.maxcount, nv.incrtime, nv.ExtendedCost, 'creature' AS _loadEntityType, nv.entry AS _loadEntityId FROM `npc_vendor` nv LEFT JOIN `creature_template` ct ON ct.entry = nv.entry WHERE nv.`item` = ? ORDER BY nv.`entry` LIMIT 25", [entityId]),
+        window.wowminAPI.db.query<Record<string, unknown>>("SELECT clt.`Entry`, ct.name AS CreatureName, clt.ChanceOrQuestChance, clt.GroupId, clt.MinCount, clt.MaxCount, clt.Reference, 'creature' AS _loadEntityType, clt.`Entry` AS _loadEntityId FROM `creature_loot_template` clt LEFT JOIN `creature_template` ct ON ct.entry = clt.`Entry` WHERE clt.`Item` = ? ORDER BY clt.`Entry` LIMIT 25", [entityId]),
+        window.wowminAPI.db.query<Record<string, unknown>>("SELECT ID, LogTitle, QuestLevel, 'quest' AS _loadEntityType, ID AS _loadEntityId FROM `quest_template` WHERE RewardItem1 = ? OR RewardItem2 = ? OR RewardItem3 = ? OR RewardItem4 = ? OR RewardChoiceItemId1 = ? OR RewardChoiceItemId2 = ? OR RewardChoiceItemId3 = ? OR RewardChoiceItemId4 = ? OR RewardChoiceItemId5 = ? OR RewardChoiceItemId6 = ? LIMIT 25", [entityId, entityId, entityId, entityId, entityId, entityId, entityId, entityId, entityId, entityId]),
       ]);
 
       sections.push(
@@ -4179,8 +4171,8 @@ async function loadEntityRelations(): Promise<void> {
       );
     } else if (entityType === 'quest') {
       const [starterRows, enderRows] = await Promise.all([
-        window.electronAPI.db.query<Record<string, unknown>>("SELECT cqs.id, ct.name AS CreatureName, 'creature' AS _loadEntityType, cqs.id AS _loadEntityId FROM `creature_queststarter` cqs LEFT JOIN `creature_template` ct ON ct.entry = cqs.id WHERE cqs.`quest` = ? LIMIT 25", [entityId]),
-        window.electronAPI.db.query<Record<string, unknown>>("SELECT cqe.id, ct.name AS CreatureName, 'creature' AS _loadEntityType, cqe.id AS _loadEntityId FROM `creature_questender` cqe LEFT JOIN `creature_template` ct ON ct.entry = cqe.id WHERE cqe.`quest` = ? LIMIT 25", [entityId]),
+        window.wowminAPI.db.query<Record<string, unknown>>("SELECT cqs.id, ct.name AS CreatureName, 'creature' AS _loadEntityType, cqs.id AS _loadEntityId FROM `creature_queststarter` cqs LEFT JOIN `creature_template` ct ON ct.entry = cqs.id WHERE cqs.`quest` = ? LIMIT 25", [entityId]),
+        window.wowminAPI.db.query<Record<string, unknown>>("SELECT cqe.id, ct.name AS CreatureName, 'creature' AS _loadEntityType, cqe.id AS _loadEntityId FROM `creature_questender` cqe LEFT JOIN `creature_template` ct ON ct.entry = cqe.id WHERE cqe.`quest` = ? LIMIT 25", [entityId]),
       ]);
 
       sections.push(
@@ -4208,7 +4200,7 @@ $entityPreviewContent?.addEventListener('click', async (event) => {
 
   target.disabled = true;
   const originalLabel = target.textContent;
-  const result = await window.electronAPI.app.openExternal(url);
+  const result = await window.wowminAPI.app.openExternal(url);
   target.textContent = result.success ? 'Opened ✓' : 'Open failed';
   setTimeout(() => {
     target.textContent = originalLabel;
@@ -4294,7 +4286,7 @@ const debouncedEntitySearch = debounce(async () => {
   if (!config) return;
 
   try {
-    const result = await window.electronAPI.db.query(
+    const result = await window.wowminAPI.db.query(
       `SELECT \`${config.primaryKey}\`, \`${config.nameField}\` FROM \`${config.table}\` WHERE \`${config.nameField}\` LIKE ? ORDER BY \`${config.nameField}\` LIMIT 25`,
       [`%${term}%`]
     );
@@ -4397,7 +4389,7 @@ $entityApplySqlBtn?.addEventListener('click', async () => {
   if (!sql || sql.startsWith('--') || !dbState.connected) return;
   try {
     $entityApplySqlBtn!.disabled = true;
-    await window.electronAPI.db.execute(sql);
+    await window.wowminAPI.db.execute(sql);
     const orig = $entityApplySqlBtn!.textContent;
     $entityApplySqlBtn!.textContent = '✓ Applied!';
     setTimeout(() => {
@@ -4724,7 +4716,7 @@ function renderSAIEditor(entity: Record<string, unknown>, _config: { primaryKey:
   // Reload all rows
   document.getElementById('sai-load-all-btn')?.addEventListener('click', async () => {
     try {
-      const res = await window.electronAPI.db.query(
+      const res = await window.wowminAPI.db.query(
         `SELECT * FROM \`smart_scripts\` WHERE \`entryorguid\` = ? AND \`source_type\` = ? ORDER BY \`id\``,
         [entryorguid, sourceType]
       );
@@ -4811,12 +4803,12 @@ function wireSAIHandlers(tbody: HTMLElement, _rows: Record<string, unknown>[]): 
       const sampleRow = rows[0];
       const entryorguid = sampleRow?.['entryorguid'];
       const sourceType  = sampleRow?.['source_type'] ?? 0;
-      await window.electronAPI.db.execute(`DELETE FROM \`smart_scripts\` WHERE \`entryorguid\` = ? AND \`source_type\` = ?`, [entryorguid, sourceType]);
+      await window.wowminAPI.db.execute(`DELETE FROM \`smart_scripts\` WHERE \`entryorguid\` = ? AND \`source_type\` = ?`, [entryorguid, sourceType]);
 
       for (const r of rows) {
         const cols = Object.keys(r).map(k => `\`${k}\``).join(', ');
         const vals = Object.keys(r).map(() => '?').join(', ');
-        await window.electronAPI.db.execute(`INSERT INTO \`smart_scripts\` (${cols}) VALUES (${vals})`, Object.values(r));
+        await window.wowminAPI.db.execute(`INSERT INTO \`smart_scripts\` (${cols}) VALUES (${vals})`, Object.values(r));
       }
 
       saveBtn.textContent = '✓ Saved';
@@ -4841,7 +4833,7 @@ async function loadEntityById(): Promise<void> {
 
   dbState.entityIsNew = false;
   try {
-    const result = await window.electronAPI.db.query(`SELECT * FROM \`${cfg.table}\` WHERE \`${cfg.primaryKey}\` = ?`, [entityId]);
+    const result = await window.wowminAPI.db.query(`SELECT * FROM \`${cfg.table}\` WHERE \`${cfg.primaryKey}\` = ?`, [entityId]);
     if (result.rows && result.rows.length > 0) {
       renderEntityEditor(result.rows[0] as Record<string, unknown>, cfg);
       $entitySaveBtn!.disabled = false;
@@ -4899,7 +4891,7 @@ $entityNewBtn?.addEventListener('click', async () => {
   const cfg = ENTITY_TABLES[entityType];
   if (!cfg) return;
   try {
-    const schema = await window.electronAPI.db.getSchema(cfg.table);
+    const schema = await window.wowminAPI.db.getSchema(cfg.table);
     const emptyEntity: Record<string, unknown> = {};
     schema.forEach(f => { emptyEntity[f.name] = null; });
     dbState.entityIsNew = true;
@@ -4937,7 +4929,7 @@ $entitySaveBtn?.addEventListener('click', async () => {
       const setClauses = Object.keys(fields).filter(f => f !== cfg.primaryKey).map(f => `\`${f}\` = ?`).join(', ');
       const vals = Object.keys(fields).filter(f => f !== cfg.primaryKey).map(f => fields[f]);
       vals.push(entityId);
-      await window.electronAPI.db.execute(`UPDATE \`${cfg.table}\` SET ${setClauses} WHERE \`${cfg.primaryKey}\` = ?`, vals);
+      await window.wowminAPI.db.execute(`UPDATE \`${cfg.table}\` SET ${setClauses} WHERE \`${cfg.primaryKey}\` = ?`, vals);
       dbState.entityCurrentData = { ...fields, [cfg.primaryKey]: entityId };
       dbState.entityOriginalData = { ...fields, [cfg.primaryKey]: entityId };
       updateSQLPanel();
@@ -4953,7 +4945,7 @@ $entitySaveBtn?.addEventListener('click', async () => {
     } else {
       const cols = Object.keys(fields).map(f => `\`${f}\``).join(', ');
       const placeholders = Object.keys(fields).map(() => '?').join(', ');
-      const res = await window.electronAPI.db.execute(`INSERT INTO \`${cfg.table}\` (${cols}) VALUES (${placeholders})`, Object.values(fields));
+      const res = await window.wowminAPI.db.execute(`INSERT INTO \`${cfg.table}\` (${cols}) VALUES (${placeholders})`, Object.values(fields));
       if (res.insertId && $entityId) $entityId.value = String(res.insertId);
       if (res.insertId && !fields[cfg.primaryKey]) fields[cfg.primaryKey] = res.insertId;
       dbState.entityCurrentData = { ...fields };
@@ -4984,7 +4976,7 @@ $entityDeleteBtn?.addEventListener('click', async () => {
   const confirmed = await showModal({ title: 'Delete Entity', message: `Are you sure you want to delete this ${entityType} (ID: ${entityId})?` });
   if (!confirmed) return;
   try {
-    await window.electronAPI.db.execute(`DELETE FROM \`${cfg.table}\` WHERE \`${cfg.primaryKey}\` = ?`, [entityId]);
+    await window.wowminAPI.db.execute(`DELETE FROM \`${cfg.table}\` WHERE \`${cfg.primaryKey}\` = ?`, [entityId]);
     $entityEditorContent!.innerHTML = `<p class="text-app-success text-sm p-4">✓ Entity deleted successfully.</p>`;
     $entitySqlCode!.textContent = `DELETE FROM \`${cfg.table}\` WHERE \`${cfg.primaryKey}\` = ${entityId};`;
     $entitySaveBtn!.disabled = true;
@@ -5015,7 +5007,7 @@ document.getElementById('table-save-btn')?.addEventListener('click', async () =>
       const setClauses = Object.keys(row).filter(k => k !== pk).map(k => `\`${k}\` = ?`).join(', ');
       const values: unknown[] = Object.keys(row).filter(k => k !== pk).map(k => row[k]);
       values.push(pkVal);
-      await window.electronAPI.db.execute(`UPDATE \`${dbState.currentTable}\` SET ${setClauses} WHERE \`${pk}\` = ?`, values);
+      await window.wowminAPI.db.execute(`UPDATE \`${dbState.currentTable}\` SET ${setClauses} WHERE \`${pk}\` = ?`, values);
       saved++;
     }
     dbState.modifiedRows.clear();
@@ -5288,9 +5280,9 @@ async function refreshEconomyData(): Promise<void> {
 
   try {
     const [overview, marketSummary, auctions] = await Promise.all([
-      window.electronAPI.economy.getOverview(),
-      window.electronAPI.economy.getMarketSummary(searchTerm, limit),
-      window.electronAPI.economy.searchAuctions(searchTerm, limit),
+      window.wowminAPI.economy.getOverview(),
+      window.wowminAPI.economy.getMarketSummary(searchTerm, limit),
+      window.wowminAPI.economy.searchAuctions(searchTerm, limit),
     ]);
 
     renderEconomyOverview(overview);
@@ -5312,7 +5304,7 @@ async function connectEconomyDb(): Promise<void> {
   showResult($economyDbStatus, false, 'Connecting…');
 
   try {
-    const result = await window.electronAPI.economy.connect(config);
+    const result = await window.wowminAPI.economy.connect(config);
     if (!result.connected) {
       economyState.connected = false;
       showResult($economyDbStatus, false, result.error || 'Connection failed');
@@ -5339,7 +5331,7 @@ async function connectEconomyDb(): Promise<void> {
 async function disconnectEconomyDb(): Promise<void> {
   if (economyRefreshTimer) clearInterval(economyRefreshTimer);
   economyRefreshTimer = null;
-  await window.electronAPI.economy.disconnect();
+  await window.wowminAPI.economy.disconnect();
   economyState.connected = false;
   if ($economyDbDisconnectBtn) $economyDbDisconnectBtn.disabled = true;
   if ($economyDbConnectBtn) $economyDbConnectBtn.disabled = false;
@@ -5377,7 +5369,7 @@ $('economy-character-form')?.addEventListener('submit', async (event) => {
 
   showResult($economyCharacterResult, true, 'Loading character gold…');
   try {
-    const result = await window.electronAPI.economy.getCharacterGold(characterName);
+    const result = await window.wowminAPI.economy.getCharacterGold(characterName);
     renderEconomyCharacterResult(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -5513,7 +5505,7 @@ async function refreshSelectedBotWaypoint(): Promise<void> {
   renderMapSelectedPanel();
 
   try {
-    mapSelectedBotWaypoint = await window.electronAPI.map.getBotWaypoint({
+    mapSelectedBotWaypoint = await window.wowminAPI.map.getBotWaypoint({
       charName: player.name,
       map: player.map,
       position_x: player.position_x,
@@ -5783,7 +5775,7 @@ async function connectMapDb(): Promise<void> {
   if ($mapDbStatus) showResult($mapDbStatus, false, 'Connecting…');
   if ($mapDbConnectBtn) $mapDbConnectBtn.disabled = true;
 
-  const result = await window.electronAPI.map.connect({ host, port, username: user, password: pass, database: db });
+  const result = await window.wowminAPI.map.connect({ host, port, username: user, password: pass, database: db });
 
   if (result.connected) {
     state.mapDbConnected = true;
@@ -5799,7 +5791,7 @@ async function connectMapDb(): Promise<void> {
 }
 
 async function disconnectMapDb(): Promise<void> {
-  await window.electronAPI.map.disconnect();
+  await window.wowminAPI.map.disconnect();
   state.mapDbConnected = false;
   stopMapAutoRefresh();
   if ($mapAutoRefresh) $mapAutoRefresh.checked = false;
@@ -5819,12 +5811,12 @@ async function disconnectMapDb(): Promise<void> {
 // ── Refresh ────────────────────────────────────────────────────────────────
 let mapRefreshInFlight = false;
 async function refreshMapPositions(): Promise<void> {
-  if (!state.mapDbConnected || mapRefreshInFlight) return;
+  if ((!state.mapDbConnected && !state.connected) || mapRefreshInFlight) return;
   mapRefreshInFlight = true;
   try {
     try {
       const previousPlayers = new Map(mapAllPlayers.map((player) => [player.name, player]));
-      const snapshot = await window.electronAPI.map.getPlayerPositions(state.mapSelectedContinent);
+      const snapshot = await window.wowminAPI.map.getPlayerPositions(state.mapSelectedContinent);
       mapPreviousPositions = new Map();
       mapMovingPlayers = new Set();
       for (const player of snapshot.players) {
@@ -6692,7 +6684,7 @@ const INSTANCE_DISCOVERY_INTERVAL_MS = 10_000;
 // Opens the stream for the selected session while Instance Watch is showing
 // with auto-refresh on, and closes it otherwise.
 function syncInstanceLiveStream(): void {
-  const streamPositions = window.electronAPI.map.streamPositions;
+  const streamPositions = window.wowminAPI.map.streamPositions;
   const session = getSelectedInstanceSession();
   const wanted = streamPositions && session && session.instanceId > 0 && state.connected
     && getActiveMainTabId() === 'instances' && $instanceAutoRefresh?.checked
@@ -7070,9 +7062,9 @@ function setInstanceShowModels(enabled: boolean): void {
 // Players and creatures with a client model for their current look, posed
 // from the stream.
 // Marker colour for a player: team in battlegrounds, otherwise class (bots grey).
-function getInstancePlayerColor(player: MapPlayerPosition, battleground: boolean): string {
-  if (battleground) return player.teamId === 1 ? '#3b82f6' : player.teamId === 0 ? '#ef4444' : '#94a3b8';
-  return player.isBot ? '#94a3b8' : (CLASS_COLORS[player.class] || '#4fc3f7');
+// A player's marker colour: their side's, as in the participant list.
+function getInstancePlayerColor(player: MapPlayerPosition): string {
+  return getInstanceFactionColor(player.teamId) ?? '#94a3b8';
 }
 
 function getCreatureMarkerColor(creature: StreamCreatureSample): string {
@@ -7085,7 +7077,6 @@ function getInstanceUnitPoses(
   players: MapPlayerPosition[],
   creatures: StreamCreatureSample[],
   decisions: Map<string, StreamBotDecision>,
-  battleground: boolean,
   now: number,
   strikes: ReadonlyMap<UnitKey, StrikeKind>,
   scenery: ReadonlySet<number>,
@@ -7130,7 +7121,7 @@ function getInstanceUnitPoses(
       flying: Boolean(player.flying),
       ...combat(`p${guid}`),
       marker: {
-        color: player.alive ? getInstancePlayerColor(player, battleground) : '#475569',
+        color: player.alive ? getInstancePlayerColor(player) : '#475569',
         inCombat: player.inCombat,
         selected: player.name === selectedInstancePlayerName,
         healthPct: null,
@@ -7261,7 +7252,7 @@ function requestInstanceCreatureInfo(entries: number[]): void {
     instanceCreatureInfoTimer = null;
     const batch = [...instanceCreatureInfoQueue];
     instanceCreatureInfoQueue = new Set();
-    window.electronAPI.map.getCreatureInfo(batch).then((infos) => {
+    window.wowminAPI.map.getCreatureInfo(batch).then((infos) => {
       for (const info of infos) instanceCreatureInfo.set(info.entry, info);
     }).catch(() => {
       // Unlabelled until the next session; markers still draw.
@@ -7940,7 +7931,8 @@ function renderInstanceBattleground(battleground: MapBattlegroundState | null): 
     battleground.hordeStrategy,
   );
   const winner = battleground.status === 4
-    ? battleground.winner === 1 ? ' · Alliance won' : battleground.winner === 0 ? ' · Horde won' : ' · Draw'
+    ? battleground.winner === PVP_TEAM_ALLIANCE ? ' · Alliance won'
+      : battleground.winner === PVP_TEAM_HORDE ? ' · Horde won' : ' · Draw'
     : '';
   if ($instanceBattlegroundPhase) {
     const phaseTime = battleground.status === 2
@@ -8002,7 +7994,6 @@ function renderInstancePlayerList(session: ActiveInstanceSession | null): void {
     $instancePlayerList.innerHTML = '<p class="placeholder">No active participants</p>';
     return;
   }
-  const battleground = getSelectedBattleground();
   const floors = instanceMapAssets.get(session.mapId)?.metadata.floors ?? [];
   $instancePlayerList.innerHTML = [...session.players]
     .sort((left, right) => Number(left.isBot) - Number(right.isBot) || left.name.localeCompare(right.name))
@@ -8028,13 +8019,12 @@ function renderInstancePlayerList(session: ActiveInstanceSession | null): void {
         ? getCurrentBotAction(instanceLiveBots.get(player.name, performance.now()))
         : null;
       if (action) details.push(`Doing: ${action}`);
-      const markerColor = battleground
-        ? player.teamId === 1 ? '#3b82f6' : player.teamId === 0 ? '#ef4444' : '#94a3b8'
-        : CLASS_COLORS[player.class] || '#aaa';
+      const markerColor = getInstanceFactionColor(player.teamId) ?? '#94a3b8';
       const selected = player.name === selectedInstancePlayerName ? ' selected' : '';
+      const factionClass = player.teamId === TEAM_ALLIANCE ? ' alliance' : player.teamId === TEAM_HORDE ? ' horde' : '';
       const identity = `<span class="map-player-identity">${getRacePortraitHtml(player.race, player.gender)}${getClassIconHtml(player.class)}</span>`;
       const stateIcons = getPlayerStateIconsHtml(player);
-      return `<div class="instance-player-row${player.inCombat ? ' in-combat' : ''}${selected}" data-instance-player="${escapeHtml(player.name)}">
+      return `<div class="instance-player-row${factionClass}${player.inCombat ? ' in-combat' : ''}${selected}" data-instance-player="${escapeHtml(player.name)}">
         <span class="map-player-dot" style="background:${markerColor}"></span>
         ${identity}
         <span class="instance-player-info">
@@ -8218,7 +8208,7 @@ function drawInstanceCanvas(followPass: boolean): void {
   const sceneView = getInstanceSceneView();
   const modelIds = sceneView
     ? sceneView.setUnits(instanceShowModels && live && instanceView3d
-      ? getInstanceUnitPoses(visiblePlayers, creatures, decisions, Boolean(battleground), liveNow, strikes, sceneryGuids) : [], liveNow)
+      ? getInstanceUnitPoses(visiblePlayers, creatures, decisions, liveNow, strikes, sceneryGuids) : [], liveNow)
     : new Set<string>();
   const effectsDrawn = sceneView?.setEffects(live && instanceView3d ? instanceCombatEffects : null, combatPositions, liveNow,
     live ? instanceLiveAuras.all(liveNow) : undefined, (spellId) => instanceSpellNames.isTaunt(spellId)) ?? 0;
@@ -8271,12 +8261,14 @@ function drawInstanceCanvas(followPass: boolean): void {
 
   // An 'action' label is a bot's current action, under its name.
   // A player's label in a battleground carries their side (crest, colour).
-  // A label can also carry its unit's raid marker.
+  // A label can also carry its unit's raid marker, and a player's its
+  // side's colour outside battlegrounds.
   const pendingLabels: {
     name: string; x: number; y: number; priority: number; action?: boolean; faction?: Faction | null; marker?: number | null;
+    color?: string;
   }[] = [];
   const factionOf = (player: MapPlayerPosition): Faction | null => !battleground ? null
-    : player.teamId === 1 ? 'alliance' : player.teamId === 0 ? 'horde' : null;
+    : player.teamId === TEAM_ALLIANCE ? 'alliance' : player.teamId === TEAM_HORDE ? 'horde' : null;
   const markerScale = getCanvasPlayerIconScale(viewTransform.zoom);
   // In 3D, nameplates take the labels' place; (x, y) is over the unit's head.
   const plateStyle = isoView && instancePlatesMode !== 'labels' ? instancePlatesMode : null;
@@ -8418,7 +8410,7 @@ function drawInstanceCanvas(followPass: boolean): void {
         const projected = project(point);
         if (index === 0) ctx.moveTo(projected.x, projected.y); else ctx.lineTo(projected.x, projected.y);
       });
-      ctx.strokeStyle = player.isBot ? 'rgba(148,163,184,0.38)' : 'rgba(79,195,247,0.65)';
+      ctx.strokeStyle = `${getInstanceFactionColor(player.teamId) ?? '#94a3b8'}80`;
       ctx.lineWidth = 1.5;
       ctx.stroke();
     }
@@ -8441,7 +8433,7 @@ function drawInstanceCanvas(followPass: boolean): void {
       : model
         ? projection.worldToScreen(player.position_x, player.position_y, player.position_z + INSTANCE_PLAYER_MODEL_HEIGHT).y
         : point.y;
-    const color = getInstancePlayerColor(player, Boolean(battleground));
+    const color = getInstancePlayerColor(player);
     const markerRadius = (player.isBot ? 6 : 8) * markerScale;
     // A model has its own ring on the floor (combat and selection included).
     if (!model && !hiddenPassenger) {
@@ -8521,6 +8513,7 @@ function drawInstanceCanvas(followPass: boolean): void {
         priority: (!player.isBot ? 2 : 0) + (player.inCombat ? 1 : 0),
         faction: factionOf(player),
         marker: playerGuid !== null ? instanceLiveMarkers.get(unitKey(playerGuid, false), liveNow) : null,
+        color: getInstanceFactionColor(player.teamId) ?? undefined,
       });
       const action = getCurrentBotAction(decisions.get(player.name));
       if (action) {
@@ -8540,7 +8533,7 @@ function drawInstanceCanvas(followPass: boolean): void {
   const occupiedLabels: { left: number; right: number; top: number; bottom: number }[] = [];
   for (const label of pendingLabels.sort((left, right) => right.priority - left.priority)) {
     ctx.font = label.action ? 'italic 10px sans-serif' : '11px sans-serif';
-    ctx.fillStyle = label.action ? '#fcd34d' : label.faction ? FACTION_NAME_COLORS[label.faction] : '#e5edf7';
+    ctx.fillStyle = label.action ? '#fcd34d' : label.faction ? FACTION_NAME_COLORS[label.faction] : label.color ?? '#e5edf7';
     // Room for the raid marker and the side's crest before the name.
     const markerIcon = label.marker !== undefined && label.marker !== null ? instanceClientIcons.get(`marker-${label.marker + 1}`) : null;
     const markerRoom = markerIcon ? 14 : 0;
@@ -8810,7 +8803,7 @@ async function refreshInstanceWatcher(forceDiscovery = false): Promise<void> {
     let isDiscovery = forceDiscovery
       || !selectedFilter
       || Date.now() - instanceLastDiscoveryAt >= INSTANCE_DISCOVERY_INTERVAL_MS;
-    let snapshot = await window.electronAPI.map.getPlayerPositions(
+    let snapshot = await window.wowminAPI.map.getPlayerPositions(
       isDiscovery ? undefined : selectedFilter?.mapId,
       isDiscovery ? undefined : selectedFilter?.instanceId,
     );
@@ -8823,7 +8816,7 @@ async function refreshInstanceWatcher(forceDiscovery = false): Promise<void> {
           session.key === updatedSession.key ? updatedSession : session);
       } else {
         isDiscovery = true;
-        snapshot = await window.electronAPI.map.getPlayerPositions();
+        snapshot = await window.wowminAPI.map.getPlayerPositions();
       }
     }
 
@@ -9027,18 +9020,18 @@ $instanceView3dBtn?.addEventListener('click', () => setInstanceView3d(!instanceV
 $instanceFollowBtn?.setAttribute('aria-pressed', String(instanceFollowSelected));
 $instanceFollowBtn?.addEventListener('click', () => setInstanceFollowSelected(!instanceFollowSelected));
 $instancePathsBtn?.setAttribute('aria-pressed', String(instanceShowPaths));
-if ($instancePathsBtn && !window.electronAPI.map.streamPositions) $instancePathsBtn.disabled = true;
+if ($instancePathsBtn && !window.wowminAPI.map.streamPositions) $instancePathsBtn.disabled = true;
 $instancePathsBtn?.addEventListener('click', () => setInstanceShowPaths(!instanceShowPaths));
 $instanceTrailsBtn?.setAttribute('aria-pressed', String(instanceShowTrails));
 $instanceTrailsBtn?.addEventListener('click', () => setInstanceShowTrails(!instanceShowTrails));
 $instanceDecisionsBtn?.setAttribute('aria-pressed', String(instanceShowDecisions));
-if ($instanceDecisionsBtn && !window.electronAPI.map.streamPositions) $instanceDecisionsBtn.disabled = true;
+if ($instanceDecisionsBtn && !window.wowminAPI.map.streamPositions) $instanceDecisionsBtn.disabled = true;
 $instanceDecisionsBtn?.addEventListener('click', () => setInstanceShowDecisions(!instanceShowDecisions));
 $instanceModelsBtn?.setAttribute('aria-pressed', String(instanceShowModels));
-if ($instanceModelsBtn && !window.electronAPI.map.streamPositions) $instanceModelsBtn.disabled = true;
+if ($instanceModelsBtn && !window.wowminAPI.map.streamPositions) $instanceModelsBtn.disabled = true;
 $instanceModelsBtn?.addEventListener('click', () => setInstanceShowModels(!instanceShowModels));
 $instanceNumbersBtn?.setAttribute('aria-pressed', String(instanceShowNumbers));
-if ($instanceNumbersBtn && !window.electronAPI.map.streamPositions) $instanceNumbersBtn.disabled = true;
+if ($instanceNumbersBtn && !window.wowminAPI.map.streamPositions) $instanceNumbersBtn.disabled = true;
 $instanceNumbersBtn?.addEventListener('click', () => setInstanceShowNumbers(!instanceShowNumbers));
 // Pointer-down too, as the card redraws every second and a click could
 // straddle a redraw.
@@ -9060,7 +9053,7 @@ if ($instancePlatesMode) {
 }
 if ($instanceMobsMode) {
   $instanceMobsMode.value = instanceMobsMode;
-  $instanceMobsMode.disabled = !window.electronAPI.map.streamPositions;
+  $instanceMobsMode.disabled = !window.wowminAPI.map.streamPositions;
   $instanceMobsMode.addEventListener('change', () => setInstanceMobsMode($instanceMobsMode.value as InstanceMobsMode));
 }
 setInstanceFadeRange(instanceFadeRange, false);
@@ -9101,6 +9094,7 @@ const $sessionReplayTitle = $<HTMLElement>('session-replay-title');
 const $sessionReplaySubtitle = $<HTMLElement>('session-replay-subtitle');
 const $sessionReplayTotals = $<HTMLElement>('session-replay-totals');
 const $sessionReplayCanvas = $<HTMLCanvasElement>('session-replay-canvas');
+const $sessionReplayBotCard = $<HTMLElement>('session-replay-bot-card');
 const $sessionReplayEmpty = $<HTMLElement>('session-replay-empty');
 const $sessionReplayEvents = $<HTMLElement>('session-replay-events');
 const $sessionReplayPlayBtn = $<HTMLButtonElement>('session-replay-play-btn');
@@ -9119,6 +9113,16 @@ let sessionReplayFrame: number | null = null;
 let sessionReplayPreviousFrameAt = 0;
 let sessionReplayLastRenderAt = 0;
 let sessionReplayLastFollowedEventMs = -1;
+interface SessionReplayBotHitArea {
+  x: number;
+  y: number;
+  radius: number;
+  participant: SessionRecord['participants'][number];
+  point: SessionRoutePoint;
+  floorIndex?: number;
+}
+let sessionReplayBotHitAreas: SessionReplayBotHitArea[] = [];
+let sessionReplayPinnedBotName: string | null = null;
 
 function sessionTypeLabel(mapType: number): string {
   return ['World', 'Instance', 'Raid', 'Battleground', 'Arena'][mapType] ?? `Type ${mapType}`;
@@ -9134,8 +9138,8 @@ function renderSessionHistoryList(): void {
     const selected = entry.id === selectedSessionRecordId ? ' selected' : '';
     const occurredAt = new Date(entry.startedAt).toLocaleString();
     const outcome = formatBattlegroundOutcome(entry.battleground);
-    const outcomeClass = entry.battleground?.winner === 1 ? ' alliance'
-      : entry.battleground?.winner === 0 ? ' horde' : '';
+    const outcomeClass = entry.battleground?.winner === PVP_TEAM_ALLIANCE ? ' alliance'
+      : entry.battleground?.winner === PVP_TEAM_HORDE ? ' horde' : '';
     return `<button type="button" class="session-history-item${selected}" data-session-id="${escapeHtml(entry.id)}">
       <strong>${escapeHtml(entry.mapName)} · #${entry.instanceId}</strong>
       ${outcome ? `<span class="session-history-outcome${outcomeClass}">${escapeHtml(outcome)}</span>` : ''}
@@ -9148,7 +9152,7 @@ function renderSessionHistoryList(): void {
 async function refreshSessionHistory(): Promise<void> {
   if ($sessionHistoryStatus) $sessionHistoryStatus.textContent = 'Loading persistent session index…';
   try {
-    sessionHistoryEntries = await window.electronAPI.sessions.list();
+    sessionHistoryEntries = await window.wowminAPI.sessions.list();
     if (selectedSessionRecordId && !sessionHistoryEntries.some((entry) => entry.id === selectedSessionRecordId)) {
       stopSessionReplay();
       selectedSessionRecordId = null;
@@ -9157,7 +9161,7 @@ async function refreshSessionHistory(): Promise<void> {
     renderSessionHistoryList();
     renderSessionReplay();
     if ($sessionHistoryStatus) {
-      $sessionHistoryStatus.textContent = `${sessionHistoryEntries.length} completed session${sessionHistoryEntries.length === 1 ? '' : 's'} in persistent history`;
+      $sessionHistoryStatus.textContent = `${sessionHistoryEntries.length} completed session${sessionHistoryEntries.length === 1 ? '' : 's'} in persistent local history · Worldserver connection not required`;
     }
   } catch (error) {
     if ($sessionHistoryStatus) {
@@ -9168,12 +9172,13 @@ async function refreshSessionHistory(): Promise<void> {
 }
 
 async function selectSessionRecord(id: string): Promise<void> {
+  clearPinnedSessionReplayBotCard();
   stopSessionReplay();
   selectedSessionRecordId = id;
   renderSessionHistoryList();
   if ($sessionHistoryStatus) $sessionHistoryStatus.textContent = 'Loading session record…';
   try {
-    selectedSessionRecord = await window.electronAPI.sessions.get(id);
+    selectedSessionRecord = await window.wowminAPI.sessions.get(id);
     sessionReplayPositionMs = 0;
     if (selectedSessionRecord && !instanceMapAssets.has(selectedSessionRecord.mapId)) {
       void loadInstanceMapAsset(selectedSessionRecord.mapId);
@@ -9240,6 +9245,56 @@ function updateSessionReplayReadout(): void {
   }
 }
 
+function hideSessionReplayBotCard(force = false): void {
+  if (sessionReplayPinnedBotName && !force) return;
+  $sessionReplayBotCard?.classList.add('hidden');
+}
+
+function clearPinnedSessionReplayBotCard(): void {
+  sessionReplayPinnedBotName = null;
+  hideSessionReplayBotCard(true);
+}
+
+function renderSessionReplayBotCard(hit: SessionReplayBotHitArea, clientX: number, clientY: number): void {
+  if (!$sessionReplayBotCard || !$sessionReplayCanvas) return;
+  const { participant, point } = hit;
+  const level = participant.levelStart === participant.levelEnd
+    ? `Level ${participant.levelEnd}`
+    : `Levels ${participant.levelStart} → ${participant.levelEnd}`;
+  const identity = [CLASS_NAMES[participant.classId] ?? `Class ${participant.classId}`,
+    participant.raceId ? RACE_NAMES[participant.raceId] ?? `Race ${participant.raceId}` : null,
+    participant.gender === 0 ? 'Male' : participant.gender === 1 ? 'Female' : null,
+    level].filter(Boolean).join(' · ');
+  const states = getPlayerStateIndicators(point, 8).map((state) => state.label);
+  const status = [point.alive ? 'Alive' : 'Dead', point.inCombat && point.alive ? 'Combat' : null]
+    .filter(Boolean).join(' · ');
+  const facing = Math.round(((point.orientation * 180 / Math.PI) % 360 + 360) % 360);
+  const location = hit.floorIndex === undefined ? `Facing ${facing}°` : `Facing ${facing}° · Floor ${hit.floorIndex}`;
+  const faction = participant.teamId === TEAM_ALLIANCE ? 'Alliance'
+    : participant.teamId === TEAM_HORDE ? 'Horde' : 'Unknown faction';
+  $sessionReplayBotCard.innerHTML = `
+    <div class="session-replay-bot-card-title"><strong>${escapeHtml(participant.name)}</strong><span>Bot</span></div>
+    <div class="session-replay-bot-card-identity">${escapeHtml(identity)}</div>
+    <div class="session-replay-bot-card-time">At ${formatSessionReplayTime(point.elapsedMs)} · ${escapeHtml(status)}</div>
+    <dl>
+      <dt>Faction</dt><dd>${faction}</dd>
+      <dt>Health</dt><dd>Not recorded</dd>
+      <dt>Position</dt><dd>${point.x.toFixed(1)}, ${point.y.toFixed(1)}, ${point.z.toFixed(1)}</dd>
+      <dt>Direction</dt><dd>${escapeHtml(location)}</dd>
+      ${states.length ? `<dt>States</dt><dd>${escapeHtml(states.join(' · '))}</dd>` : ''}
+    </dl>`;
+  $sessionReplayBotCard.classList.remove('hidden');
+  const wrapperRect = $sessionReplayCanvas.parentElement?.getBoundingClientRect();
+  if (!wrapperRect) return;
+  const margin = 8;
+  const desiredLeft = clientX - wrapperRect.left + 14;
+  const desiredTop = clientY - wrapperRect.top + 14;
+  const left = Math.min(desiredLeft, wrapperRect.width - $sessionReplayBotCard.offsetWidth - margin);
+  const top = Math.min(desiredTop, wrapperRect.height - $sessionReplayBotCard.offsetHeight - margin);
+  $sessionReplayBotCard.style.left = `${Math.max(margin, left)}px`;
+  $sessionReplayBotCard.style.top = `${Math.max(margin, top)}px`;
+}
+
 function getReplayFloor(point: SessionRoutePoint, floors: DungeonMapFloor[]): DungeonMapFloor | null {
   return getParticipantDungeonFloor({
     position_x: point.x,
@@ -9268,6 +9323,8 @@ function getReplayBounds(record: SessionRecord): InstanceCoordinateBounds {
 }
 
 function renderSessionReplayCanvas(): void {
+  sessionReplayBotHitAreas = [];
+  hideSessionReplayBotCard();
   if (!$sessionReplayCanvas) return;
   const wrapper = $sessionReplayCanvas.parentElement;
   if (!wrapper) return;
@@ -9282,7 +9339,10 @@ function renderSessionReplayCanvas(): void {
   ctx.fillRect(0, 0, width, height);
   const record = selectedSessionRecord;
   $sessionReplayEmpty?.classList.toggle('hidden', Boolean(record));
-  if (!record) return;
+  if (!record) {
+    clearPinnedSessionReplayBotCard();
+    return;
+  }
 
   if (!instanceMapAssets.has(record.mapId) && !instanceMapAssetLoads.has(record.mapId)) {
     void loadInstanceMapAsset(record.mapId);
@@ -9315,8 +9375,7 @@ function renderSessionReplayCanvas(): void {
 
   const replayMarkerScale = getCanvasPlayerIconScale();
   const participantColors = new Map(record.participants.map((participant) => [participant.name,
-    participant.teamId === 1 ? '#3b82f6' : participant.teamId === 0 ? '#ef4444'
-      : CLASS_COLORS[participant.classId] ?? '#94a3b8']));
+    getInstanceFactionColor(participant.teamId) ?? CLASS_COLORS[participant.classId] ?? '#94a3b8']));
   for (const participant of record.participants) {
     const route = visiblePoints.filter((point) => point.name === participant.name
       && (!floor || getReplayFloor(point, floors)?.id === floor.id));
@@ -9352,6 +9411,16 @@ function renderSessionReplayCanvas(): void {
       (participant.isBot ? 7 : 9) * replayMarkerScale);
     drawCanvasStateIcon(ctx, current, projected.x + 4 * replayMarkerScale, projected.y - 11 * replayMarkerScale,
       replayMarkerScale);
+    if (participant.isBot) {
+      sessionReplayBotHitAreas.push({
+        x: projected.x,
+        y: projected.y,
+        radius: Math.max(10, 8 * replayMarkerScale),
+        participant,
+        point: current,
+        floorIndex: getReplayFloor(current, floors)?.floorIndex,
+      });
+    }
   }
   ctx.strokeStyle = 'rgba(255,255,255,0.18)';
   ctx.strokeRect(viewport.x + 0.5, viewport.y + 0.5, viewport.width - 1, viewport.height - 1);
@@ -9367,8 +9436,8 @@ function renderSessionReplay(): void {
     $sessionReplaySubtitle.textContent = record
       ? `${outcome ? `${outcome} · ` : ''}${sessionTypeLabel(record.mapType)} · ${record.participants.length} participants · ${new Date(record.startedAt).toLocaleString()}`
       : 'Completed instances, raids, battlegrounds, and arenas appear here.';
-    $sessionReplaySubtitle.classList.toggle('alliance', record?.battleground?.winner === 1);
-    $sessionReplaySubtitle.classList.toggle('horde', record?.battleground?.winner === 0);
+    $sessionReplaySubtitle.classList.toggle('alliance', record?.battleground?.winner === PVP_TEAM_ALLIANCE);
+    $sessionReplaySubtitle.classList.toggle('horde', record?.battleground?.winner === PVP_TEAM_HORDE);
   }
   if ($sessionReplaySeek) {
     $sessionReplaySeek.max = String(record?.elapsedMs ?? 0);
@@ -9411,6 +9480,7 @@ function playSessionReplay(): void {
   if (sessionReplayPositionMs >= selectedSessionRecord.elapsedMs) sessionReplayPositionMs = 0;
   sessionReplayLastFollowedEventMs = -1;
   sessionReplayPlaying = true;
+  clearPinnedSessionReplayBotCard();
   sessionReplayPreviousFrameAt = 0;
   renderSessionReplay();
   sessionReplayFrame = requestAnimationFrame(sessionReplayTick);
@@ -9445,7 +9515,7 @@ $sessionHistoryPurgeBtn?.addEventListener('click', async () => {
 
   $sessionHistoryPurgeBtn.disabled = true;
   try {
-    const purged = await window.electronAPI.sessions.purgeCompleted();
+    const purged = await window.wowminAPI.sessions.purgeCompleted();
     stopSessionReplay();
     selectedSessionRecordId = null;
     selectedSessionRecord = null;
@@ -9477,6 +9547,42 @@ $sessionReplaySeek?.addEventListener('input', () => {
   updateSessionReplayReadout();
   renderSessionReplayCanvas();
 });
+function getSessionReplayBotHit(event: MouseEvent): SessionReplayBotHitArea | undefined {
+  if (!$sessionReplayCanvas) return undefined;
+  const rect = $sessionReplayCanvas.getBoundingClientRect();
+  const x = (event.clientX - rect.left) * $sessionReplayCanvas.width / rect.width;
+  const y = (event.clientY - rect.top) * $sessionReplayCanvas.height / rect.height;
+  return sessionReplayBotHitAreas
+    .map((area) => ({ area, distance: Math.hypot(area.x - x, area.y - y) }))
+    .filter(({ area, distance }) => distance <= area.radius)
+    .sort((left, right) => left.distance - right.distance)[0]?.area;
+}
+
+$sessionReplayCanvas?.addEventListener('mousemove', (event) => {
+  if (sessionReplayPlaying) {
+    clearPinnedSessionReplayBotCard();
+    return;
+  }
+  if (sessionReplayPinnedBotName) return;
+  const hit = getSessionReplayBotHit(event);
+  if (hit) renderSessionReplayBotCard(hit, event.clientX, event.clientY);
+  else hideSessionReplayBotCard();
+});
+$sessionReplayCanvas?.addEventListener('click', (event) => {
+  if (sessionReplayPlaying) return;
+  const hit = getSessionReplayBotHit(event);
+  if (!hit) {
+    clearPinnedSessionReplayBotCard();
+    return;
+  }
+  sessionReplayPinnedBotName = hit.participant.name;
+  renderSessionReplayBotCard(hit, event.clientX, event.clientY);
+});
+$sessionReplayCanvas?.addEventListener('mouseleave', () => hideSessionReplayBotCard());
+document.querySelector('.session-replay-main')?.addEventListener('click', (event) => {
+  if (event.target === $sessionReplayCanvas) return;
+  clearPinnedSessionReplayBotCard();
+});
 
 const sessionReplayResizeObserver = new ResizeObserver(() => {
   if (getActiveMainTabId() === 'history') renderSessionReplayCanvas();
@@ -9484,6 +9590,7 @@ const sessionReplayResizeObserver = new ResizeObserver(() => {
 const sessionReplayCanvasWrapper = document.querySelector('.session-replay-canvas-wrapper');
 if (sessionReplayCanvasWrapper) sessionReplayResizeObserver.observe(sessionReplayCanvasWrapper);
 renderSessionReplay();
+void refreshSessionHistory();
 
 void loadPlayerIconManifest().then((loaded) => {
   if (!loaded) return;

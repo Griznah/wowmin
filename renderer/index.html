@@ -2,8 +2,6 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy"
-      content="default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self' 'wasm-unsafe-eval'; img-src 'self' https: data: blob:; connect-src 'self' blob:" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>WoW Admin – AzerothCore SOAP Console</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -45,10 +43,13 @@
       <button type="button" role="tab" class="tab" id="tab-btn-instances" data-tab="instances" aria-selected="false" aria-controls="tab-instances" tabindex="-1" title="Instance Watch (Alt+7)">
         <span class="tab-icon">◉</span> <span class="tab-label">Instance Watch</span>
       </button>
-      <button type="button" role="tab" class="tab" id="tab-btn-history" data-tab="history" aria-selected="false" aria-controls="tab-history" tabindex="-1" title="Session History (Alt+8)">
+      <button type="button" role="tab" class="tab" id="tab-btn-dungeon-clear" data-tab="dungeon-clear" aria-selected="false" aria-controls="tab-dungeon-clear" tabindex="-1" title="Dungeon Clear (Alt+8)">
+        <span class="tab-icon">⚔</span> <span class="tab-label">Dungeon Clear</span>
+      </button>
+      <button type="button" role="tab" class="tab" id="tab-btn-history" data-tab="history" aria-selected="false" aria-controls="tab-history" tabindex="-1" title="Session History (Alt+9)">
         <span class="tab-icon">◷</span> <span class="tab-label">Session History</span>
       </button>
-      <button type="button" role="tab" class="tab" id="tab-btn-economy" data-tab="economy" aria-selected="false" aria-controls="tab-economy" tabindex="-1" title="Economy (Alt+9)">
+      <button type="button" role="tab" class="tab" id="tab-btn-economy" data-tab="economy" aria-selected="false" aria-controls="tab-economy" tabindex="-1" title="Economy">
         <span class="tab-icon">💰</span> <span class="tab-label">Economy</span>
       </button>
       <button type="button" role="tab" class="tab" id="tab-btn-logs" data-tab="logs" aria-selected="false" aria-controls="tab-logs" tabindex="-1" title="Logs">
@@ -85,17 +86,6 @@
         </div>
       </div>
       
-      <div id="update-banner" class="update-banner" data-status="checking">
-        <div class="update-banner-copy">
-          <span class="update-banner-label">App</span>
-          <span id="app-version" class="update-banner-version">v--</span>
-          <span id="update-status-text" class="update-banner-text">Checking GitHub for updates…</span>
-        </div>
-        <div class="update-banner-actions">
-          <button id="btn-check-updates" class="btn btn-small" title="Check GitHub for a newer release">⟳ Check</button>
-          <button id="btn-open-update" class="btn btn-small hidden" title="Open the latest GitHub release">↗ Open Release</button>
-        </div>
-      </div>
     </header>
 
     <div class="content-area">
@@ -1326,6 +1316,33 @@ SELECT * FROM creature_template WHERE entry = 1;" spellcheck="false"></textarea>
   </div>
 
   <!-- ═══════════════════════════════════════════════════════ -->
+  <!-- TAB: Dungeon Clear                                     -->
+  <!-- ═══════════════════════════════════════════════════════ -->
+  <div id="tab-dungeon-clear" role="tabpanel" class="tab-content dungeon-clear-tab" aria-labelledby="tab-btn-dungeon-clear" aria-hidden="true">
+    <div class="dungeon-clear-toolbar">
+      <div>
+        <h2>Dungeon Clear</h2>
+        <span id="dungeon-clear-status">Open this tab to load DC Test Deck.</span>
+      </div>
+      <div class="dungeon-clear-actions">
+        <button id="dungeon-clear-reload" type="button" class="btn btn-small">⟳ Reload</button>
+        <button id="dungeon-clear-open" type="button" class="btn btn-small">↗ Open directly</button>
+      </div>
+    </div>
+    <div class="dungeon-clear-frame-wrap">
+      <div id="dungeon-clear-loading" class="dungeon-clear-message">
+        <strong>Loading DC Test Deck…</strong>
+        <span>If it does not appear, verify Test Deck is running and allows this WoWMin origin.</span>
+      </div>
+      <iframe id="dungeon-clear-frame" title="DC Test Deck" referrerpolicy="no-referrer" allow="clipboard-write" hidden></iframe>
+    </div>
+    <div class="dungeon-clear-help">
+      A blank or blocked page usually means Test Deck is unavailable or its <code>allowed_frame_ancestors</code> does not include this WoWMin origin.
+      Use <strong>Open directly</strong> to inspect the configured endpoint.
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════════════ -->
   <!-- TAB: Session History                                   -->
   <!-- ═══════════════════════════════════════════════════════ -->
   <div id="tab-history" role="tabpanel" class="tab-content" aria-labelledby="tab-btn-history" aria-hidden="true">
@@ -1356,6 +1373,7 @@ SELECT * FROM creature_template WHERE entry = 1;" spellcheck="false"></textarea>
           <div class="session-replay-map-panel">
             <div class="instance-canvas-wrapper session-replay-canvas-wrapper">
               <canvas id="session-replay-canvas"></canvas>
+              <div id="session-replay-bot-card" class="session-replay-bot-card hidden" role="tooltip"></div>
               <div id="session-replay-empty" class="instance-watch-empty">
                 <strong>No session selected</strong>
                 <span>Select a completed run from the history list.</span>
@@ -1386,7 +1404,7 @@ SELECT * FROM creature_template WHERE entry = 1;" spellcheck="false"></textarea>
             </div>
           </aside>
         </div>
-        <div id="session-history-status" class="map-statusbar">Persistent JSON history is stored by the WoWMin service.</div>
+        <div id="session-history-status" class="map-statusbar">Loading local session history… A worldserver connection is not required.</div>
       </section>
     </div>
   </div>

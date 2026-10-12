@@ -1,4 +1,4 @@
-import type { ConnectionProfile } from '../../../src/types/electron';
+import type { ConnectionProfile } from '../../../src/types/api';
 
 // ── Application State Types ─────────────────────────────────────────────
 

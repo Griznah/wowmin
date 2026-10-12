@@ -4,7 +4,7 @@ import type {
   StreamAppearance, StreamAppearanceUpdate, StreamAuraCategory, StreamBotDecision, StreamCombatEvent, StreamCombatEventKind,
   StreamCombatEventUpdate, StreamDebuff, StreamDebuffUpdate, StreamGameObject, StreamGameObjectUpdate, StreamMarker, StreamMarkerUpdate, StreamUnitDebuffs, StreamPassenger, StreamPassengerUpdate, StreamUnitAuras, StreamUnitAuraUpdate, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame, StreamListeners,
   StreamPath, StreamPathUpdate, StreamPlayerSample, StreamStatus,
-} from './types/electron';
+} from './types/api';
 
 // Receives the mod-wowmin-telemetry UDP position stream. A session streams only
 // while it is watched: every RENEW_INTERVAL_MS the subscription is renewed with

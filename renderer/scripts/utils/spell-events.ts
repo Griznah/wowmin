@@ -1,4 +1,4 @@
-import type { StreamAuraCategory, StreamCombatEvent, StreamCombatEventUpdate } from '../../../src/types/electron';
+import type { StreamAuraCategory, StreamCombatEvent, StreamCombatEventUpdate } from '../../../src/types/api';
 
 import { LIVE_RENDER_DELAY_MS } from './live-positions';
 

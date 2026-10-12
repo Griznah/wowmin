@@ -1,12 +1,14 @@
 import './load-env';
-import { telemetryStream } from './main';
+import { APP_VERSION, getBackendConnectionStatus, initializeApiBackend, initializeManagedConnections, shutdownApiBackend, telemetryStream } from './api-backend';
+import { apiRouter } from './api-router';
 import { createHash, timingSafeEqual } from 'crypto';
 import * as fs from 'fs';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import * as path from 'path';
-import { app, ipcMain } from 'electron';
 import { inspectLocalLogs, readLocalLogTail } from './local-logs';
 import { parseUnitModelPath, UnitModels } from './unit-models';
+import { buildContentSecurityPolicy, deriveDungeonClearUrl, normalizeDungeonClearUrl } from './dungeon-clear-config';
+import type { DbConfig, SoapConfig } from './types/api';
 
 const host = process.env.WOWMIN_HOST || '127.0.0.1';
 const port = Number(process.env.WOWMIN_PORT || '3000');
@@ -15,17 +17,38 @@ const password = process.env.WOWMIN_PASSWORD || '';
 const projectRoot = path.resolve(__dirname, '..');
 const maxRequestBytes = 2 * 1024 * 1024;
 const managed = Boolean(process.env.WOWMIN_SOAP_USERNAME && process.env.WOWMIN_SOAP_PASSWORD && process.env.WOWMIN_DB_PASSWORD);
+const configuredDungeonClearUrl = normalizeDungeonClearUrl(process.env.WOWMIN_DUNGEON_CLEAR_URL);
+
+function managedSoapConfig(): SoapConfig {
+  return {
+    host: process.env.WOWMIN_SOAP_HOST || '127.0.0.1',
+    port: Number(process.env.WOWMIN_SOAP_PORT || 7878),
+    username: process.env.WOWMIN_SOAP_USERNAME || '',
+    password: process.env.WOWMIN_SOAP_PASSWORD || '',
+  };
+}
+
+function managedDatabaseConfig(prefix: 'WORLD' | 'CHARACTERS' | 'ECONOMY', database: string): DbConfig {
+  return {
+    host: process.env[`WOWMIN_${prefix}_DB_HOST`] || process.env.WOWMIN_DB_HOST || '127.0.0.1',
+    port: Number(process.env[`WOWMIN_${prefix}_DB_PORT`] || process.env.WOWMIN_DB_PORT || 3306),
+    username: process.env[`WOWMIN_${prefix}_DB_USERNAME`] || process.env.WOWMIN_DB_USERNAME || 'acore',
+    password: process.env[`WOWMIN_${prefix}_DB_PASSWORD`] ?? process.env.WOWMIN_DB_PASSWORD ?? '',
+    database,
+  };
+}
 
 function managedConfig(channel: string, args: unknown[]): unknown[] {
   if (!managed) return args;
-  if (channel === 'soap:connect') return [{ host: process.env.WOWMIN_SOAP_HOST || '127.0.0.1',
-    port: Number(process.env.WOWMIN_SOAP_PORT || 7878), username: process.env.WOWMIN_SOAP_USERNAME,
-    password: process.env.WOWMIN_SOAP_PASSWORD }];
+  if (channel === 'soap:connect') return [managedSoapConfig()];
   if (['db:connect', 'db:testConnection', 'map:connect', 'economy:connect'].includes(channel)) {
-    const database = channel === 'db:connect' || channel === 'db:testConnection'
-      ? process.env.WOWMIN_WORLD_DB || 'acore_world' : process.env.WOWMIN_CHARACTERS_DB || 'acore_characters';
-    return [{ host: process.env.WOWMIN_DB_HOST || '127.0.0.1', port: Number(process.env.WOWMIN_DB_PORT || 3306),
-      username: process.env.WOWMIN_DB_USERNAME || 'acore', password: process.env.WOWMIN_DB_PASSWORD, database }];
+    const worldDatabase = process.env.WOWMIN_WORLD_DB || 'acore_world';
+    const charactersDatabase = process.env.WOWMIN_CHARACTERS_DB || 'acore_characters';
+    return [channel === 'db:connect' || channel === 'db:testConnection'
+      ? managedDatabaseConfig('WORLD', worldDatabase)
+      : channel === 'economy:connect'
+        ? managedDatabaseConfig('ECONOMY', process.env.WOWMIN_ECONOMY_DB || charactersDatabase)
+        : managedDatabaseConfig('CHARACTERS', charactersDatabase)];
   }
   return args;
 }
@@ -62,7 +85,18 @@ const mimeTypes: Record<string, string> = {
   '.txt': 'text/plain; charset=utf-8',
 };
 
-function setSecurityHeaders(response: ServerResponse): void {
+function requestScheme(request: IncomingMessage): 'http' | 'https' {
+  const forwarded = request.headers['x-forwarded-proto'];
+  const value = Array.isArray(forwarded) ? forwarded[0] : forwarded?.split(',')[0];
+  return value?.trim().toLowerCase() === 'https' ? 'https' : 'http';
+}
+
+function dungeonClearUrl(request: IncomingMessage): string {
+  return configuredDungeonClearUrl || deriveDungeonClearUrl(requestScheme(request), request.headers.host);
+}
+
+function setSecurityHeaders(request: IncomingMessage, response: ServerResponse): void {
+  response.setHeader('Content-Security-Policy', buildContentSecurityPolicy(dungeonClearUrl(request)));
   response.setHeader('X-Content-Type-Options', 'nosniff');
   response.setHeader('X-Frame-Options', 'DENY');
   response.setHeader('Referrer-Policy', 'same-origin');
@@ -159,6 +193,18 @@ function serveFile(request: IncomingMessage, response: ServerResponse, filePath:
   });
 }
 
+const apiErrorLogTimes = new Map<string, number>();
+const API_ERROR_LOG_INTERVAL_MS = 30000;
+
+function logApiError(channel: string, message: string): void {
+  if (/not connected|is connecting/i.test(message)) return;
+  const key = `${channel}:${message}`;
+  const now = Date.now();
+  if (now - (apiErrorLogTimes.get(key) ?? 0) < API_ERROR_LOG_INTERVAL_MS) return;
+  apiErrorLogTimes.set(key, now);
+  console.error(`API request failed [${channel}]: ${message}`);
+}
+
 function hasValidOrigin(request: IncomingMessage): boolean {
   const origin = request.headers.origin;
   if (!origin) return true;
@@ -170,11 +216,11 @@ function hasValidOrigin(request: IncomingMessage): boolean {
 }
 
 const server = createServer(async (request, response) => {
-  setSecurityHeaders(response);
+  setSecurityHeaders(request, response);
   const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
 
   if (url.pathname === '/healthz') {
-    sendJson(response, 200, { status: 'ok', version: app.getVersion() });
+    sendJson(response, 200, { status: 'ok', version: APP_VERSION });
     return;
   }
 
@@ -224,7 +270,12 @@ const server = createServer(async (request, response) => {
   }
 
   if (url.pathname === '/api/bootstrap') {
-    sendJson(response, 200, { managed, localLogs: managed });
+    sendJson(response, 200, {
+      managed,
+      localLogs: managed,
+      dungeonClearUrl: dungeonClearUrl(request),
+      connections: getBackendConnectionStatus(),
+    });
     return;
   }
 
@@ -242,14 +293,16 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    let requestChannel = 'unknown';
     try {
       const body = await readJson(request) as { channel?: unknown; args?: unknown };
       if (typeof body.channel !== 'string' || !Array.isArray(body.args)) {
         sendJson(response, 400, { error: 'Expected channel and args.' });
         return;
       }
-      if (managed && (body.channel.startsWith('config:') || body.channel.startsWith('update:'))) {
-        sendJson(response, 403, { error: 'Profiles and upstream updates are disabled in managed web mode.' });
+      requestChannel = body.channel;
+      if (managed && body.channel.startsWith('config:')) {
+        sendJson(response, 403, { error: 'Profiles are disabled in managed web mode.' });
         return;
       }
       if (managed && body.channel === 'logs:inspect') {
@@ -260,12 +313,11 @@ const server = createServer(async (request, response) => {
         sendJson(response, 200, { ok: true, result: await readLocalLogTail(String(body.args[1]), Number(body.args[2])) });
         return;
       }
-      const webIpc = ipcMain as unknown as { invoke: (channel: string, args: unknown[]) => Promise<unknown> };
-      const result = await webIpc.invoke(body.channel, managedConfig(body.channel, body.args));
+      const result = await apiRouter.invoke(body.channel, managedConfig(body.channel, body.args));
       sendJson(response, 200, { ok: true, result });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.error('API request failed:', message);
+      logApiError(requestChannel, message);
       sendJson(response, 400, { ok: false, error: message });
     }
     return;
@@ -299,14 +351,29 @@ const server = createServer(async (request, response) => {
   serveFile(request, response, filePath);
 });
 
-app.whenReady().then(() => {
-  server.listen(port, host, () => {
-    console.log(`WoW Admin web service listening on http://${host}:${port}`);
-  });
+initializeApiBackend(process.env.WOWMIN_DATA_DIR || path.join(process.cwd(), '.wowmin-data'));
+if (managed) {
+  const charactersDatabase = process.env.WOWMIN_CHARACTERS_DB || 'acore_characters';
+  void initializeManagedConnections({
+    soap: managedSoapConfig(),
+    worldDatabase: managedDatabaseConfig('WORLD', process.env.WOWMIN_WORLD_DB || 'acore_world'),
+    mapDatabase: managedDatabaseConfig('CHARACTERS', charactersDatabase),
+    economyDatabase: managedDatabaseConfig('ECONOMY', process.env.WOWMIN_ECONOMY_DB || charactersDatabase),
+    initialRetryMs: Number(process.env.WOWMIN_CONNECTION_RETRY_INITIAL_MS) || 5000,
+    maximumRetryMs: Number(process.env.WOWMIN_CONNECTION_RETRY_MAX_MS) || 60000,
+    healthCheckMs: Number(process.env.WOWMIN_CONNECTION_HEALTH_MS) || 30000,
+  }).catch((error) => console.error('Managed connection startup failed:', error));
+}
+server.listen(port, host, () => {
+  console.log(`WoW Admin web service listening on http://${host}:${port}`);
 });
 
+let shuttingDown = false;
 function shutdown(): void {
-  server.close(() => process.exit(0));
+  if (shuttingDown) return;
+  shuttingDown = true;
+  server.close();
+  void shutdownApiBackend().finally(() => process.exit(0));
   setTimeout(() => process.exit(1), 5000).unref();
 }
 process.on('SIGINT', shutdown);

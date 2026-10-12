@@ -1,7 +1,7 @@
 import type {
   MapPlayerPosition, StreamAppearance, StreamAppearanceUpdate, StreamBotDecision, StreamBotUpdate, StreamCreatureSample, StreamCreatureUpdate, StreamFrame,
   StreamDebuffUpdate, StreamGameObject, StreamGameObjectUpdate, StreamMarker, StreamMarkerUpdate, StreamPassenger, StreamPassengerUpdate, StreamPath, StreamPathUpdate, StreamPlayerSample, StreamUnitAuraUpdate,
-} from '../../../src/types/electron';
+} from '../../../src/types/api';
 
 // Buffers stream samples per player and interpolates between them, drawing a
 // little in the past so there is always a newer sample to move towards.

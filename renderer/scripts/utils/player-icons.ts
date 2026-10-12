@@ -1,4 +1,4 @@
-import type { MapPlayerPosition } from '../../../src/types/electron';
+import type { MapPlayerPosition } from '../../../src/types/api';
 import { CLASS_NAMES, RACE_ICONS, RACE_NAMES, escapeHtml } from './helpers';
 
 export type PlayerStateIconKey = 'spirit' | 'death' | 'resurrect' | 'flag' | 'sap' | 'stun' | 'taxi' | 'mounted' | 'combat';

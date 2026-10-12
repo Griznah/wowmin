@@ -1,4 +1,4 @@
-import type { CreatureInfo, MapBattlegroundState, MapPlayerPosition, StreamCreatureSample } from '../../../src/types/electron';
+import type { CreatureInfo, MapBattlegroundState, MapPlayerPosition, StreamCreatureSample } from '../../../src/types/api';
 import { getMapName } from './helpers';
 
 export interface ActiveInstanceSession {
@@ -65,6 +65,12 @@ const INSTANCE_MAP_PROFILES = new Map<number, InstanceMapProfile>([
     source: 'WorldMapArea.dbc:443',
   }],
 ]);
+
+export function getInstanceFactionColor(teamId: number | undefined): string | null {
+  if (teamId === 0) return '#3b82f6';
+  if (teamId === 1) return '#ef4444';
+  return null;
+}
 
 export function getBattlegroundStatusLabel(status: number): string {
   return ['Inactive', 'Queued', 'Preparing', 'In progress', 'Complete'][status] ?? `Status ${status}`;

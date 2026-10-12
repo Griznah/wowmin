@@ -1,4 +1,4 @@
-import type { CharacterInventoryItemRow } from '../../../src/types/electron';
+import type { CharacterInventoryItemRow } from '../../../src/types/api';
 import { escapeHtml } from '../utils/helpers';
 
 /** WoW item quality → hex (WotLK / Wowhead-style). */

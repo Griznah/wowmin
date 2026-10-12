@@ -1,37 +1,36 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell, IpcMainInvokeEvent } from 'electron';
 import * as path from 'path';
+import { apiRouter, ApiRequestContext } from './api-router';
 import packageJson from '../package.json';
 import { SoapClient } from './soap-client';
 import { ConfigStore } from './config-store';
 import { getDbService, DatabaseService } from './database/db-service';
-import { SoapConfig, SoapResult, ConnectionProfile, DbConfig, DbConnectionState, QueryResult, FieldInfo, UpdateCheckResult, EntityMediaPreviewRequest, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, LogMonitorFileTailResult, MapPlayerPosition, MapPlayerSnapshot, MapOnlineCounts, OnlinePlayerRow, MapBotWaypointRequest, MapBotWaypoint, CreatureInfo, CharacterInventoryResult, CharacterInventoryItemRow, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow, SessionIndexEntry, SessionRecord } from './types/electron';
+import { SoapConfig, SoapResult, ConnectionProfile, DbConfig, DbConnectionState, QueryResult, FieldInfo, EntityMediaPreviewRequest, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, LogMonitorFileTailResult, MapPlayerPosition, MapPlayerSnapshot, MapOnlineCounts, OnlinePlayerRow, MapBotWaypointRequest, MapBotWaypoint, CharacterInventoryResult, CharacterInventoryItemRow, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow, SessionIndexEntry, SessionRecord, BackendConnectionStatus, ManagedServiceName, CreatureInfo } from './types/api';
+import { ManagedConnectionLifecycle } from './managed-connection-lifecycle';
 import { inspectRemoteLogs, readRemoteLogTail } from './log-monitor-service';
 import { buildLiveMapTelemetryCommand, parseLiveMapTelemetrySnapshot } from './live-map-telemetry';
 import { SessionRecorder } from './session-recorder';
 import { TelemetryStream } from './telemetry-stream';
 
-const isMac = process.platform === 'darwin';
-const isWin = process.platform === 'win32';
+export const APP_NAME = 'WoW Admin';
+export const APP_VERSION = packageJson.version;
+const DEFAULT_DATA_DIR = path.resolve(process.cwd(), '.wowmin-data');
 
-let mainWindow: BrowserWindow | null = null;
 let soapClient: SoapClient | null = null;
 let configStore: ConfigStore | null = null;
 const dbService = getDbService();
 const mapDbService = new DatabaseService();
 const economyDbService = new DatabaseService();
-const UPDATE_CACHE_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_GITHUB_REPO = 'scarecr0w12/wowmin';
-
-let updateCheckCache: { checkedAt: number; result: UpdateCheckResult } | null = null;
 const ENTITY_MEDIA_CACHE_TTL_MS = 60 * 60 * 1000;
 const entityMediaCache = new Map<string, { expiresAt: number; result: EntityMediaPreviewResult }>();
 const sessionRecorder = new SessionRecorder({
-  dataDir: process.env.WOWMIN_DATA_DIR || app.getPath('userData'),
+  dataDir: process.env.WOWMIN_DATA_DIR || DEFAULT_DATA_DIR,
   mapAssetIndexPath: path.resolve(__dirname, '..', 'assets', 'instances', 'index.json'),
   routeIntervalMs: Number(process.env.WOWMIN_SESSION_ROUTE_INTERVAL_MS) || 5000,
   completionGraceMs: Number(process.env.WOWMIN_SESSION_COMPLETION_GRACE_MS) || 15000,
 });
 let telemetryPollTimer: ReturnType<typeof setInterval> | null = null;
+let managedConnections: ManagedConnectionLifecycle | null = null;
 let telemetryPollInFlight: Promise<MapPlayerSnapshot | null> | null = null;
 let latestTelemetrySnapshot: MapPlayerSnapshot | null = null;
 const telemetryPollIntervalMs = Math.max(500, Number(process.env.WOWMIN_TELEMETRY_POLL_MS) || 1000);
@@ -45,19 +44,15 @@ export const telemetryStream = new TelemetryStream(
   Number(process.env.WOWMIN_STREAM_PORT) || 7979,
 );
 
-const NAVIGATE_TAB_ITEMS: { label: string; tab: string }[] = [
-  { label: 'Dashboard', tab: 'dashboard' },
-  { label: 'Players', tab: 'players' },
-  { label: 'Accounts', tab: 'accounts' },
-  { label: 'Tickets', tab: 'tickets' },
-  { label: 'Database', tab: 'database' },
-  { label: 'Live Map', tab: 'map' },
-  { label: 'Instance Watch', tab: 'instances' },
-  { label: 'Session History', tab: 'history' },
-  { label: 'Economy', tab: 'economy' },
-  { label: 'Logs', tab: 'logs' },
-  { label: 'Console', tab: 'console' },
-];
+export interface ManagedBackendConfig {
+  soap: SoapConfig;
+  worldDatabase: DbConfig;
+  mapDatabase: DbConfig;
+  economyDatabase: DbConfig;
+  initialRetryMs?: number;
+  maximumRetryMs?: number;
+  healthCheckMs?: number;
+}
 
 function getGithubRepoSlug(): string {
   const metadataSources = [packageJson.homepage, (packageJson as { repository?: string | { url?: string } }).repository]
@@ -75,72 +70,6 @@ function getGithubRepoSlug(): string {
   }
 
   return DEFAULT_GITHUB_REPO;
-}
-
-function normalizeVersion(version: string): string {
-  return version.trim().replace(/^v/i, '');
-}
-
-function compareVersionIdentifiers(left: string, right: string): number {
-  const leftNumeric = /^\d+$/.test(left);
-  const rightNumeric = /^\d+$/.test(right);
-
-  if (leftNumeric && rightNumeric) {
-    return Number(left) - Number(right);
-  }
-
-  if (leftNumeric) return -1;
-  if (rightNumeric) return 1;
-  return left.localeCompare(right);
-}
-
-function compareVersions(current: string, latest: string): number {
-  const parseVersion = (value: string): { core: number[]; prerelease: string[] } => {
-    const normalized = normalizeVersion(value);
-    const [corePart, prereleasePart = ''] = normalized.split('-', 2);
-    return {
-      core: corePart.split('.').map((part) => Number.parseInt(part, 10) || 0),
-      prerelease: prereleasePart ? prereleasePart.split('.') : [],
-    };
-  };
-
-  const left = parseVersion(current);
-  const right = parseVersion(latest);
-  const maxCoreLength = Math.max(left.core.length, right.core.length);
-
-  for (let index = 0; index < maxCoreLength; index += 1) {
-    const diff = (left.core[index] ?? 0) - (right.core[index] ?? 0);
-    if (diff !== 0) {
-      return diff;
-    }
-  }
-
-  if (left.prerelease.length === 0 && right.prerelease.length === 0) {
-    return 0;
-  }
-
-  if (left.prerelease.length === 0) return 1;
-  if (right.prerelease.length === 0) return -1;
-
-  const maxPrereleaseLength = Math.max(left.prerelease.length, right.prerelease.length);
-  for (let index = 0; index < maxPrereleaseLength; index += 1) {
-    const leftPart = left.prerelease[index];
-    const rightPart = right.prerelease[index];
-
-    if (leftPart === undefined) return -1;
-    if (rightPart === undefined) return 1;
-
-    const diff = compareVersionIdentifiers(leftPart, rightPart);
-    if (diff !== 0) {
-      return diff;
-    }
-  }
-
-  return 0;
-}
-
-function getFallbackReleaseUrl(): string {
-  return `https://github.com/${getGithubRepoSlug()}/releases`;
 }
 
 function buildWowheadEntityUrl(entityType: string, id: string): string | null {
@@ -222,7 +151,7 @@ async function getEntityMediaPreview(request: EntityMediaPreviewRequest): Promis
       headers: {
         Accept: 'text/html,application/xhtml+xml',
         'Accept-Language': 'en-US,en;q=0.9',
-        'User-Agent': `${app.getName()}/${app.getVersion()} (+https://github.com/${getGithubRepoSlug()})`,
+        'User-Agent': `${APP_NAME}/${APP_VERSION} (+https://github.com/${getGithubRepoSlug()})`,
       },
     });
 
@@ -267,219 +196,7 @@ async function getEntityMediaPreview(request: EntityMediaPreviewRequest): Promis
   }
 }
 
-async function checkForUpdates(force = false): Promise<UpdateCheckResult> {
-  const currentVersion = app.getVersion();
-
-  if (!force && updateCheckCache && Date.now() - updateCheckCache.checkedAt < UPDATE_CACHE_TTL_MS) {
-    return updateCheckCache.result;
-  }
-
-  try {
-    const repoSlug = getGithubRepoSlug();
-    const response = await fetch(`https://api.github.com/repos/${repoSlug}/releases/latest`, {
-      headers: {
-        Accept: 'application/vnd.github+json',
-        'User-Agent': `${app.getName()}/${currentVersion}`,
-      },
-    });
-
-    if (!response.ok) {
-      throw new Error(`GitHub returned ${response.status} ${response.statusText}`);
-    }
-
-    const release = (await response.json()) as {
-      tag_name?: string;
-      name?: string;
-      html_url?: string;
-      published_at?: string;
-    };
-    const latestVersion = release.tag_name ? normalizeVersion(release.tag_name) : null;
-
-    if (!latestVersion) {
-      throw new Error('GitHub release response did not include a tag name.');
-    }
-
-    const updateAvailable = compareVersions(currentVersion, latestVersion) < 0;
-    const result: UpdateCheckResult = {
-      currentVersion,
-      latestVersion,
-      releaseName: release.name ?? null,
-      releaseUrl: release.html_url ?? getFallbackReleaseUrl(),
-      publishedAt: release.published_at ?? null,
-      updateAvailable,
-      status: updateAvailable ? 'update-available' : 'up-to-date',
-      message: updateAvailable
-        ? `Update available: v${latestVersion} is newer than your current v${currentVersion}.`
-        : `You're up to date on v${currentVersion}.`,
-    };
-
-    updateCheckCache = {
-      checkedAt: Date.now(),
-      result,
-    };
-
-    return result;
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    const result: UpdateCheckResult = {
-      currentVersion,
-      latestVersion: null,
-      releaseName: null,
-      releaseUrl: getFallbackReleaseUrl(),
-      publishedAt: null,
-      updateAvailable: false,
-      status: 'error',
-      message: `Unable to check for updates right now: ${errorMessage}`,
-    };
-
-    updateCheckCache = {
-      checkedAt: Date.now(),
-      result,
-    };
-
-    return result;
-  }
-}
-
-function getIconPath(): string {
-  if (isWin) return path.join(__dirname, '..', 'assets', 'icon.ico');
-  if (isMac) return path.join(__dirname, '..', 'assets', 'icon_1024.png');
-  return path.join(__dirname, '..', 'assets', 'icon.png');
-}
-
-function createWindow(): void {
-  const windowOpts: Electron.BrowserWindowConstructorOptions = {
-    width: 1200,
-    height: 800,
-    minWidth: 800,
-    minHeight: 600,
-    title: 'WoW Admin – AzerothCore SOAP Console',
-    icon: getIconPath(),
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  };
-
-  // macOS-specific: use titlebar styling
-  if (isMac) {
-    windowOpts.titleBarStyle = 'hiddenInset';
-    windowOpts.trafficLightPosition = { x: 12, y: 12 };
-  }
-
-  mainWindow = new BrowserWindow(windowOpts);
-
-  mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
-
-  // Build platform-aware menu
-  const template: Electron.MenuItemConstructorOptions[] = [
-    // macOS app menu (required — uses app name automatically)
-    ...(isMac
-      ? [
-          {
-            label: app.name,
-            submenu: [
-              { role: 'about' as const },
-              { type: 'separator' as const },
-              { role: 'hide' as const },
-              { role: 'hideOthers' as const },
-              { role: 'unhide' as const },
-              { type: 'separator' as const },
-              { role: 'quit' as const },
-            ],
-          },
-        ]
-      : []),
-    {
-      label: 'File',
-      submenu: [isMac ? { role: 'close' as const } : { role: 'quit' as const }],
-    },
-    {
-      label: 'Edit',
-      submenu: [
-        { role: 'undo' as const },
-        { role: 'redo' as const },
-        { type: 'separator' as const },
-        { role: 'cut' as const },
-        { role: 'copy' as const },
-        { role: 'paste' as const },
-        ...(isMac
-          ? [{ role: 'pasteAndMatchStyle' as const }, { role: 'selectAll' as const }]
-          : [{ role: 'selectAll' as const }]),
-      ],
-    },
-    {
-      label: 'View',
-      submenu: [
-        { role: 'reload' as const },
-        { role: 'toggleDevTools' as const },
-        { type: 'separator' as const },
-        {
-          label: 'Navigate',
-          submenu: NAVIGATE_TAB_ITEMS.map((item) => ({
-            label: item.label,
-            click: (): void => {
-              mainWindow?.webContents.send('app:navigate-tab', item.tab);
-            },
-          })),
-        },
-        { type: 'separator' as const },
-        { role: 'zoomIn' as const },
-        { role: 'zoomOut' as const },
-        { role: 'resetZoom' as const },
-        ...(isMac ? [{ type: 'separator' as const }, { role: 'togglefullscreen' as const }] : []),
-      ],
-    },
-    {
-      label: 'Help',
-      submenu: [
-        {
-          label: 'Documentation',
-          click: async (): Promise<void> => {
-            const url =
-              typeof packageJson.homepage === 'string' && packageJson.homepage
-                ? packageJson.homepage
-                : `https://github.com/${getGithubRepoSlug()}`;
-            await shell.openExternal(url);
-          },
-        },
-        ...(!isMac
-          ? [
-              {
-                label: `About ${app.name}`,
-                click: async (): Promise<void> => {
-                  await dialog.showMessageBox({
-                    type: 'info',
-                    title: app.name,
-                    message: app.name,
-                    detail: `Version ${app.getVersion()}\n${packageJson.description ?? ''}`.trim(),
-                  });
-                },
-              },
-            ]
-          : []),
-      ],
-    },
-    ...(isMac
-      ? [
-          {
-            label: 'Window',
-            submenu: [
-              { role: 'minimize' as const },
-              { role: 'zoom' as const },
-              { type: 'separator' as const },
-              { role: 'front' as const },
-            ],
-          },
-        ]
-      : []),
-  ];
-
-  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
-}
-
-// ── IPC Handlers ──────────────────────────────────────────────
+// ── API handlers ──────────────────────────────────────────────
 
 async function pollWorldTelemetry(): Promise<MapPlayerSnapshot | null> {
   if (telemetryPollInFlight) return telemetryPollInFlight;
@@ -534,7 +251,7 @@ function filterTelemetrySnapshot(
   };
 }
 
-ipcMain.handle('soap:connect', async (_event, config: SoapConfig): Promise<SoapResult> => {
+async function connectSoap(config: SoapConfig): Promise<SoapResult> {
   try {
     soapClient = new SoapClient({
       host: config.host,
@@ -553,9 +270,21 @@ ipcMain.handle('soap:connect', async (_event, config: SoapConfig): Promise<SoapR
     const errorMessage = err instanceof Error ? err.message : String(err);
     return { success: false, message: errorMessage };
   }
+}
+
+function managedServiceResult(service: ManagedServiceName): SoapResult {
+  const status = managedConnections?.snapshot().services[service];
+  return status?.phase === 'connected'
+    ? { success: true, message: `${service} is managed by the server.` }
+    : { success: false, message: status?.error || `${service} is connecting.` };
+}
+
+apiRouter.handle('soap:connect', async (_event, config: SoapConfig): Promise<SoapResult> => {
+  if (managedConnections) return managedServiceResult('soap');
+  return connectSoap(config);
 });
 
-ipcMain.handle('soap:command', async (_event, command: string): Promise<SoapResult> => {
+apiRouter.handle('soap:command', async (_event, command: string): Promise<SoapResult> => {
   if (!soapClient) {
     return { success: false, message: 'Not connected. Configure connection first.' };
   }
@@ -568,27 +297,27 @@ ipcMain.handle('soap:command', async (_event, command: string): Promise<SoapResu
   }
 });
 
-ipcMain.handle('soap:disconnect', async (): Promise<SoapResult> => {
+apiRouter.handle('soap:disconnect', async (): Promise<SoapResult> => {
+  if (managedConnections) return { success: true, message: 'SOAP is managed by the server.' };
   stopTelemetryPolling();
   soapClient = null;
   return { success: true, message: 'Disconnected.' };
 });
 
-ipcMain.handle('logs:inspect', async (_event, config: LogMonitorConfig): Promise<LogMonitorInspectionResult> => {
+apiRouter.handle('logs:inspect', async (_event, config: LogMonitorConfig): Promise<LogMonitorInspectionResult> => {
   return inspectRemoteLogs(config);
 });
 
-ipcMain.handle('logs:readTail', async (_event, config: LogMonitorConfig, remotePath: string, maxBytes?: number): Promise<LogMonitorFileTailResult> => {
+apiRouter.handle('logs:readTail', async (_event, config: LogMonitorConfig, remotePath: string, maxBytes?: number): Promise<LogMonitorFileTailResult> => {
   return readRemoteLogTail(config, remotePath, maxBytes);
 });
 
-ipcMain.handle('app:getVersion', (): string => {
-  return app.getVersion();
-});
-
-ipcMain.handle('app:openExternal', async (_event, url: string): Promise<SoapResult> => {
+apiRouter.handle('app:openExternal', async (_event, url: string): Promise<SoapResult> => {
   try {
-    await shell.openExternal(url);
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error('Only HTTP(S) links are supported.');
+    }
     return { success: true, message: 'Opened link in your browser.' };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -596,63 +325,53 @@ ipcMain.handle('app:openExternal', async (_event, url: string): Promise<SoapResu
   }
 });
 
-ipcMain.handle('app:getEntityMediaPreview', async (_event, request: EntityMediaPreviewRequest): Promise<EntityMediaPreviewResult> => {
+apiRouter.handle('app:getEntityMediaPreview', async (_event, request: EntityMediaPreviewRequest): Promise<EntityMediaPreviewResult> => {
   return getEntityMediaPreview(request);
 });
 
-ipcMain.handle('update:check', async (_event, force = false): Promise<UpdateCheckResult> => {
-  return checkForUpdates(force);
-});
+apiRouter.handle('app:getConnectionStatus', (): BackendConnectionStatus => getBackendConnectionStatus());
 
-ipcMain.handle('update:openReleasePage', async (_event, url?: string): Promise<SoapResult> => {
-  const targetUrl = url || updateCheckCache?.result.releaseUrl || getFallbackReleaseUrl();
+// ── Profile API handlers ──────────────────────────────────────
 
-  try {
-    await shell.openExternal(targetUrl);
-    return { success: true, message: 'Opened release page in your browser.' };
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    return { success: false, message: `Failed to open release page: ${errorMessage}` };
-  }
-});
-
-// ── Profile IPC Handlers ──────────────────────────────────────
-
-ipcMain.handle('config:getProfiles', (): ConnectionProfile[] => {
+apiRouter.handle('config:getProfiles', (): ConnectionProfile[] => {
   return configStore?.getProfiles() ?? [];
 });
 
-ipcMain.handle('config:getActiveProfileId', (): string | null => {
+apiRouter.handle('config:getActiveProfileId', (): string | null => {
   return configStore?.getActiveProfileId() ?? null;
 });
 
-ipcMain.handle(
+apiRouter.handle(
   'config:addProfile',
   (_event, profile: Omit<ConnectionProfile, 'id' | 'createdAt' | 'updatedAt'>): ConnectionProfile => {
     return configStore!.addProfile(profile);
   }
 );
 
-ipcMain.handle(
+apiRouter.handle(
   'config:updateProfile',
   (_event, { id, fields }: { id: string; fields: Partial<ConnectionProfile> }): ConnectionProfile | null => {
     return configStore!.updateProfile(id, fields);
   }
 );
 
-ipcMain.handle('config:deleteProfile', (_event, id: string): { success: boolean } => {
+apiRouter.handle('config:deleteProfile', (_event, id: string): { success: boolean } => {
   configStore?.deleteProfile(id);
   return { success: true };
 });
 
-ipcMain.handle('config:setActiveProfile', (_event, id: string): { success: boolean } => {
+apiRouter.handle('config:setActiveProfile', (_event, id: string): { success: boolean } => {
   configStore?.setActiveProfile(id);
   return { success: true };
 });
 
-// ── Database IPC Handlers ──────────────────────────────────────
+// ── Database API handlers ──────────────────────────────────────
 
-ipcMain.handle('db:connect', async (_event, config: DbConfig): Promise<DbConnectionState> => {
+apiRouter.handle('db:connect', async (_event, config: DbConfig): Promise<DbConnectionState> => {
+  if (managedConnections) {
+    const status = managedConnections.snapshot().services.worldDatabase;
+    return { connected: status.phase === 'connected', database: dbService.config?.database ?? null, error: status.error };
+  }
   try {
     const result = await dbService.connect(config);
     if (result.success) {
@@ -665,43 +384,43 @@ ipcMain.handle('db:connect', async (_event, config: DbConfig): Promise<DbConnect
   }
 });
 
-ipcMain.handle('db:disconnect', async (): Promise<void> => {
-  await dbService.disconnect();
+apiRouter.handle('db:disconnect', async (): Promise<void> => {
+  if (!managedConnections) await dbService.disconnect();
 });
 
-ipcMain.handle('db:testConnection', async (_event, config: DbConfig): Promise<boolean> => {
+apiRouter.handle('db:testConnection', async (_event, config: DbConfig): Promise<boolean> => {
   return dbService.testConnection(config);
 });
 
-ipcMain.handle('db:query', async <T>(_event: IpcMainInvokeEvent, sql: string, params?: unknown[]): Promise<QueryResult<T>> => {
+apiRouter.handle('db:query', async <T>(_event: ApiRequestContext, sql: string, params?: unknown[]): Promise<QueryResult<T>> => {
   return dbService.query<T>(sql, params);
 });
 
-ipcMain.handle('db:execute', async (_event, sql: string, params?: unknown[]): Promise<QueryResult> => {
+apiRouter.handle('db:execute', async (_event, sql: string, params?: unknown[]): Promise<QueryResult> => {
   return dbService.execute(sql, params);
 });
 
-ipcMain.handle('db:getTables', async (): Promise<string[]> => {
+apiRouter.handle('db:getTables', async (): Promise<string[]> => {
   return dbService.getTables();
 });
 
-ipcMain.handle('db:getSchema', async (_event, table: string): Promise<FieldInfo[]> => {
+apiRouter.handle('db:getSchema', async (_event, table: string): Promise<FieldInfo[]> => {
   return dbService.getSchema(table);
 });
 
-ipcMain.handle('db:beginTransaction', async (): Promise<void> => {
+apiRouter.handle('db:beginTransaction', async (): Promise<void> => {
   await dbService.beginTransaction();
 });
 
-ipcMain.handle('db:commit', async (): Promise<void> => {
+apiRouter.handle('db:commit', async (): Promise<void> => {
   await dbService.commit();
 });
 
-ipcMain.handle('db:rollback', async (): Promise<void> => {
+apiRouter.handle('db:rollback', async (): Promise<void> => {
   await dbService.rollback();
 });
 
-// ── Map IPC Handlers ───────────────────────────────────────────
+// ── Map API handlers ───────────────────────────────────────────
 
 interface MapPlayerQueryRow {
   name: string;
@@ -856,7 +575,11 @@ function mapInventorySqlRow(raw: Record<string, unknown>): CharacterInventoryIte
   };
 }
 
-ipcMain.handle('map:connect', async (_event, config: DbConfig): Promise<DbConnectionState> => {
+apiRouter.handle('map:connect', async (_event, config: DbConfig): Promise<DbConnectionState> => {
+  if (managedConnections) {
+    const status = managedConnections.snapshot().services.mapDatabase;
+    return { connected: status.phase === 'connected', database: mapDbService.config?.database ?? null, error: status.error };
+  }
   try {
     const result = await mapDbService.connect(config);
     if (result.success) {
@@ -871,11 +594,11 @@ ipcMain.handle('map:connect', async (_event, config: DbConfig): Promise<DbConnec
   }
 });
 
-ipcMain.handle('map:disconnect', async (): Promise<void> => {
-  await mapDbService.disconnect();
+apiRouter.handle('map:disconnect', async (): Promise<void> => {
+  if (!managedConnections) await mapDbService.disconnect();
 });
 
-// ── Economy IPC Handlers ─────────────────────────────────────
+// ── Economy API handlers ─────────────────────────────────────
 
 function getEconomyWorldTable(tableName: string): string {
   const databaseName = deriveWorldDatabaseName(economyDbService.config?.database || '');
@@ -902,7 +625,11 @@ function buildEconomySearchFilter(searchTerm: string): { whereClause: string; pa
   };
 }
 
-ipcMain.handle('economy:connect', async (_event, config: DbConfig): Promise<DbConnectionState> => {
+apiRouter.handle('economy:connect', async (_event, config: DbConfig): Promise<DbConnectionState> => {
+  if (managedConnections) {
+    const status = managedConnections.snapshot().services.economyDatabase;
+    return { connected: status.phase === 'connected', database: economyDbService.config?.database ?? null, error: status.error };
+  }
   try {
     const result = await economyDbService.connect(config);
     if (result.success) {
@@ -915,11 +642,11 @@ ipcMain.handle('economy:connect', async (_event, config: DbConfig): Promise<DbCo
   }
 });
 
-ipcMain.handle('economy:disconnect', async (): Promise<void> => {
-  await economyDbService.disconnect();
+apiRouter.handle('economy:disconnect', async (): Promise<void> => {
+  if (!managedConnections) await economyDbService.disconnect();
 });
 
-ipcMain.handle('economy:getOverview', async (): Promise<EconomyOverview> => {
+apiRouter.handle('economy:getOverview', async (): Promise<EconomyOverview> => {
   if (!economyDbService.connected) {
     throw new Error('Economy database is not connected');
   }
@@ -984,7 +711,7 @@ ipcMain.handle('economy:getOverview', async (): Promise<EconomyOverview> => {
   };
 });
 
-ipcMain.handle('economy:getCharacterGold', async (_event, characterName: string): Promise<EconomyCharacterGoldResult> => {
+apiRouter.handle('economy:getCharacterGold', async (_event, characterName: string): Promise<EconomyCharacterGoldResult> => {
   if (!economyDbService.connected) {
     throw new Error('Economy database is not connected');
   }
@@ -1044,7 +771,7 @@ ipcMain.handle('economy:getCharacterGold', async (_event, characterName: string)
   };
 });
 
-ipcMain.handle('economy:searchAuctions', async (_event, searchTerm = '', limit = 50): Promise<EconomyAuctionRow[]> => {
+apiRouter.handle('economy:searchAuctions', async (_event, searchTerm: string = '', limit: number = 50): Promise<EconomyAuctionRow[]> => {
   if (!economyDbService.connected) {
     throw new Error('Economy database is not connected');
   }
@@ -1109,7 +836,7 @@ ipcMain.handle('economy:searchAuctions', async (_event, searchTerm = '', limit =
   }));
 });
 
-ipcMain.handle('economy:getMarketSummary', async (_event, searchTerm = '', limit = 25): Promise<EconomyMarketSummaryRow[]> => {
+apiRouter.handle('economy:getMarketSummary', async (_event, searchTerm: string = '', limit: number = 25): Promise<EconomyMarketSummaryRow[]> => {
   if (!economyDbService.connected) {
     throw new Error('Economy database is not connected');
   }
@@ -1162,7 +889,7 @@ ipcMain.handle('economy:getMarketSummary', async (_event, searchTerm = '', limit
   }));
 });
 
-ipcMain.handle('inventory:getCharacterInventory', async (_event, characterName: string): Promise<CharacterInventoryResult> => {
+apiRouter.handle('inventory:getCharacterInventory', async (_event, characterName: string): Promise<CharacterInventoryResult> => {
   const name = characterName?.trim() ?? '';
   if (!name) {
     return {
@@ -1319,7 +1046,7 @@ ipcMain.handle('inventory:getCharacterInventory', async (_event, characterName: 
   }
 });
 
-ipcMain.handle('players:getOnline', async (): Promise<OnlinePlayerRow[]> => {
+apiRouter.handle('players:getOnline', async (): Promise<OnlinePlayerRow[]> => {
   const charactersDb = getCharactersDbService();
   if (!charactersDb?.config?.database) throw new Error('Characters database is not connected');
   const authName = deriveAuthDatabaseName(charactersDb.config.database);
@@ -1338,7 +1065,7 @@ ipcMain.handle('players:getOnline', async (): Promise<OnlinePlayerRow[]> => {
   return result.rows;
 });
 
-ipcMain.handle('map:getOnlineCounts', async (): Promise<MapOnlineCounts> => {
+apiRouter.handle('map:getOnlineCounts', async (): Promise<MapOnlineCounts> => {
   if (!mapDbService.connected) throw new Error('Characters database is not connected');
   const authTable = `${escapeIdentifier(mapAuthDatabaseName)}.\`account\``;
   const result = await mapDbService.query<{ total: number; bots: number }>(`
@@ -1353,12 +1080,13 @@ ipcMain.handle('map:getOnlineCounts', async (): Promise<MapOnlineCounts> => {
   return { players: total - bots, bots, total };
 });
 
-ipcMain.handle('map:getPlayerPositions', async (_event, mapId?: number, instanceId?: number): Promise<MapPlayerSnapshot> => {
+apiRouter.handle('map:getPlayerPositions', async (_event, mapId?: number, instanceId?: number): Promise<MapPlayerSnapshot> => {
   if (soapClient) {
     const freshSnapshot = latestTelemetrySnapshot && Date.now() - latestTelemetrySnapshot.capturedAt <= telemetryPollIntervalMs
       ? latestTelemetrySnapshot
       : await pollWorldTelemetry();
     if (freshSnapshot) return filterTelemetrySnapshot(freshSnapshot, mapId, instanceId);
+    if (latestTelemetrySnapshot) return filterTelemetrySnapshot(latestTelemetrySnapshot, mapId, instanceId);
   }
 
   const filters: string[] = [];
@@ -1425,14 +1153,14 @@ ipcMain.handle('map:getPlayerPositions', async (_event, mapId?: number, instance
   };
 });
 
-ipcMain.handle('sessions:list', async (): Promise<SessionIndexEntry[]> => sessionRecorder.list());
+apiRouter.handle('sessions:list', async (): Promise<SessionIndexEntry[]> => sessionRecorder.list());
 
-ipcMain.handle('sessions:get', async (_event, id: string): Promise<SessionRecord | null> => sessionRecorder.get(id));
+apiRouter.handle('sessions:get', async (_event, id: string): Promise<SessionRecord | null> => sessionRecorder.get(id));
 
-ipcMain.handle('sessions:purgeCompleted', async (): Promise<number> => sessionRecorder.purgeCompleted());
+apiRouter.handle('sessions:purgeCompleted', async (): Promise<number> => sessionRecorder.purgeCompleted());
 
 // Names, levels, and ranks for creatures in the live stream, by entry.
-ipcMain.handle('map:getCreatureInfo', async (_event, entries: unknown): Promise<CreatureInfo[]> => {
+apiRouter.handle('map:getCreatureInfo', async (_event, entries: unknown): Promise<CreatureInfo[]> => {
   const ids = [...new Set((Array.isArray(entries) ? entries : []).map(Number))]
     .filter((id) => Number.isInteger(id) && id > 0)
     .slice(0, 500);
@@ -1470,7 +1198,7 @@ ipcMain.handle('map:getCreatureInfo', async (_event, entries: unknown): Promise<
   }));
 });
 
-ipcMain.handle('map:getBotWaypoint', async (_event, request: MapBotWaypointRequest): Promise<MapBotWaypoint | null> => {
+apiRouter.handle('map:getBotWaypoint', async (_event, request: MapBotWaypointRequest): Promise<MapBotWaypoint | null> => {
   try {
     const databaseName = request.playerbotsDatabase?.trim() || mapPlayerbotsDatabaseName;
     const travelTable = `${escapeIdentifier(databaseName)}.\`playerbots_travelnode\``;
@@ -1512,20 +1240,94 @@ ipcMain.handle('map:getBotWaypoint', async (_event, request: MapBotWaypointReque
   }
 });
 
-// ── App lifecycle ─────────────────────────────────────────────
+function unmanagedServiceStatus(connected: boolean): BackendConnectionStatus['services']['soap'] {
+  return { phase: connected ? 'connected' : 'disconnected', error: null, retryAt: null };
+}
 
-app.whenReady().then(() => {
-  configStore = new ConfigStore();
-  createWindow();
-  if (!process.env.WOWMIN_WEB_MODE) void checkForUpdates();
-});
+export function getBackendConnectionStatus(): BackendConnectionStatus {
+  if (managedConnections) return managedConnections.snapshot();
+  return {
+    managed: false,
+    updatedAt: Date.now(),
+    services: {
+      soap: unmanagedServiceStatus(Boolean(soapClient)),
+      worldDatabase: unmanagedServiceStatus(dbService.connected),
+      mapDatabase: unmanagedServiceStatus(mapDbService.connected),
+      economyDatabase: unmanagedServiceStatus(economyDbService.connected),
+    },
+  };
+}
 
-// macOS: keep app running when all windows are closed (dock stays active)
-app.on('window-all-closed', () => {
-  if (!isMac) app.quit();
-});
+export function initializeManagedConnections(config: ManagedBackendConfig): Promise<BackendConnectionStatus> {
+  if (managedConnections) return managedConnections.ensureConnected();
 
-// macOS: re-create window when dock icon is clicked and no windows exist
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow();
-});
+  const labels: Record<ManagedServiceName, string> = {
+    soap: 'SOAP',
+    worldDatabase: 'world database',
+    mapDatabase: 'characters database',
+    economyDatabase: 'economy database',
+  };
+  managedConnections = new ManagedConnectionLifecycle({
+    soap: {
+      connected: () => Boolean(soapClient),
+      check: async () => Boolean(soapClient && (await soapClient.testConnection()).success),
+      connect: () => connectSoap(config.soap),
+      disconnect: async () => {
+        stopTelemetryPolling();
+        soapClient = null;
+      },
+    },
+    worldDatabase: {
+      connected: () => dbService.connected,
+      check: () => dbService.checkConnection(),
+      connect: () => dbService.connect(config.worldDatabase),
+      disconnect: () => dbService.disconnect(),
+    },
+    mapDatabase: {
+      connected: () => mapDbService.connected,
+      check: () => mapDbService.checkConnection(),
+      connect: async () => {
+        const result = await mapDbService.connect(config.mapDatabase);
+        if (result.success) {
+          mapAuthDatabaseName = deriveAuthDatabaseName(config.mapDatabase.database);
+          mapPlayerbotsDatabaseName = derivePlayerbotsDatabaseName(config.mapDatabase.database);
+        }
+        return result;
+      },
+      disconnect: () => mapDbService.disconnect(),
+    },
+    economyDatabase: {
+      connected: () => economyDbService.connected,
+      check: () => economyDbService.checkConnection(),
+      connect: () => economyDbService.connect(config.economyDatabase),
+      disconnect: () => economyDbService.disconnect(),
+    },
+  }, {
+    initialRetryMs: config.initialRetryMs,
+    maximumRetryMs: config.maximumRetryMs,
+    healthCheckMs: config.healthCheckMs,
+    onTransition: (service, previous, status) => {
+      const detail = status.error ? `: ${status.error}` : '';
+      console.log(`Managed ${labels[service]} ${previous} -> ${status.phase}${detail}`);
+    },
+  });
+  return managedConnections.start();
+}
+
+export async function shutdownApiBackend(): Promise<void> {
+  if (managedConnections) {
+    const lifecycle = managedConnections;
+    await lifecycle.stop();
+    if (managedConnections === lifecycle) managedConnections = null;
+    return;
+  }
+  stopTelemetryPolling();
+  soapClient = null;
+  await Promise.allSettled([dbService.disconnect(), mapDbService.disconnect(), economyDbService.disconnect()]);
+}
+
+export function initializeApiBackend(dataDir = process.env.WOWMIN_DATA_DIR || DEFAULT_DATA_DIR): void {
+  if (!configStore) {
+    configStore = new ConfigStore(dataDir);
+  }
+}

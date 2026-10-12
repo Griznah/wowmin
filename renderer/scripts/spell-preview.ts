@@ -12,7 +12,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { SpellEffectLayer, type UnitAnchorRole } from './instance-scene/spell-effects';
 import { SpellVisualLayer } from './instance-scene/spell-visual-layer';
 import { type UnitModelPose, UnitModelLayer } from './instance-scene/unit-models';
-import type { StreamCombatEvent } from '../../src/types/electron';
+import type { StreamCombatEvent } from '../../src/types/api';
 import { CombatEffectStore, type Point3, type UnitKey } from './utils/spell-events';
 
 // Spell preview (dev tool, /spell-preview): plays one spell on a loop between

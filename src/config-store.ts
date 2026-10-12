@@ -1,7 +1,6 @@
-import { app } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
-import { ConnectionProfile, SoapConfig, DbConfig, LogMonitorConfig } from './types/electron';
+import { ConnectionProfile, SoapConfig, DbConfig, LogMonitorConfig } from './types/api';
 
 interface ConfigData {
   profiles: ConnectionProfile[];
@@ -44,9 +43,9 @@ export class ConfigStore {
   private configPath: string;
   private data: ConfigData;
 
-  constructor() {
-    const userDataPath = app.getPath('userData');
-    this.configPath = path.join(userDataPath, 'config.json');
+  constructor(dataDir: string) {
+    fs.mkdirSync(dataDir, { recursive: true });
+    this.configPath = path.join(dataDir, 'config.json');
     this.data = this.load();
   }
 
