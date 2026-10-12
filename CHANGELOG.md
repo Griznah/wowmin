@@ -26,7 +26,7 @@ and session recording built on the separate `mod-wowmin-telemetry` module.
 - **Unit models**: players and mobs are drawn with their game models (race, gear, druid forms, pets, mounts, vehicles and passengers), animated by stance, built on demand from `WOWMIN_CLIENT_DATA` in a worker and cached under `assets/models/`.
 - **Spell art**: the client's own cast, missile, impact, channel, ground, and aura effects, plus floating combat numbers; `/spell-preview` plays any spell's art on test models.
 - **Nameplates**: Neon, Grey, and Quatre plates with health, power, cast bars with spell names and icons, debuffs, threat, raid markers, and battleground crests.
-- **Scene export**: `npm run extract:maps -- --all-instances --scenes` writes a 3D scene per map to `assets/instances/`, cropped to the area players use, with repeated props GPU-instanced.
+- **Scene export**: `npm run extract:scenes -- --all-instances` writes a 3D scene and its manifest per map to `assets/instances/`, cropped to the area players use, with repeated props GPU-instanced. It is independent of the flat-map extraction (`extract:maps`): both read the client's map tables themselves, and `npm run check:exports` compares two export folders with 2D and 3D differences reported separately.
 - **Rendering performance** for battleground scale: a shared fade uniform buffer, instanced props, skeletons kept out of the scene graph with an animation budget (48 nearest units at full rate, the rest at 10 Hz, off-screen units skipped), merged unit draw calls, a 1.5 pixel-ratio cap, and a Render scale control; `?debug` shows frame rate, draws, and stream rates.
 - Added synchronized, persisted icon-size controls to Live Map and Instance Watch. Canvas markers now scale progressively with zoom, participant-list icons are larger, and pre-v6 telemetry uses extracted male race portraits instead of emoji when gender is unavailable.
 
@@ -47,6 +47,7 @@ and session recording built on the separate `mod-wowmin-telemetry` module.
 - Player-state indicators now treat Spirit of Redemption, death/release, and living states as mutually coherent groups. Alive players immediately suppress stale Dead and Waiting to Resurrect icons.
 - Outland/map 530 extraction now filters exact audited white/grey source-padding textures before JPEG output, preserving real water pixels and projection bounds; individual continent maps can be regenerated without touching unrelated continents.
 - Map extraction now applies custom lettered locale patches after numbered patches and resolves artwork directories from `WorldMapArea.dbc`, enabling proper classic/TBC floor artwork and patched WMO/Z floor tables from WDM M/N patches instead of misleading dungeon minimap terrain.
+- Map extraction keeps the artwork directory of a `WorldMapArea.dbc` record without bounds, so dungeon floor art filed that way (such as `TheTempleOfAtalHakkar` for Sunken Temple) is found.
 
 ## [3.0.0] - 2026-10-05
 

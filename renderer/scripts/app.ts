@@ -1,7 +1,7 @@
 /// <reference path="./types/window.d.ts" />
 import { ts, escapeHtml, showResult, debounce, getMapName, CLASS_COLORS, RACE_NAMES, CLASS_NAMES } from './utils/helpers';
 import { parseOnlineList, playersFromDatabase } from './utils/online-players';
-import { type ActiveInstanceSession, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getInstanceCoordinateBounds, getInstanceFactionColor, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, groupActiveInstanceSessions, parseInstanceSessionKey, zoomInstanceViewAt, INSTANCE_MAX_ZOOM, isSceneryCreature } from './utils/instance-watch';
+import { type ActiveInstanceSession, type DungeonFloor, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getInstanceCoordinateBounds, getInstanceFactionColor, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, groupActiveInstanceSessions, parseInstanceSessionKey, zoomInstanceViewAt, INSTANCE_MAX_ZOOM, isSceneryCreature } from './utils/instance-watch';
 import { clampIsoPitch, createFlatProjection, createIsoView, DEFAULT_ISO_YAW, type FadeSettings, getFadeVolumes, getHeightBand, getIsoPanForCenter, getNextQuarterTurn, ISO_PITCH, type IsoView, type MapProjection, resolveMinimapTileProjection, type SceneBox } from './utils/map-projection';
 import { InstanceSceneView } from './instance-scene/scene-view';
 import type { UnitModelPose } from './instance-scene/unit-models';
@@ -6511,15 +6511,18 @@ interface InstanceMapAssetMetadata {
   worldMapBounds?: InstanceCoordinateBounds | null;
   projection?: { type: 'worldMapArea' | 'minimapTiles' | 'dungeonFloors' };
   floors?: DungeonMapFloor[];
-  scene?: InstanceSceneMetadata;
 }
 
+// <mapId>.scene.json, written by npm run extract:scenes.
 interface InstanceSceneMetadata {
+  schemaVersion: number;
+  mapId: number;
   file: string;
   bounds: SceneBox;
   groups: Array<{ wmoGroupId: number; exterior: boolean; minZ: number; maxZ: number }>;
-  floors: Array<{ id: number; minZ: number; maxZ: number }>;
-  // The box the buildings in the play area fill; absent in older scenes.
+  // Every floor; minZ/maxZ only where its WMO groups give a height range.
+  floors: Array<DungeonFloor & { minZ?: number; maxZ?: number }>;
+  // The box the buildings in the play area fill.
   buildingReach?: SceneBox | null;
 }
 
@@ -6679,6 +6682,8 @@ let instanceSceneView: InstanceSceneView | null | undefined;
 let instanceIsoContext: { box: SceneBox; width: number; height: number; view: IsoView } | null = null;
 let instanceRotation: { from: number; to: number; startedAt: number; center: [number, number, number] } | null = null;
 const instanceMapAssetLoads = new Set<number>();
+const instanceScenes = new Map<number, InstanceSceneMetadata | null>();
+const instanceSceneLoads = new Set<number>();
 const INSTANCE_DISCOVERY_INTERVAL_MS = 10_000;
 
 // Opens the stream for the selected session while Instance Watch is showing
@@ -6919,14 +6924,51 @@ function getInstanceSceneView(): InstanceSceneView | null {
   return instanceSceneView?.available ? instanceSceneView : null;
 }
 
-function getInstanceSceneUrl(mapId: number, asset: LoadedInstanceMapAsset | null): string | null {
-  const scene = asset?.metadata.scene;
-  return scene ? new URL(scene.file, getInstanceMetadataUrl(mapId)).href : null;
+function getInstanceSceneManifestUrl(mapId: number): URL {
+  return new URL(`../assets/instances/${mapId}.scene.json`, window.location.href);
 }
 
-function isInstanceSceneShowing(mapId: number, asset: LoadedInstanceMapAsset | null): boolean {
-  const url = getInstanceSceneUrl(mapId, asset);
+// The map's scene manifest, or null when it has none (or it is still loading).
+function getInstanceScene(mapId: number): InstanceSceneMetadata | null {
+  return instanceScenes.get(mapId) ?? null;
+}
+
+// Loaded apart from the flat map's metadata (loadInstanceMapAsset): either can
+// be missing or broken without taking the other with it.
+async function loadInstanceScene(mapId: number): Promise<void> {
+  if (instanceScenes.has(mapId) || instanceSceneLoads.has(mapId)) return;
+  instanceSceneLoads.add(mapId);
+  try {
+    const response = await fetch(getInstanceSceneManifestUrl(mapId));
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const scene = await response.json() as InstanceSceneMetadata;
+    if (scene.schemaVersion !== 1 || scene.mapId !== mapId) throw new Error('unsupported scene manifest');
+    instanceScenes.set(mapId, scene);
+  } catch {
+    instanceScenes.set(mapId, null);
+  } finally {
+    instanceSceneLoads.delete(mapId);
+    if (getSelectedInstanceSession()?.mapId === mapId) renderInstanceWatcher();
+  }
+}
+
+function getInstanceSceneUrl(mapId: number): string | null {
+  const scene = getInstanceScene(mapId);
+  return scene ? new URL(scene.file, getInstanceSceneManifestUrl(mapId)).href : null;
+}
+
+function isInstanceSceneShowing(mapId: number): boolean {
+  const url = getInstanceSceneUrl(mapId);
   return Boolean(url && instanceView3d && getInstanceSceneView()?.state(url) === 'ready');
+}
+
+// The floors the view in use splits the map by: the scene's while it shows,
+// otherwise the flat view's floor maps. Both come from DungeonMap.dbc, so a
+// floor keeps its id when the view changes.
+function getInstanceFloors(mapId: number): DungeonFloor[] {
+  if (isInstanceSceneShowing(mapId)) return getInstanceScene(mapId)?.floors ?? [];
+  const metadata = instanceMapAssets.get(mapId)?.metadata;
+  return metadata?.projection?.type === 'dungeonFloors' ? metadata.floors ?? [] : [];
 }
 
 function getInstanceViewYaw(): number {
@@ -7418,7 +7460,7 @@ function drawInstancePath(
 function beginInstanceOrbit(event: PointerEvent): boolean {
   const session = getSelectedInstanceSession();
   if (!session || !instanceIsoContext || !$instanceWatchCanvas
-    || !isInstanceSceneShowing(session.mapId, instanceMapAssets.get(session.mapId) ?? null)) {
+    || !isInstanceSceneShowing(session.mapId)) {
     return false;
   }
   instanceRotation = null;
@@ -7459,14 +7501,13 @@ function updateInstanceOrbit(event: PointerEvent): void {
 // always drawn), but is framed on the party.
 function renderInstanceScene(
   session: ActiveInstanceSession,
-  asset: LoadedInstanceMapAsset | null,
-  floor: DungeonMapFloor | null,
+  floor: DungeonFloor | null,
   width: number,
   height: number,
   landmarks: Point3[] = [],
 ): IsoView | null {
-  const scene = asset?.metadata.scene;
-  const url = getInstanceSceneUrl(session.mapId, asset);
+  const scene = getInstanceScene(session.mapId);
+  const url = getInstanceSceneUrl(session.mapId);
   const sceneView = getInstanceSceneView();
   if (!scene || !url || !instanceView3d || !sceneView) return null;
   sceneView.load(url);
@@ -7475,7 +7516,7 @@ function renderInstanceScene(
   const floorHeights = floor ? scene.floors.find((candidate) => candidate.id === floor.id) : undefined;
   // The party is whoever is drawn: the players on the focused floor.
   const floorPlayers = floor
-    ? session.players.filter((player) => getParticipantDungeonFloor(player, asset.metadata.floors ?? [])?.id === floor.id)
+    ? session.players.filter((player) => getParticipantDungeonFloor(player, scene.floors)?.id === floor.id)
     : session.players;
   const buildings = scene.buildingReach;
   const pad = INSTANCE_REACH_PADDING;
@@ -7493,7 +7534,7 @@ function renderInstanceScene(
   // Without a dungeon floor, the reach box (the scene's own bounds cover
   // only its buildings, not ground-built places like Eye of the Storm's
   // start platforms).
-  let fitBox: SceneBox = floor && floorHeights
+  let fitBox: SceneBox = floor && floorHeights?.minZ !== undefined && floorHeights.maxZ !== undefined
     ? { ...floor.bounds, minZ: floorHeights.minZ, maxZ: floorHeights.maxZ }
     : reach ?? scene.bounds;
   // With a horizontal fade most of the floor is hidden, so frame the party's
@@ -7539,7 +7580,7 @@ function renderInstanceScene(
 
 function rotateInstanceView(quarterTurns: number): void {
   const session = getSelectedInstanceSession();
-  if (!session || !instanceIsoContext || !isInstanceSceneShowing(session.mapId, instanceMapAssets.get(session.mapId) ?? null)) return;
+  if (!session || !instanceIsoContext || !isInstanceSceneShowing(session.mapId)) return;
   // Repeated presses during an animation step on from its destination.
   const animating = Boolean(instanceRotation);
   const destination = instanceRotation?.to ?? getInstanceViewYaw();
@@ -7587,7 +7628,7 @@ async function loadInstanceMapAsset(mapId: number): Promise<void> {
     const response = await fetch(metadataUrl);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const metadata = await response.json() as InstanceMapAssetMetadata;
-    if (![1, 2, 3].includes(metadata.schemaVersion) || metadata.mapId !== mapId) {
+    if (![1, 2].includes(metadata.schemaVersion) || metadata.mapId !== mapId) {
       throw new Error('unsupported instance map metadata');
     }
     const loadImage = async (relativePath: string): Promise<HTMLImageElement> => {
@@ -7607,8 +7648,8 @@ async function loadInstanceMapAsset(mapId: number): Promise<void> {
       }));
     } else if (metadata.image) {
       image = await loadImage(metadata.image);
-    } else if (!metadata.scene) {
-      throw new Error('instance map metadata has no images or scene');
+    } else {
+      throw new Error('instance map metadata has no images');
     }
     instanceMapAssets.set(mapId, { metadata, image, floorImages });
   } catch {
@@ -7620,12 +7661,9 @@ async function loadInstanceMapAsset(mapId: number): Promise<void> {
   }
 }
 
-function getSelectedDungeonFloor(
-  session: ActiveInstanceSession,
-  asset: LoadedInstanceMapAsset | null,
-): DungeonMapFloor | null {
-  const floors = asset?.metadata.floors;
-  if (asset?.metadata.projection?.type !== 'dungeonFloors' || !floors?.length) return null;
+function getSelectedDungeonFloor(session: ActiveInstanceSession): DungeonFloor | null {
+  const floors = getInstanceFloors(session.mapId);
+  if (!floors.length) return null;
   const focused = selectedInstancePlayerName
     ? session.players.find((player) => player.name === selectedInstancePlayerName)
     : null;
@@ -7912,7 +7950,7 @@ function renderInstancePlayerList(session: ActiveInstanceSession | null): void {
     $instancePlayerList.innerHTML = '<p class="placeholder">No active participants</p>';
     return;
   }
-  const floors = instanceMapAssets.get(session.mapId)?.metadata.floors ?? [];
+  const floors = getInstanceFloors(session.mapId);
   $instancePlayerList.innerHTML = [...session.players]
     .sort((left, right) => Number(left.isBot) - Number(right.isBot) || left.name.localeCompare(right.name))
     .map((player) => {
@@ -8063,32 +8101,36 @@ function drawInstanceCanvas(followPass: boolean): void {
   if (!instanceMapAssets.has(session.mapId) && !instanceMapAssetLoads.has(session.mapId)) {
     void loadInstanceMapAsset(session.mapId);
   }
+  void loadInstanceScene(session.mapId);
   const loadedAsset = instanceMapAssets.get(session.mapId) ?? null;
   const profile = getInstanceMapProfile(session.mapId);
   const projectionType = loadedAsset?.metadata.projection?.type;
-  const floor = getSelectedDungeonFloor(session, loadedAsset);
+  const floors = getInstanceFloors(session.mapId);
+  const floor = getSelectedDungeonFloor(session);
   const asset = projectionType === 'minimapTiles'
     || projectionType === 'dungeonFloors'
     || (projectionType === 'worldMapArea' && (profile || loadedAsset?.metadata.worldMapBounds))
     ? loadedAsset
     : null;
+  // The flat view's map of that floor, if it has one.
+  const mapFloor = floor ? asset?.metadata.floors?.find((candidate) => candidate.id === floor.id) : undefined;
   const assetImage = floor ? asset?.floorImages.get(floor.id) : asset?.image;
   const bounds = floor?.bounds ?? asset?.metadata.worldMapBounds ?? getStableInstanceBounds(session);
-  const assetWidth = floor?.width ?? asset?.metadata.width;
-  const assetHeight = floor?.height ?? asset?.metadata.height;
+  const assetWidth = mapFloor?.width ?? asset?.metadata.width;
+  const assetHeight = mapFloor?.height ?? asset?.metadata.height;
   const aspectRatio = assetWidth && assetHeight
     ? assetWidth / assetHeight
     : profile?.aspectRatio;
-  const visiblePlayers = floor && asset?.metadata.floors
-    ? session.players.filter((player) => getParticipantDungeonFloor(player, asset.metadata.floors ?? [])?.id === floor.id)
+  const visiblePlayers = floor
+    ? session.players.filter((player) => getParticipantDungeonFloor(player, floors)?.id === floor.id)
     : session.players;
   const live = instanceLiveStream?.key === session.key;
   const liveNow = performance.now();
   const creatures = live && instanceMobsMode !== 'off'
     ? instanceLiveCreatures.samples(liveNow).filter((creature) => {
-      if (floor && asset?.metadata.floors && getParticipantDungeonFloor({
+      if (floor && getParticipantDungeonFloor({
         position_x: creature.x, position_y: creature.y, position_z: creature.z, wmoGroupId: creature.wmoGroupId,
-      }, asset.metadata.floors)?.id !== floor.id) return false;
+      }, floors)?.id !== floor.id) return false;
       return instanceMobsMode === 'all' || isBossCreature(creature, instanceCreatureInfo.get(creature.entry))
         || visiblePlayers.some((player) =>
           Math.hypot(player.position_x - creature.x, player.position_y - creature.y) <= INSTANCE_MOBS_NEAR_YARDS
@@ -8134,7 +8176,7 @@ function drawInstanceCanvas(followPass: boolean): void {
   const bossPositions = creatures
     .filter((creature) => isBossCreature(creature, instanceCreatureInfo.get(creature.entry)))
     .map((creature): Point3 => [creature.x, creature.y, creature.z]);
-  const isoView = renderInstanceScene(session, loadedAsset, floor, width, height, bossPositions);
+  const isoView = renderInstanceScene(session, floor, width, height, bossPositions);
   // The flat map stops at its own closest zoom, which the 3D view can pass.
   if (!isoView && getInstanceViewTransform().zoom > INSTANCE_MAX_ZOOM) {
     const flatViewport = aspectRatio ? getInstanceProjectionViewport(width, height, aspectRatio) : { x: 0, y: 0, width, height };
@@ -8144,7 +8186,7 @@ function drawInstanceCanvas(followPass: boolean): void {
   // Read after the scene, which may reset it when it reframes.
   const viewTransform = getInstanceViewTransform();
   if ($instanceWatchScene) $instanceWatchScene.hidden = !isoView;
-  const hasScene = Boolean(loadedAsset?.metadata.scene && getInstanceSceneView());
+  const hasScene = Boolean(getInstanceScene(session.mapId) && getInstanceSceneView());
   $instanceViewControls?.classList.toggle('hidden', !hasScene);
   if ($instanceRotateLeftBtn) $instanceRotateLeftBtn.disabled = !isoView;
   if ($instanceRotateRightBtn) $instanceRotateRightBtn.disabled = !isoView;
@@ -8321,7 +8363,7 @@ function drawInstanceCanvas(followPass: boolean): void {
   }
   for (const player of visiblePlayers) {
     const trail = (instanceTrails.get(player.name) ?? []).filter((point) =>
-      !floor || getParticipantDungeonFloor(point, asset?.metadata.floors ?? [])?.id === floor.id);
+      !floor || getParticipantDungeonFloor(point, floors)?.id === floor.id);
     if (instanceShowTrails && trail.length > 1) {
       ctx.beginPath();
       trail.forEach((point, index) => {
@@ -8652,7 +8694,7 @@ function renderInstanceDebugOverlay(now: number): void {
   const scene = $instanceWatchScene && !$instanceWatchScene.hidden
     ? `3D · ${$instanceWatchScene.dataset.drawCalls ?? '?'} draws · ${Math.round(Number($instanceWatchScene.dataset.triangles ?? 0) / 1000)}k tris · ${$instanceWatchScene.dataset.buffer ?? '?'} px`
     : 'flat map';
-  const floor = session ? getSelectedDungeonFloor(session, instanceMapAssets.get(session.mapId) ?? null) : null;
+  const floor = session ? getSelectedDungeonFloor(session) : null;
   const transform = getInstanceViewTransform();
   const counts = instanceDebugCounts;
   const lines = [
@@ -8686,7 +8728,7 @@ function renderInstanceWatcher(): void {
         && (profile || loadedAsset.metadata.worldMapBounds))
     ));
     const representative = session?.players[0];
-    const selectedFloor = session && loadedAsset ? getSelectedDungeonFloor(session, loadedAsset) : null;
+    const selectedFloor = session ? getSelectedDungeonFloor(session) : null;
     const difficulty = getInstanceDifficultyLabel(representative?.mapType, representative?.difficulty);
     const age = getInstanceAgeLabel(representative?.sessionStartedAt);
     const details = session
@@ -8696,7 +8738,7 @@ function renderInstanceWatcher(): void {
         difficulty,
         age ? `active ${age}` : null,
         selectedFloor ? `floor ${selectedFloor.floorIndex}` : null,
-        session && isInstanceSceneShowing(session.mapId, loadedAsset ?? null)
+        session && isInstanceSceneShowing(session.mapId)
           ? '3D scene'
           : hasArtwork ? 'client artwork' : profile ? 'client-calibrated bounds' : 'auto-fit bounds',
         instanceLiveStream?.status === 'streaming' ? 'live stream' : null,

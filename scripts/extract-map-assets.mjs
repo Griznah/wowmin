@@ -12,41 +12,11 @@ import jpeg from 'jpeg-js';
 import BLPFile from 'js-blp';
 import { PNG } from 'pngjs';
 
-import { exportMapScene } from './scene/export-scene.mjs';
+import { extractMpqFile, findMpqArchives, locateDataDir, walkFiles } from './client-archives.mjs';
+import { CONTINENTS, describeMaps, readMapTables, resolveMapTargets } from './map-catalog.mjs';
 
 const require = createRequire(import.meta.url);
 const { MpqArchive } = require('stormlib-js');
-
-const CLIENT_MAP_DIRECTORY_ALIASES = new Map([
-  [389, ['Ragefire']],
-]);
-
-export function getClientMapDirectoryAliases(mapId) {
-  return CLIENT_MAP_DIRECTORY_ALIASES.get(mapId) ?? [];
-}
-
-const CONTINENTS = [
-  {
-    mapId: 0,
-    label: 'Eastern Kingdoms',
-    candidates: ['Azeroth', 'EasternKingdoms'],
-  },
-  {
-    mapId: 1,
-    label: 'Kalimdor',
-    candidates: ['Kalimdor'],
-  },
-  {
-    mapId: 530,
-    label: 'Outland',
-    candidates: ['Expansion01', 'Outland'],
-  },
-  {
-    mapId: 571,
-    label: 'Northrend',
-    candidates: ['Northrend'],
-  },
-];
 
 // Audited common.MPQ map-530 edge textures. Both js-blp and Pillow show
 // these opaque white/grey placeholders in the original BLP pixels. Gate by
@@ -86,8 +56,6 @@ const DEFAULTS = {
   output: path.resolve(process.cwd(), 'assets/maps'),
   quality: 90,
   keepWorkspace: false,
-  scenes: false,
-  sceneTextureMax: 512,
 };
 
 const NPM_VALUE_OPTIONS = ['source', 'output', 'map', 'map_dir', 'workspace', 'quality'];
@@ -130,8 +98,6 @@ Options:
   --workspace, -w     Temp/work directory used while extracting MPQs
   --quality, -q       JPEG quality (1-100, default: 90)
   --keep-workspace    Keep extracted minimap tiles instead of deleting temp files
-  --scenes            Also export a 3D scene (<mapId>.glb) per targeted map (needs --map or --all-instances)
-  --scene-texture-max Largest scene texture edge in pixels (default: 512)
   --help, -h          Show this message
 
 Notes:
@@ -161,8 +127,6 @@ export function parseArgs(argv) {
     workspace: readNpmConfigValue('workspace'),
     quality: Number.parseInt(readNpmConfigValue('quality') ?? String(DEFAULTS.quality), 10),
     keepWorkspace: readNpmConfigBoolean('keep_workspace') ?? DEFAULTS.keepWorkspace,
-    scenes: readNpmConfigBoolean('scenes') ?? DEFAULTS.scenes,
-    sceneTextureMax: Number.parseInt(readNpmConfigValue('scene_texture_max') ?? String(DEFAULTS.sceneTextureMax), 10),
   };
   const positional = [];
 
@@ -198,12 +162,6 @@ export function parseArgs(argv) {
         break;
       case '--keep-workspace':
         options.keepWorkspace = true;
-        break;
-      case '--scenes':
-        options.scenes = true;
-        break;
-      case '--scene-texture-max':
-        options.sceneTextureMax = Number.parseInt(argv[++i] ?? '', 10);
         break;
       case '--help':
       case '-h':
@@ -272,26 +230,6 @@ function pathExists(targetPath) {
   }
 }
 
-function walkFiles(rootDir) {
-  const files = [];
-  const stack = [rootDir];
-
-  while (stack.length > 0) {
-    const current = stack.pop();
-    const entries = fs.readdirSync(current, { withFileTypes: true });
-    for (const entry of entries) {
-      const fullPath = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(fullPath);
-      } else if (entry.isFile()) {
-        files.push(fullPath);
-      }
-    }
-  }
-
-  return files;
-}
-
 function locateMinimapRoot(sourcePath) {
   const directCandidates = [
     sourcePath,
@@ -323,25 +261,6 @@ function locateMinimapRoot(sourcePath) {
   return null;
 }
 
-function locateDataDir(sourcePath) {
-  const candidates = [
-    sourcePath,
-    path.join(sourcePath, 'Data'),
-    path.join(sourcePath, 'data'),
-  ];
-
-  for (const candidate of candidates) {
-    if (path.basename(candidate).toLowerCase() !== 'data') {
-      continue;
-    }
-    if (pathExists(candidate) && fs.statSync(candidate).isDirectory()) {
-      return candidate;
-    }
-  }
-
-  return null;
-}
-
 function findExtractionTool() {
   const candidates = ['7zz', '7z', 'bsdtar'];
   for (const candidate of candidates) {
@@ -361,189 +280,6 @@ function canListMpqArchive(tool, archivePath) {
 
   const result = spawnSync(tool, ['l', archivePath], { encoding: 'utf8' });
   return !result.error && result.status === 0;
-}
-
-export function archivePriority(filePath) {
-  const name = path.basename(filePath).toLowerCase();
-  if (/^common-2.*\.mpq$/.test(name)) return 15;
-  if (/^common.*\.mpq$/.test(name)) return 10;
-  if (/^expansion.*\.mpq$/.test(name)) return 20;
-  if (/^lichking.*\.mpq$/.test(name)) return 25;
-  if (/^locale-.*\.mpq$/.test(name)) return 30;
-  const patch = name.match(/^patch(?:-[a-z]{4})?(?:-([0-9]+|[a-z]))?\.mpq$/);
-  if (patch) {
-    const suffix = patch[1] ?? '0';
-    // Custom lettered patches must override base/numbered patches, with N
-    // taking precedence over M. Previously they fell into the generic bucket.
-    return 50 + (/^\d+$/.test(suffix) ? Number(suffix) : 100 + suffix.charCodeAt(0) - 97);
-  }
-  return 40;
-}
-
-function readDbcString(buffer, stringBlockOffset, stringOffset) {
-  if (stringOffset === 0) return '';
-  const start = stringBlockOffset + stringOffset;
-  let end = start;
-  while (end < buffer.length && buffer[end] !== 0) end += 1;
-  return buffer.toString('utf8', start, end);
-}
-
-function parseMapDbc(buffer, requestedMapIds, allInstances = false) {
-  if (buffer.subarray(0, 4).toString('ascii') !== 'WDBC') {
-    throw new Error('DBFilesClient/Map.dbc has an unsupported header.');
-  }
-  const recordCount = buffer.readUInt32LE(4);
-  const fieldCount = buffer.readUInt32LE(8);
-  const recordSize = buffer.readUInt32LE(12);
-  if (fieldCount < 6 || recordSize < 24) {
-    throw new Error(`DBFilesClient/Map.dbc has an unexpected layout (${fieldCount} fields, ${recordSize}-byte records).`);
-  }
-  const stringBlockOffset = 20 + recordCount * recordSize;
-  const requested = new Set(requestedMapIds);
-  const entries = [];
-  const mapTypeLabels = ['world', 'instance', 'raid', 'battleground', 'arena'];
-  for (let index = 0; index < recordCount; index += 1) {
-    const offset = 20 + index * recordSize;
-    const mapId = buffer.readUInt32LE(offset);
-    const mapType = buffer.readUInt32LE(offset + 8);
-    if (!(allInstances ? mapType >= 1 && mapType <= 4 : requested.has(mapId))) continue;
-    const internalName = readDbcString(buffer, stringBlockOffset, buffer.readUInt32LE(offset + 4));
-    const displayName = readDbcString(buffer, stringBlockOffset, buffer.readUInt32LE(offset + 20));
-    entries.push({
-      mapId,
-      mapType,
-      mapTypeLabel: mapTypeLabels[mapType] ?? `type-${mapType}`,
-      label: displayName || internalName || `Map ${mapId}`,
-      internalName,
-      candidates: [internalName],
-    });
-  }
-  return entries;
-}
-
-export function parseWorldMapAreaDbc(buffer) {
-  if (buffer.subarray(0, 4).toString('ascii') !== 'WDBC') return new Map();
-  const recordCount = buffer.readUInt32LE(4);
-  const fieldCount = buffer.readUInt32LE(8);
-  const recordSize = buffer.readUInt32LE(12);
-  if (fieldCount < 8 || recordSize < 32) return new Map();
-
-  const boundsByMap = new Map();
-  const stringBlockOffset = 20 + recordCount * recordSize;
-  for (let index = 0; index < recordCount; index += 1) {
-    const offset = 20 + index * recordSize;
-    const mapId = buffer.readUInt32LE(offset + 4);
-    const y1 = buffer.readFloatLE(offset + 16);
-    const y2 = buffer.readFloatLE(offset + 20);
-    const x1 = buffer.readFloatLE(offset + 24);
-    const x2 = buffer.readFloatLE(offset + 28);
-    const directory = readDbcString(buffer, stringBlockOffset, buffer.readUInt32LE(offset + 12));
-    const area = boundsByMap.get(mapId) ?? { bounds: null, directories: [] };
-    boundsByMap.set(mapId, area);
-    // Keep the directory even without bounds: a dungeon's art folder can sit
-    // on a record whose bounds are zero, its floors placed by DungeonMap.dbc.
-    if (directory && !area.directories.includes(directory)) area.directories.push(directory);
-    if (![x1, x2, y1, y2].every(Number.isFinite) || x1 === x2 || y1 === y2) continue;
-    // Don't let a sub-area overwrite the full-map projection (N adds many
-    // microdungeon WorldMapArea entries).
-    if (area.bounds && buffer.readUInt32LE(offset + 8) !== 0) continue;
-    area.bounds = {
-      minX: Math.min(x1, x2),
-      maxX: Math.max(x1, x2),
-      minY: Math.min(y1, y2),
-      maxY: Math.max(y1, y2),
-    };
-  }
-  return boundsByMap;
-}
-
-function parseDungeonMapDbc(buffer) {
-  if (buffer.subarray(0, 4).toString('ascii') !== 'WDBC') return new Map();
-  const recordCount = buffer.readUInt32LE(4);
-  const fieldCount = buffer.readUInt32LE(8);
-  const recordSize = buffer.readUInt32LE(12);
-  if (fieldCount !== 8 || recordSize !== 32) return new Map();
-
-  const floorsByMap = new Map();
-  for (let index = 0; index < recordCount; index += 1) {
-    const offset = 20 + index * recordSize;
-    const id = buffer.readUInt32LE(offset);
-    const mapId = buffer.readUInt32LE(offset + 4);
-    const floorIndex = buffer.readUInt32LE(offset + 8);
-    const clientMinX = buffer.readFloatLE(offset + 12);
-    const clientMaxX = buffer.readFloatLE(offset + 16);
-    const clientMinY = buffer.readFloatLE(offset + 20);
-    const clientMaxY = buffer.readFloatLE(offset + 24);
-    if (![clientMinX, clientMaxX, clientMinY, clientMaxY].every(Number.isFinite)) continue;
-    if (!floorsByMap.has(mapId)) floorsByMap.set(mapId, []);
-    floorsByMap.get(mapId).push({
-      id,
-      floorIndex,
-      bounds: {
-        minX: Math.min(clientMinY, clientMaxY),
-        maxX: Math.max(clientMinY, clientMaxY),
-        minY: Math.min(clientMinX, clientMaxX),
-        maxY: Math.max(clientMinX, clientMaxX),
-      },
-      chunks: [],
-    });
-  }
-  for (const floors of floorsByMap.values()) floors.sort((left, right) => left.floorIndex - right.floorIndex);
-  return floorsByMap;
-}
-
-function parseDungeonMapChunkDbc(buffer, floorsByMap) {
-  if (buffer.subarray(0, 4).toString('ascii') !== 'WDBC') return;
-  const recordCount = buffer.readUInt32LE(4);
-  const fieldCount = buffer.readUInt32LE(8);
-  const recordSize = buffer.readUInt32LE(12);
-  if (fieldCount !== 5 || recordSize !== 20) return;
-
-  const floorsById = new Map();
-  for (const floors of floorsByMap.values()) {
-    for (const floor of floors) floorsById.set(floor.id, floor);
-  }
-  for (let index = 0; index < recordCount; index += 1) {
-    const offset = 20 + index * recordSize;
-    const mapId = buffer.readUInt32LE(offset + 4);
-    const wmoGroupId = buffer.readUInt32LE(offset + 8);
-    const dungeonMapId = buffer.readUInt32LE(offset + 12);
-    const minZ = buffer.readFloatLE(offset + 16);
-    const floor = floorsById.get(dungeonMapId);
-    if (!floor || !floorsByMap.has(mapId) || !Number.isFinite(minZ)) continue;
-    floor.chunks.push({ wmoGroupId, minZ });
-  }
-  for (const floors of floorsByMap.values()) {
-    for (const floor of floors) floor.chunks.sort((left, right) => left.minZ - right.minZ);
-  }
-}
-
-export function findMpqArchives(dataDir) {
-  const archives = [];
-  const entries = walkFiles(dataDir);
-  for (const entry of entries) {
-    if (/\.mpq$/i.test(entry)) {
-      archives.push(entry);
-    }
-  }
-
-  archives.sort((a, b) => {
-    const priorityDiff = archivePriority(a) - archivePriority(b);
-    return priorityDiff !== 0 ? priorityDiff : a.localeCompare(b);
-  });
-
-  return archives;
-}
-
-export function extractMpqFile(archive, fileNames) {
-  for (const fileName of fileNames) {
-    try {
-      return archive.extractFile(fileName);
-    } catch {
-      // keep trying alternate path forms
-    }
-  }
-  return null;
 }
 
 function parseMd5TranslateTable(buffer) {
@@ -719,94 +455,28 @@ function tryExtractMinimapsWithStormlib(
       return null;
     }
 
-    let trsBuffer = null;
-    let mapDbcBuffer = null;
-    let worldMapAreaDbcBuffer = null;
-    let dungeonMapDbcBuffer = null;
-    let dungeonMapChunkDbcBuffer = null;
-    for (const { archive } of openedArchives) {
-      const candidateTrs = extractMpqFile(archive, [
-        'textures\\Minimap\\md5translate.trs',
-        'textures/minimap/md5translate.trs',
-        'Textures\\Minimap\\md5translate.trs',
-        'Textures/Minimap/md5translate.trs',
-      ]);
-      if (candidateTrs) trsBuffer = candidateTrs;
-      const candidateMapDbc = extractMpqFile(archive, [
-        'DBFilesClient\\Map.dbc',
-        'DBFilesClient/Map.dbc',
-        'dbfilesclient\\map.dbc',
-        'dbfilesclient/map.dbc',
-      ]);
-      if (candidateMapDbc) mapDbcBuffer = candidateMapDbc;
-      const candidateWorldMapAreaDbc = extractMpqFile(archive, [
-        'DBFilesClient\\WorldMapArea.dbc',
-        'DBFilesClient/WorldMapArea.dbc',
-        'dbfilesclient\\worldmaparea.dbc',
-        'dbfilesclient/worldmaparea.dbc',
-      ]);
-      if (candidateWorldMapAreaDbc) worldMapAreaDbcBuffer = candidateWorldMapAreaDbc;
-      const candidateDungeonMapDbc = extractMpqFile(archive, [
-        'DBFilesClient\\DungeonMap.dbc',
-        'DBFilesClient/DungeonMap.dbc',
-        'dbfilesclient\\dungeonmap.dbc',
-        'dbfilesclient/dungeonmap.dbc',
-      ]);
-      if (candidateDungeonMapDbc) dungeonMapDbcBuffer = candidateDungeonMapDbc;
-      const candidateDungeonMapChunkDbc = extractMpqFile(archive, [
-        'DBFilesClient\\DungeonMapChunk.dbc',
-        'DBFilesClient/DungeonMapChunk.dbc',
-        'dbfilesclient\\dungeonmapchunk.dbc',
-        'dbfilesclient/dungeonmapchunk.dbc',
-      ]);
-      if (candidateDungeonMapChunkDbc) dungeonMapChunkDbcBuffer = candidateDungeonMapChunkDbc;
-    }
-
+    // The archives are in rising priority: read from the last, so patches win.
+    const readFile = (fileName) => {
+      for (let index = openedArchives.length - 1; index >= 0; index -= 1) {
+        const file = extractMpqFile(openedArchives[index].archive, [fileName]);
+        if (file) return file;
+      }
+      return null;
+    };
+    const trsBuffer = readFile('textures\\Minimap\\md5translate.trs');
     if (!trsBuffer) return null;
 
+    const tables = readMapTables(readFile);
     let targets = CONTINENTS;
     if (requestedMapIds.length > 0 || allInstances) {
       if (mapDirOverride) {
         if (requestedMapIds.length !== 1) throw new Error('--map-dir can only be used with one --map value.');
         targets = [{ mapId: requestedMapIds[0], label: `Map ${requestedMapIds[0]}`, candidates: [mapDirOverride] }];
       } else {
-        if (!mapDbcBuffer) throw new Error('Could not extract DBFilesClient/Map.dbc; pass --map-dir explicitly.');
-        targets = parseMapDbc(mapDbcBuffer, requestedMapIds, allInstances).map((target) => {
-          const continent = target.mapType === 0 ? CONTINENTS.find((entry) => entry.mapId === target.mapId) : null;
-          return continent ? { ...target, ...continent } : target;
-        });
-        const resolvedIds = new Set(targets.map((target) => target.mapId));
-        const missing = requestedMapIds.filter((mapId) => !resolvedIds.has(mapId));
-        if (missing.length > 0) throw new Error(`Map ID(s) not found in Map.dbc: ${missing.join(', ')}`);
+        targets = resolveMapTargets(tables, requestedMapIds, allInstances);
       }
     }
-
-    if (!mapDirOverride) {
-      targets = targets.map((target) => ({
-        ...target,
-        candidates: [...new Set([...getClientMapDirectoryAliases(target.mapId), ...target.candidates])],
-      }));
-    }
-
-    if (worldMapAreaDbcBuffer) {
-      const boundsByMap = parseWorldMapAreaDbc(worldMapAreaDbcBuffer);
-      targets = targets.map((target) => {
-        // A continent spans many WorldMapArea zones. Keep the terrain atlas,
-        // rather than accidentally choosing one zone's parchment and bounds.
-        if (target.mapType === 0 && CONTINENTS.some((entry) => entry.mapId === target.mapId)) return target;
-        const area = boundsByMap.get(target.mapId);
-        return {
-          ...target,
-          worldMapBounds: area?.bounds ?? null,
-          candidates: [...new Set([...(area?.directories ?? []), ...target.candidates])],
-        };
-      });
-    }
-    if (dungeonMapDbcBuffer) {
-      const floorsByMap = parseDungeonMapDbc(dungeonMapDbcBuffer);
-      if (dungeonMapChunkDbcBuffer) parseDungeonMapChunkDbc(dungeonMapChunkDbcBuffer, floorsByMap);
-      targets = targets.map((target) => ({ ...target, floors: floorsByMap.get(target.mapId) ?? [] }));
-    }
+    targets = describeMaps(targets, tables, { aliases: !mapDirOverride });
 
     let resolvedTargets = [];
     if (requestedMapIds.length > 0 || allInstances) {
@@ -896,9 +566,7 @@ function tryExtractMinimapsWithStormlib(
       });
     }
 
-    // Targeted maps with no artwork at all still get their 3D scenes.
-    const targeted = requestedMapIds.length > 0 || allInstances;
-    if (resolvedTargets.length === 0 && !targeted) return null;
+    if (resolvedTargets.length === 0) return null;
     if (extractedCount > 0) console.log(`• Extracted ${extractedCount} minimap tile(s) directly from MPQ archives`);
     const resolvedIds = new Set(resolvedTargets.map((target) => target.mapId));
     const missingTargets = targets.filter((target) => !resolvedIds.has(target.mapId));
@@ -1298,78 +966,6 @@ function stitchFloorTarget(target, outputDir, quality) {
   };
 }
 
-async function exportScenes(options, summaries, missingTargets) {
-  const dataDir = locateDataDir(options.source);
-  if (!dataDir) throw new Error('--scenes needs a WoW client Data directory as --source.');
-  // Highest priority first, so patches override the base archives.
-  const archives = findMpqArchives(dataDir).reverse().flatMap((archivePath) => {
-    try {
-      return [MpqArchive.open(archivePath)];
-    } catch (error) {
-      console.warn(`  ! Skipping ${path.basename(archivePath)} for scene export: ${error instanceof Error ? error.message : error}`);
-      return [];
-    }
-  });
-  const readFile = (fileName) => {
-    for (const archive of archives) {
-      const file = extractMpqFile(archive, [fileName]);
-      if (file) return file;
-    }
-    return null;
-  };
-
-  // Maps without world-map artwork still get a scene, with metadata of their own.
-  const entries = [
-    ...summaries.map(({ continent, metadataPath }) => ({ continent, metadataPath })),
-    ...missingTargets.map((target) => ({ continent: target, metadataPath: path.join(options.output, `${target.mapId}.json`) })),
-  ];
-  try {
-    for (const { continent, metadataPath } of entries) {
-      if (!continent.internalName || !metadataPath) continue;
-      console.log(`• Exporting 3D scene for ${continent.label}...`);
-      try {
-        const metadata = pathExists(metadataPath)
-          ? JSON.parse(fs.readFileSync(metadataPath, 'utf8'))
-          : {
-            mapId: continent.mapId,
-            label: continent.label,
-            mapType: continent.mapType ?? null,
-            mapTypeLabel: continent.mapTypeLabel ?? null,
-            clientDirectory: null,
-          };
-        const { scene, stats } = await exportMapScene({
-          mapId: continent.mapId,
-          internalName: continent.internalName,
-          readFile,
-          outputDir: options.output,
-          textureMax: options.sceneTextureMax,
-          floors: metadata.floors ?? [],
-          worldMapBounds: metadata.worldMapBounds ?? null,
-        });
-        fs.writeFileSync(metadataPath, `${JSON.stringify({ ...metadata, schemaVersion: 3, scene }, null, 2)}\n`);
-        console.log(`  ✓ Wrote ${scene.file} (${(stats.bytes / 1048576).toFixed(1)} MB; ${stats.wmoCount} WMO, `
-          + `${stats.groupCount} groups, ${stats.doodadCount} doodads (${stats.doodadBatches} instanced batches), ${stats.modelCount} models, ${stats.textureCount} textures`
-          + `${stats.terrainTiles ? `, terrain ${stats.terrainTiles} tiles / ${stats.terrainChunks} chunks` : ''}`
-          + `${stats.liquidCount ? `, ${stats.liquidCount} liquids` : ''})`);
-        for (const skipped of stats.skippedWmos) console.warn(`  ! Skipped WMO ${skipped}`);
-        if (stats.missing.length) {
-          console.warn(`  ! ${stats.missing.length} referenced file(s) not found in the client, e.g. ${stats.missing.slice(0, 3).join(', ')}`);
-        }
-      } catch (error) {
-        console.warn(`  ! Skipping scene for ${continent.label}: ${error instanceof Error ? error.message : error}`);
-      }
-    }
-  } finally {
-    for (const archive of archives) {
-      try {
-        archive.close();
-      } catch {
-        // ignore close failures
-      }
-    }
-  }
-}
-
 async function main() {
   let options;
 
@@ -1411,14 +1007,6 @@ async function main() {
   }
   if (options.mapDir && options.mapIds.length !== 1) {
     fail('--map-dir requires exactly one --map value.');
-    return;
-  }
-  if (options.scenes && options.mapIds.length === 0 && !options.allInstances) {
-    fail('--scenes requires --map or --all-instances.');
-    return;
-  }
-  if (!Number.isInteger(options.sceneTextureMax) || options.sceneTextureMax < 1) {
-    fail(`Scene texture size must be a positive integer. Received: ${options.sceneTextureMax}`);
     return;
   }
 
@@ -1482,11 +1070,9 @@ async function main() {
     console.log(`  ✓ Wrote ${path.basename(summary.outputPath)} (${summary.width}×${summary.height}, ${summary.tileCount} tiles)`);
   }
 
-  if (summaries.length === 0 && !(options.scenes && missingTargets.length > 0)) {
+  if (summaries.length === 0) {
     throw new Error('No maps were produced. Check the resolved minimap folder names and tile naming format.');
   }
-
-  if (options.scenes) await exportScenes(options, summaries, missingTargets);
 
   if (options.allInstances) {
     const indexPath = path.join(options.output, 'index.json');

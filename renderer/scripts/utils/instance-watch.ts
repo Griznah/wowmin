@@ -36,14 +36,19 @@ export interface InstanceViewTransform {
   panY: number;
 }
 
-export interface DungeonMapFloor {
+// A DungeonMap.dbc floor: the flat view's floor maps and the 3D scene's
+// floors both carry one, under the same id.
+export interface DungeonFloor {
   id: number;
   floorIndex: number;
+  bounds: InstanceCoordinateBounds;
+  chunks: Array<{ wmoGroupId: number; minZ: number }>;
+}
+
+export interface DungeonMapFloor extends DungeonFloor {
   image: string;
   width: number;
   height: number;
-  bounds: InstanceCoordinateBounds;
-  chunks: Array<{ wmoGroupId: number; minZ: number }>;
 }
 
 export interface MinimapTileProjection {
@@ -263,10 +268,10 @@ export function getInstanceCoordinateBounds(players: MapPlayerPosition[]): Insta
   };
 }
 
-export function getParticipantDungeonFloor(
+export function getParticipantDungeonFloor<Floor extends DungeonFloor>(
   player: Pick<MapPlayerPosition, 'position_x' | 'position_y' | 'position_z' | 'wmoGroupId'>,
-  floors: DungeonMapFloor[],
-): DungeonMapFloor | null {
+  floors: Floor[],
+): Floor | null {
   if (player.wmoGroupId !== undefined && player.wmoGroupId >= 0) {
     const matchingChunks = floors.flatMap((floor) => floor.chunks
       .filter((chunk) => chunk.wmoGroupId === player.wmoGroupId)

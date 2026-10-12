@@ -6,7 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { openClientData } from './client-data.mjs';
+import { openClientData } from '../client-archives.mjs';
 import { buildEffectGlb } from './effect-model.mjs';
 import { buildIconPng } from './icons.mjs';
 import { SpellVisuals } from './spell-visuals.mjs';

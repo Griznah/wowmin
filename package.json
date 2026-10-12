@@ -11,6 +11,8 @@
     "build:css": "node scripts/build-css.js",
     "build:css:watch": "node scripts/build-css.js --watch",
     "extract:maps": "node scripts/extract-map-assets.mjs",
+    "extract:scenes": "node scripts/export-scenes.mjs",
+    "check:exports": "node scripts/check-exports.mjs",
     "extract:icons": "node scripts/extract-player-icons.mjs",
     "start": "node dist/web-server.js",
     "start:web": "npm start",

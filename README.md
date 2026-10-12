@@ -681,22 +681,33 @@ npm run extract:maps -- --source "/path/to/WoW" --all-instances
 
 ### Generating 3D instance scenes
 
-The 3D Instance Watch draws each map from a scene (`assets/instances/<mapId>.glb`,
-not in git) exported from the client by the same extractor with `--scenes`:
+The 3D Instance Watch draws each map from a scene (`assets/instances/<mapId>.glb`
+plus its manifest `<mapId>.scene.json`, not in git) exported from the client by
+a separate command. It does not need the flat artwork above, and the flat
+artwork does not need it: either can be re-run on its own.
 
 ```bash
 # One map
-npm run extract:maps -- --source "/path/to/WoW" --map 529 --scenes
+npm run extract:scenes -- --source "/path/to/WoW" --map 529
 
 # Every instance, raid, battleground, and arena (about 1.5 GB, 15 to 20 minutes)
-npm run extract:maps -- --source "/path/to/WoW" --all-instances --scenes
+npm run extract:scenes -- --source "/path/to/WoW" --all-instances
 ```
 
 A scene holds the map's buildings and their props, the props placed on the
 map, and the terrain and liquids of the area players use (each dungeon floor,
-or the world map's bounds), with props sharing a model drawn instanced. Re-run
+or the world map's bounds), with props sharing a model drawn instanced. Every
+map with client map files gets a scene, with or without flat artwork. Re-run
 the export after upgrading WoWMin if the release notes say the scene format
 changed; maps without a scene use the flat map.
+
+To check that a change to one export leaves the other alone, export into a
+fresh folder and compare it with the previous one; 2D and 3D differences are
+reported separately:
+
+```bash
+npm run check:exports -- ./assets/instances ./instances-new
+```
 
 #### Classic/TBC dungeon artwork with WDM patches
 
