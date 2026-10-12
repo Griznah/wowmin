@@ -21,12 +21,20 @@ and session recording built on the separate `mod-wowmin-telemetry` module.
 - Session History now persists and prominently displays battleground outcomes. Warsong Gulch records the final flag score, Eye of the Storm records final resource points, and other battlegrounds and arenas identify the winner; replay logs include a match-result event.
 - Added protocol v6 player gender and compact taxi, mounted, sap, stun, and Spirit of Redemption state telemetry, plus protocol v7 authoritative Warsong/Silverwing/Netherstorm flag-carrier state. Shared race/gender portraits, class icons, and prioritized state indicators appear across Players, Live Map, Instance Watch, and replay.
 - Added `npm run extract:icons` to extract client-owned portrait, class, and state BLP artwork into gitignored local PNG assets; generic emoji remain the zero-setup fallback.
+- **3D Instance Watch**: an isometric 3D view of instances, raids, battlegrounds, and arenas built from the WoW 3.3.5a client (buildings, instanced props, textured terrain, and liquids), with quarter-turn and free rotation, zoom about the pointer, Follow, and a party fade by height and distance; the flat map remains as a toggle and fallback.
+- **Live position stream**: Instance Watch reads `mod-wowmin-telemetry`'s 10 Hz UDP stream (`wowmin stream`, `WOWMIN_STREAM_HOST`/`WOWMIN_STREAM_PORT`) for smooth movement, mobs (near party, all, or off), bot paths and decisions, appearances, combat events, auras, debuffs, raid markers, passengers, and game objects. Without it, Instance Watch works as before on the 1 s telemetry.
+- **Unit models**: players and mobs are drawn with their game models (race, gear, druid forms, pets, mounts, vehicles and passengers), animated by stance, built on demand from `WOWMIN_CLIENT_DATA` in a worker and cached under `assets/models/`.
+- **Spell art**: the client's own cast, missile, impact, channel, ground, and aura effects, plus floating combat numbers; `/spell-preview` plays any spell's art on test models.
+- **Nameplates**: Neon, Grey, and Quatre plates with health, power, cast bars with spell names and icons, debuffs, threat, raid markers, and battleground crests.
+- **Scene export**: `npm run extract:maps -- --all-instances --scenes` writes a 3D scene per map to `assets/instances/`, cropped to the area players use, with repeated props GPU-instanced.
+- **Rendering performance** for battleground scale: a shared fade uniform buffer, instanced props, skeletons kept out of the scene graph with an animation budget (48 nearest units at full rate, the rest at 10 Hz, off-screen units skipped), merged unit draw calls, a 1.5 pixel-ratio cap, and a Render scale control; `?debug` shows frame rate, draws, and stream rates.
 - Added synchronized, persisted icon-size controls to Live Map and Instance Watch. Canvas markers now scale progressively with zoom, participant-list icons are larger, and pre-v6 telemetry uses extracted male race portraits instead of emoji when gender is unavailable.
 
 ### Changed
 
 - Managed-mode SOAP and database connections are now owned by the Node service instead of individual browsers. Independent services start non-fatally, retry with bounded backoff, expose non-secret status, support per-database host/credential overrides, and cannot be disconnected by another browser session.
 - WoWMin is now a web-only Node.js service; Electron entrypoints, packaging, desktop update checks, and platform installers were removed.
+- The content security policy allows WebAssembly (meshopt decoding of 3D scenes) and `blob:` images and connections (glTF textures).
 
 ### Fixed
 
