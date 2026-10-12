@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { Document, NodeIO, TextureInfo } from '@gltf-transform/core';
-import { EXTMeshoptCompression } from '@gltf-transform/extensions';
+import { EXTMeshGPUInstancing, EXTMeshoptCompression } from '@gltf-transform/extensions';
 import { MeshoptEncoder } from 'meshoptimizer';
 
 import { loadM2, M2_MATERIAL_FLAG_TWO_SIDED, M2_TEXTURE_FLAG_WRAP_S, M2_TEXTURE_FLAG_WRAP_T } from './m2.mjs';
@@ -67,6 +67,62 @@ export function transformBoundingBox([minX, minY, minZ, maxX, maxY, maxZ], { pos
   return bounds;
 }
 
+// Doodads by parent node (the map root, or a building) and then by model.
+// Copies of one model under one parent become a single node drawn with GPU
+// instancing (EXT_mesh_gpu_instancing): the viewer draws each model once per
+// building, and once for all the map's loose props, instead of once per copy.
+export class DoodadBatches {
+  constructor(builder) {
+    this.builder = builder;
+    this.parents = new Map();
+  }
+
+  add(parent, mesh, { position, rotation, scale }) {
+    let byMesh = this.parents.get(parent);
+    if (!byMesh) this.parents.set(parent, byMesh = new Map());
+    let copies = byMesh.get(mesh);
+    if (!copies) byMesh.set(mesh, copies = []);
+    copies.push({ position, rotation, scale });
+  }
+
+  // Adds the nodes; returns how many are instanced.
+  write() {
+    const { builder } = this;
+    const { document } = builder;
+    let instancing = null;
+    let batches = 0;
+    for (const [parent, byMesh] of this.parents) {
+      for (const [mesh, copies] of byMesh) {
+        if (copies.length === 1) {
+          const [{ position, rotation, scale }] = copies;
+          parent.addChild(document.createNode(`doodad-${mesh.getName()}`).setMesh(mesh)
+            .setTranslation(position).setRotation(rotation).setScale([scale, scale, scale])
+            .setExtras({ kind: 'doodad' }));
+          continue;
+        }
+        instancing ??= document.createExtension(EXTMeshGPUInstancing).setRequired(true);
+        const translations = new Float32Array(copies.length * 3);
+        const rotations = new Float32Array(copies.length * 4);
+        const scales = new Float32Array(copies.length * 3);
+        copies.forEach(({ position, rotation, scale }, index) => {
+          translations.set(position, index * 3);
+          rotations.set(rotation, index * 4);
+          scales.set([scale, scale, scale], index * 3);
+        });
+        const batch = instancing.createInstancedMesh()
+          .setAttribute('TRANSLATION', builder.accessor('VEC3', translations))
+          .setAttribute('ROTATION', builder.accessor('VEC4', rotations))
+          .setAttribute('SCALE', builder.accessor('VEC3', scales));
+        parent.addChild(document.createNode(`doodads-${mesh.getName()}`).setMesh(mesh)
+          .setExtension('EXT_mesh_gpu_instancing', batch)
+          .setExtras({ kind: 'doodads', count: copies.length }));
+        batches += 1;
+      }
+    }
+    return batches;
+  }
+}
+
 // The scene as GLB with its geometry meshopt-compressed (EXT_meshopt_compression,
 // which three.js decodes). Filter mode: lossless, except normals are stored
 // as 8-bit octahedral vectors. Textures are already compressed images.
@@ -83,7 +139,7 @@ async function writeCompressed(document) {
   }
   document.createExtension(EXTMeshoptCompression).setRequired(true)
     .setEncoderOptions({ method: EXTMeshoptCompression.EncoderMethod.FILTER });
-  return new NodeIO().registerExtensions([EXTMeshoptCompression])
+  return new NodeIO().registerExtensions([EXTMeshoptCompression, EXTMeshGPUInstancing])
     .registerDependencies({ 'meshopt.encoder': MeshoptEncoder })
     .writeBinary(document);
 }
@@ -368,6 +424,7 @@ export async function exportMapScene({
   document.createScene(`map-${mapId}`).addChild(root);
 
   const groups = [];
+  const doodads = new DoodadBatches(builder);
   const skippedWmos = [];
   let doodadCount = 0;
   let liquidCount = 0;
@@ -386,11 +443,9 @@ export async function exportMapScene({
     root.addChild(wmoNode);
 
     const meshes = builder.wmoMeshes(wmo, placement.name);
-    const doodadGroups = new Map();
     wmo.groups.forEach((group, index) => {
       const bounds = transformBoundingBox(group.boundingBox, placement);
       const exterior = Boolean(group.flags & WMO_GROUP_FLAG_EXTERIOR);
-      for (const doodadIndex of group.doodadRefs) doodadGroups.set(doodadIndex, group.groupId);
       if (!meshes[index]) return;
       groups.push({ wmoGroupId: group.groupId, exterior, ...bounds });
       wmoNode.addChild(document.createNode(`group-${group.index}`)
@@ -419,12 +474,7 @@ export async function exportMapScene({
       const definition = wmo.definitions[doodadIndex];
       const mesh = definition && builder.m2Mesh(definition.name);
       if (!mesh) continue;
-      wmoNode.addChild(document.createNode(`doodad-${doodadIndex}`)
-        .setMesh(mesh)
-        .setTranslation(definition.position)
-        .setRotation(definition.rotation)
-        .setScale([definition.scale, definition.scale, definition.scale])
-        .setExtras({ kind: 'doodad', wmoGroupId: doodadGroups.get(doodadIndex) ?? null }));
+      doodads.add(wmoNode, mesh, definition);
       doodadCount += 1;
     }
   }
@@ -439,14 +489,10 @@ export async function exportMapScene({
   for (const placement of looseDoodads) {
     const mesh = builder.m2Mesh(placement.name);
     if (!mesh) continue;
-    root.addChild(document.createNode(`doodad-${placement.uniqueId}`)
-      .setMesh(mesh)
-      .setTranslation(placement.position)
-      .setRotation(placement.rotation)
-      .setScale([placement.scale, placement.scale, placement.scale])
-      .setExtras({ kind: 'doodad', wmoGroupId: null }));
+    doodads.add(root, mesh, placement);
     doodadCount += 1;
   }
+  const doodadBatches = doodads.write();
 
   // Terrain, cropped to the area players use (placeholder tiles are skipped).
   // A map with no floors, world map bounds, or buildings to go by gets none.
@@ -565,6 +611,7 @@ export async function exportMapScene({
       wmoCount: wmoPlacements.length,
       groupCount: groups.length,
       doodadCount,
+      doodadBatches,
       modelCount: [...builder.models.values()].filter(Boolean).length,
       textureCount: [...builder.textures.values()].filter(Boolean).length,
       missing: [...builder.missing],

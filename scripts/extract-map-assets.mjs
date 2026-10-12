@@ -1327,7 +1327,7 @@ async function exportScenes(options, summaries, missingTargets) {
         });
         fs.writeFileSync(metadataPath, `${JSON.stringify({ ...metadata, schemaVersion: 3, scene }, null, 2)}\n`);
         console.log(`  ✓ Wrote ${scene.file} (${(stats.bytes / 1048576).toFixed(1)} MB; ${stats.wmoCount} WMO, `
-          + `${stats.groupCount} groups, ${stats.doodadCount} doodads, ${stats.modelCount} models, ${stats.textureCount} textures`
+          + `${stats.groupCount} groups, ${stats.doodadCount} doodads (${stats.doodadBatches} instanced batches), ${stats.modelCount} models, ${stats.textureCount} textures`
           + `${stats.terrainTiles ? `, terrain ${stats.terrainTiles} tiles / ${stats.terrainChunks} chunks` : ''}`
           + `${stats.liquidCount ? `, ${stats.liquidCount} liquids` : ''})`);
         for (const skipped of stats.skippedWmos) console.warn(`  ! Skipped WMO ${skipped}`);

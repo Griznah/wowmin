@@ -8,7 +8,9 @@ import {
   DirectionalLight,
   DoubleSide,
   FrontSide,
+  InstancedMesh,
   Material,
+  Matrix4,
   Mesh,
   MeshBasicMaterial,
   MeshLambertMaterial,
@@ -106,7 +108,11 @@ const FADE_PARAMS_OFFSET = FADE_REACH_MAX_OFFSET + 4;
 const FADE_BLOCK_FLOATS = FADE_PARAMS_OFFSET + 4;
 const FADE_VERTEX_DECLARATIONS = 'varying vec3 vWowPosition;\n';
 const FADE_VERTEX = `
-vec4 wowWorld = modelMatrix * vec4(transformed, 1.0);
+vec4 wowLocal = vec4(transformed, 1.0);
+#ifdef USE_INSTANCING
+wowLocal = instanceMatrix * wowLocal;
+#endif
+vec4 wowWorld = modelMatrix * wowLocal;
 vWowPosition = vec3(wowWorld.x, -wowWorld.z, wowWorld.y);
 `;
 const FADE_FRAGMENT_DECLARATIONS = `
@@ -177,6 +183,49 @@ interface MeshBounds {
   maxY: number;
   minZ: number;
   maxZ: number;
+  // An instanced prop (one model's copies under a building or the map).
+  instances?: InstanceBounds;
+}
+
+// The copies of an instanced prop. Those the fade and reach cut leave in
+// are packed to the front of its instance buffer, so faded copies are
+// skipped one by one, as separate meshes are.
+interface InstanceBounds {
+  // Each copy's matrix as loaded (16 floats each).
+  matrices: Float32Array;
+  // Each copy's box in server coordinates: minX, maxX, minY, maxY, minZ, maxZ.
+  boxes: Float32Array;
+  // The copies drawn now, by index, and how many.
+  shown: Uint32Array;
+  count: number;
+}
+
+// Server-coordinate box of `geometry` placed by `matrix`; three.js is Y-up,
+// so server (x, y, z) is (x, -z, y).
+const scratchBox = new Box3();
+function serverBox(geometry: BufferGeometry, matrix: Matrix4): [number, number, number, number, number, number] {
+  const box = scratchBox.copy(geometry.boundingBox!).applyMatrix4(matrix);
+  return [box.min.x, box.max.x, -box.max.z, -box.min.z, box.min.y, box.max.y];
+}
+
+function instanceBounds(mesh: InstancedMesh): { bounds: InstanceBounds; union: number[] } {
+  const count = mesh.count;
+  const matrices = new Float32Array(mesh.instanceMatrix.array);
+  const boxes = new Float32Array(count * 6);
+  const union = [Infinity, -Infinity, Infinity, -Infinity, Infinity, -Infinity];
+  const instance = new Matrix4();
+  const world = new Matrix4();
+  for (let index = 0; index < count; index += 1) {
+    const box = serverBox(mesh.geometry, world.multiplyMatrices(mesh.matrixWorld, instance.fromArray(matrices, index * 16)));
+    boxes.set(box, index * 6);
+    for (let axis = 0; axis < 6; axis += 2) {
+      union[axis] = Math.min(union[axis], box[axis]);
+      union[axis + 1] = Math.max(union[axis + 1], box[axis + 1]);
+    }
+  }
+  const shown = new Uint32Array(count);
+  shown.forEach((_, index) => { shown[index] = index; });
+  return { bounds: { matrices, boxes, shown, count }, union };
 }
 
 export type SceneLoadState = 'loading' | 'ready' | 'failed';
@@ -211,6 +260,8 @@ export class InstanceSceneView {
   private readonly liquids = new Map<string, Array<{ material: MeshBasicMaterial; frames: Texture[] }>>();
   // What the canvas currently shows, to skip redrawing an unchanged frame.
   private lastFrameKey = '';
+  // The fade and reach the scene's visible meshes were last chosen for.
+  private visibilityKey = '';
   // The fade the last frame drew with, for picking only what can be seen.
   private lastFade: { volumes: FadeVolume[]; fade: FadeSettings } | null = null;
   private readonly raycaster = new Raycaster();
@@ -379,13 +430,13 @@ export class InstanceSceneView {
         object.matrixAutoUpdate = false;
         if (!(object instanceof Mesh)) return;
         fitBoundsToIndices(object.geometry, fitted);
-        const box = new Box3().copy(object.geometry.boundingBox!).applyMatrix4(object.matrixWorld);
-        bounds.push({
-          mesh: object,
-          minX: box.min.x, maxX: box.max.x,
-          minY: -box.max.z, maxY: -box.min.z,
-          minZ: box.min.y, maxZ: box.max.y,
-        });
+        if (object instanceof InstancedMesh) {
+          const { bounds: instances, union: [minX, maxX, minY, maxY, minZ, maxZ] } = instanceBounds(object);
+          bounds.push({ mesh: object, minX, maxX, minY, maxY, minZ, maxZ, instances });
+          return;
+        }
+        const [minX, maxX, minY, maxY, minZ, maxZ] = serverBox(object.geometry, object.matrixWorld);
+        bounds.push({ mesh: object, minX, maxX, minY, maxY, minZ, maxZ });
       });
       this.meshBounds.set(root, bounds);
       this.roots.set(url, root);
@@ -414,13 +465,16 @@ export class InstanceSceneView {
     const pixelRatio = Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO) * this.renderScale;
     // Live positions redraw the overlay up to 30 times a second; the scene only
     // changes when the camera moves or the fade shifts by about a yard.
-    const frameKey = [
-      url, width, height, pixelRatio, view.pixelsPerUnit.toFixed(4),
-      ...view.center.map((value) => value.toFixed(3)),
-      ...view.basis.toCamera.map((value) => value.toFixed(5)),
-      fade.height, fade.horizontal ?? 0, ...(fade.reach ? [fade.reach.minX, fade.reach.maxX, fade.reach.minY, fade.reach.maxY, fade.reach.minZ, fade.reach.maxZ] : ['none']),
+    const visibilityKey = [
+      url, fade.height, fade.horizontal ?? 0,
+      ...(fade.reach ? [fade.reach.minX, fade.reach.maxX, fade.reach.minY, fade.reach.maxY, fade.reach.minZ, fade.reach.maxZ] : ['none']),
       ...active.flatMap((volume) => [volume.minX, volume.maxX, volume.minY, volume.maxY, volume.minZ, volume.maxZ]
         .map((value) => Math.round(value))),
+    ].join('|');
+    const frameKey = [
+      visibilityKey, width, height, pixelRatio, view.pixelsPerUnit.toFixed(4),
+      ...view.center.map((value) => value.toFixed(3)),
+      ...view.basis.toCamera.map((value) => value.toFixed(5)),
     ].join('|');
     // Animated models, live effects, and liquids need every frame.
     const liquids = this.liquids.get(url);
@@ -449,14 +503,9 @@ export class InstanceSceneView {
     data.set([reachBox.minX, reachBox.minY, reachBox.minZ], FADE_REACH_MIN_OFFSET);
     data.set([reachBox.maxX, reachBox.maxY, reachBox.maxZ], FADE_REACH_MAX_OFFSET);
     data.set([fade.height, fade.horizontal ?? 0, active.length], FADE_PARAMS_OFFSET);
-    const reach = fade.horizontal ?? Infinity;
-    for (const bounds of this.meshBounds.get(root) ?? []) {
-      bounds.mesh.visible = bounds.minZ <= reachBox.maxZ && bounds.maxZ >= reachBox.minZ
-        && bounds.minX <= reachBox.maxX && bounds.maxX >= reachBox.minX
-        && bounds.minY <= reachBox.maxY && bounds.maxY >= reachBox.minY && (!active.length || active.some((volume) =>
-        bounds.maxZ > volume.minZ - fade.height && bounds.minZ < volume.maxZ + fade.height
-        && bounds.maxX > volume.minX - reach && bounds.minX < volume.maxX + reach
-        && bounds.maxY > volume.minY - reach && bounds.minY < volume.maxY + reach));
+    if (visibilityKey !== this.visibilityKey) {
+      this.visibilityKey = visibilityKey;
+      this.chooseVisible(root, active, fade, reachBox);
     }
     // Resizing clears and reallocates the drawing buffer, so only on a change.
     const sizeKey = `${width}x${height}@${pixelRatio}`;
@@ -474,6 +523,51 @@ export class InstanceSceneView {
     this.canvas.dataset.triangles = String(this.renderer.info.render.triangles);
     this.canvas.dataset.buffer = `${this.canvas.width}x${this.canvas.height}`;
     return true;
+  }
+
+  // Leaves out the meshes, and the copies of instanced props, wholly beyond
+  // the reach box or the fade volumes' reach.
+  private chooseVisible(root: Object3D, active: FadeVolume[], fade: FadeSettings, reachBox: NonNullable<FadeSettings['reach']>): void {
+    const reach = fade.horizontal ?? Infinity;
+    const shown = (minX: number, maxX: number, minY: number, maxY: number, minZ: number, maxZ: number): boolean =>
+      minZ <= reachBox.maxZ && maxZ >= reachBox.minZ
+      && minX <= reachBox.maxX && maxX >= reachBox.minX
+      && minY <= reachBox.maxY && maxY >= reachBox.minY && (!active.length || active.some((volume) =>
+        maxZ > volume.minZ - fade.height && minZ < volume.maxZ + fade.height
+        && maxX > volume.minX - reach && minX < volume.maxX + reach
+        && maxY > volume.minY - reach && minY < volume.maxY + reach));
+    for (const bounds of this.meshBounds.get(root) ?? []) {
+      const visible = shown(bounds.minX, bounds.maxX, bounds.minY, bounds.maxY, bounds.minZ, bounds.maxZ);
+      const instances = bounds.instances;
+      if (!instances || !visible) {
+        bounds.mesh.visible = visible;
+        continue;
+      }
+      const { boxes, matrices } = instances;
+      const total = matrices.length / 16;
+      let count = 0;
+      let changed = false;
+      for (let index = 0; index < total; index += 1) {
+        const box = index * 6;
+        if (!shown(boxes[box], boxes[box + 1], boxes[box + 2], boxes[box + 3], boxes[box + 4], boxes[box + 5])) continue;
+        if (instances.shown[count] !== index || count >= instances.count) changed = true;
+        instances.shown[count] = index;
+        count += 1;
+      }
+      changed ||= count !== instances.count;
+      instances.count = count;
+      const mesh = bounds.mesh as InstancedMesh;
+      mesh.visible = count > 0;
+      if (!changed || !count) continue;
+      const array = mesh.instanceMatrix.array as Float32Array;
+      for (let slot = 0; slot < count; slot += 1) {
+        const from = instances.shown[slot] * 16;
+        array.set(matrices.subarray(from, from + 16), slot * 16);
+      }
+      mesh.count = count;
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.computeBoundingSphere();
+    }
   }
 
   // The scene point (server coordinates) seen at canvas pixel (x, y) in
@@ -585,7 +679,9 @@ export class InstanceSceneView {
           vertexShaded: vertexLit, shadingScale, partyFade: this.injectPartyFade,
         }));
       }
-      const key = `${source.uuid}|${vertexLit}`;
+      // Instanced props get their own copy: three.js re-derives the shader
+      // program whenever a material switches between instanced and plain.
+      const key = `${source.uuid}|${vertexLit}|${mesh instanceof InstancedMesh}`;
       const cached = this.materials.get(key);
       if (cached) return cached;
       const standard = source as MeshStandardMaterial;

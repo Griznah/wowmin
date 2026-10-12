@@ -484,6 +484,37 @@ test('takes the box the buildings in the play area fill', async () => {
   assert.deepEqual(buildingReach([], [], [[1, 2, 3]]), { minX: 1, maxX: 1, minY: 2, maxY: 2, minZ: 3, maxZ: 3 });
 });
 
+test('draws copies of one prop under one parent as a single instanced node', async () => {
+  const { DoodadBatches } = await load('export-scene.mjs');
+  const { Document } = require('@gltf-transform/core');
+  const document = new Document();
+  const buffer = document.createBuffer();
+  const builder = { document, accessor: (type, array) => document.createAccessor().setType(type).setArray(array).setBuffer(buffer) };
+  const root = document.createNode('root');
+  const building = document.createNode('building');
+  const tree = document.createMesh('tree');
+  const rock = document.createMesh('rock');
+  const batches = new DoodadBatches(builder);
+  batches.add(root, tree, { position: [1, 2, 3], rotation: [0, 0, 0, 1], scale: 1 });
+  batches.add(root, tree, { position: [4, 5, 6], rotation: [0, 0, 1, 0], scale: 2 });
+  batches.add(root, rock, { position: [7, 8, 9], rotation: [0, 0, 0, 1], scale: 0.5 });
+  // The same model under a building is a separate batch.
+  batches.add(building, tree, { position: [0, 0, 0], rotation: [0, 0, 0, 1], scale: 1 });
+  assert.equal(batches.write(), 1);
+
+  const [trees, rocks] = root.listChildren();
+  assert.equal(trees.getMesh(), tree);
+  const instances = trees.getExtension('EXT_mesh_gpu_instancing');
+  assert.deepEqual([...instances.getAttribute('TRANSLATION').getArray()], [1, 2, 3, 4, 5, 6]);
+  assert.deepEqual([...instances.getAttribute('ROTATION').getArray()], [0, 0, 0, 1, 0, 0, 1, 0]);
+  assert.deepEqual([...instances.getAttribute('SCALE').getArray()], [1, 1, 1, 2, 2, 2]);
+  // A lone copy stays a plain node.
+  assert.equal(rocks.getExtension('EXT_mesh_gpu_instancing'), null);
+  assert.deepEqual(rocks.getTranslation(), [7, 8, 9]);
+  assert.deepEqual(rocks.getScale(), [0.5, 0.5, 0.5]);
+  assert.equal(building.listChildren().length, 1);
+});
+
 test('crops an icon to its visible pixels', async () => {
   const { cropToVisible } = await load('icons.mjs');
   const width = 4;
