@@ -136,10 +136,17 @@ test('reads buildings\' and models\' point lights from their own bytes', async (
   m2.writeUInt16LE(1, light);
   [0, 0.25, 1].forEach((value, axis) => m2.writeFloatLE(value, light + 4 + axis * 4));
   let next = 0x300;
+  // One sequence of one key: its time (0) and its value.
   const track = (at, values) => {
-    const keys = next;
-    const data = next + 8;
-    next += 8 + values.length * 4;
+    const times = next;
+    const time = next + 8;
+    const keys = next + 12;
+    const data = next + 20;
+    next += 20 + values.length * 4;
+    m2.writeUInt32LE(1, at + 4);
+    m2.writeUInt32LE(times, at + 8);
+    m2.writeUInt32LE(1, times);
+    m2.writeUInt32LE(time, times + 4);
     m2.writeUInt32LE(1, at + 12);
     m2.writeUInt32LE(keys, at + 16);
     m2.writeUInt32LE(1, keys);
@@ -228,6 +235,7 @@ test('the floor colour a unit is lit by indoors is doubled, plus the building\'s
 
 test('finds a group\'s transition faces by render batch', async () => {
   const { transitionTriangles } = await import(pathToFileURL(path.join(__dirname, 'scene', 'lights.mjs')).href);
+  const { readGroupHeader } = await import(pathToFileURL(path.join(__dirname, 'scene', 'wmo.mjs')).href);
   // Five triangles: batch 0 has 0-1, batch 1 has 2-4; triangles 1 and 3 are transition faces.
   const mopy = Buffer.from([0x20, 0, 0x21, 0, 0x20, 0, 0x01, 0, 0x08, 0]);
   const moba = Buffer.alloc(48);
@@ -236,9 +244,9 @@ test('finds a group\'s transition faces by render batch', async () => {
   moba.writeUInt32LE(6, 24 + 0x0c);
   moba.writeUInt16LE(9, 24 + 0x10);
   const group = (chunks) => chunkBytes('MOGP', Buffer.concat([Buffer.alloc(0x44), ...chunks]));
-  assert.deepEqual(plain(transitionTriangles(group([chunkBytes('MOPY', mopy), chunkBytes('MOBA', moba)]))), [[1], [1]]);
+  assert.deepEqual(plain(transitionTriangles(readGroupHeader(group([chunkBytes('MOPY', mopy), chunkBytes('MOBA', moba)])))), [[1], [1]]);
   const none = Buffer.from([0x20, 0, 0x20, 0, 0x20, 0, 0, 0, 0x08, 0]);
-  assert.deepEqual(plain(transitionTriangles(group([chunkBytes('MOPY', none), chunkBytes('MOBA', moba)]))), []);
+  assert.deepEqual(plain(transitionTriangles(readGroupHeader(group([chunkBytes('MOPY', none), chunkBytes('MOBA', moba)])))), []);
 });
 
 test('picks the zone\'s ambient multiplier for a map', async () => {

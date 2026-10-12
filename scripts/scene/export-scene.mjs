@@ -12,7 +12,7 @@ import { EXTMeshGPUInstancing, EXTMeshoptCompression } from '@gltf-transform/ext
 import { MeshoptEncoder } from 'meshoptimizer';
 
 import { loadM2, M2_BLEND, M2_MATERIAL_FLAG_TWO_SIDED, M2_TEXTURE_FLAG_WRAP_S, M2_TEXTURE_FLAG_WRAP_T } from './m2.mjs';
-import { dedupeByUniqueId, readAdtPlacements, readWdt } from './placement.mjs';
+import { dedupeByUniqueId, readAdtPlacements, readWdt, rotateByQuaternion } from './placement.mjs';
 import { PNG } from 'pngjs';
 
 import { ATLAS_SIZE, buildTerrainTile, chunkInArea, playArea, pointInArea, WDT_FLAG_BIG_ALPHA } from './terrain.mjs';
@@ -41,17 +41,6 @@ const TERRAIN_TEXTURE_MAX = 256;
 const LIQUID_TEXTURE_MAX = 128;
 
 const WMO_BLEND = ['opaque', 'alphaKey', 'alpha', 'add', 'mod', 'mod2x'];
-
-function rotateByQuaternion([x, y, z], [qx, qy, qz, qw]) {
-  const tx = 2 * (qy * z - qz * y);
-  const ty = 2 * (qz * x - qx * z);
-  const tz = 2 * (qx * y - qy * x);
-  return [
-    x + qw * tx + qy * tz - qz * ty,
-    y + qw * ty + qz * tx - qx * tz,
-    z + qw * tz + qx * ty - qy * tx,
-  ];
-}
 
 // The box around `boxes` ({ minX, maxX, minY, maxY, minZ, maxZ } each);
 // infinite bounds when there are none.
@@ -490,7 +479,7 @@ export async function exportMapScene({
       const exterior = Boolean(group.flags & WMO_GROUP_FLAG_EXTERIOR);
       if (!meshes[index]) return;
       groups.push({ wmoGroupId: group.groupId, exterior, ...bounds });
-      // How the client lights the group's batches (wmoLight in the
+      // How the client lights the group's batches (buildingBatchLight in the
       // renderer): its transition, interior, and exterior batch counts
       // (its primitives are its batches, in that order); whether the
       // building takes the newer render path, which adds its ambient

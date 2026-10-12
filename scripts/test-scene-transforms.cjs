@@ -103,6 +103,7 @@ test('reads the MOGP group ID, flags, and doodad references from a WMO group', a
   assert.deepEqual(readGroupHeader(group), {
     flags: 0x2805,
     polyFlags: null,
+    renderBatches: [],
     boundingBox: [-1, -2, -3, 4, 5, 6],
     transBatchCount: 3,
     intBatchCount: 4,

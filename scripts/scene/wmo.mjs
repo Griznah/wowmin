@@ -22,16 +22,24 @@ const WMO_ROOT_FLAG_VERTEX_COLORS_FIXED = 0x8;
 // the header's ambient to its interiors' light and to the floor colour it
 // lights things by (Wow.exe FUN_007a9380, FUN_007c7fe0).
 export const WMO_ROOT_FLAG_UNIFIED = 0x2;
-const WMO_ROOT_FLAG_ADD_AMBIENT = WMO_ROOT_FLAG_UNIFIED;
-const WMO_GROUP_FLAG_EXTERIOR_LIT = 0x40;
-const MOHD_AMBIENT = 0x1c;
-const MOPY_FLAG_TRANSITION = 0x1;
+// A group lit by the outdoor light although it is not exterior.
+export const WMO_GROUP_FLAG_EXTERIOR_LIT = 0x40;
+// MOHD, a WMO's header: its ambient colour (BGRA) at this offset, its flags
+// (u16) at the next.
+export const MOHD_AMBIENT = 0x1c;
+export const MOHD_FLAGS = 0x3c;
+// MOPY flag of a transition face, where a doorway or cave mouth blends
+// indoor light into outdoor.
+export const MOPY_FLAG_TRANSITION = 0x1;
 // A prop's floor: a ray from this far above its origin down to this far
 // below (Wow.exe FUN_007a0d60).
 const PROP_FLOOR_ABOVE = 1;
 const PROP_FLOOR_BELOW = 12;
 
 const MOGP_HEADER_SIZE = 0x44;
+// MOBA, a group's render batches (24 bytes): first index at 0x0c, index
+// count at 0x10.
+const MOBA_SIZE = 24;
 const MOMT_ENTRY_SIZE = 64;
 const MODS_ENTRY_SIZE = 32;
 const MODD_ENTRY_SIZE = 40;
@@ -43,11 +51,19 @@ export function groupFileName(rootName, index) {
 export function readGroupHeader(groupBuffer) {
   const mogp = findChunk(readChunks(groupBuffer), 'MOGP');
   if (!mogp || mogp.length < MOGP_HEADER_SIZE) throw new Error('WMO group is missing its MOGP header.');
-  const doodadRefs = findChunk(readChunks(mogp, MOGP_HEADER_SIZE), 'MODR');
+  const chunks = readChunks(mogp, MOGP_HEADER_SIZE);
+  const doodadRefs = findChunk(chunks, 'MODR');
+  const moba = findChunk(chunks, 'MOBA');
   return {
     flags: mogp.readUInt32LE(0x08),
     // MOPY: a flags byte and a material per triangle.
-    polyFlags: findChunk(readChunks(mogp, MOGP_HEADER_SIZE), 'MOPY'),
+    polyFlags: findChunk(chunks, 'MOPY'),
+    // Each render batch's first index and index count.
+    renderBatches: moba
+      ? Array.from({ length: Math.floor(moba.length / MOBA_SIZE) }, (_, index) => ({
+        first: moba.readUInt32LE(index * MOBA_SIZE + 0x0c), count: moba.readUInt16LE(index * MOBA_SIZE + 0x10),
+      }))
+      : [],
     boundingBox: readFloats(mogp, 0x0C, 6),
     transBatchCount: mogp.readUInt16LE(0x28),
     intBatchCount: mogp.readUInt16LE(0x2a),
@@ -187,8 +203,16 @@ export function loadWmo(rootName, readFile) {
 // the outdoor light (its alpha). [r, g, b, share], 0 to 1; 'outdoor' for a
 // prop in an exterior or outdoor-lit group; null if no group lists it or
 // the ray misses.
+const propGroups = new WeakMap();
+
 export function propFloor(wmo, doodadIndex, [x, y, z]) {
-  const group = wmo.groups.find((candidate) => candidate.doodadRefs.includes(doodadIndex));
+  let groups = propGroups.get(wmo);
+  if (!groups) {
+    groups = new Map();
+    for (const candidate of wmo.groups) for (const ref of candidate.doodadRefs) if (!groups.has(ref)) groups.set(ref, candidate);
+    propGroups.set(wmo, groups);
+  }
+  const group = groups.get(doodadIndex);
   if (!group) return null;
   if (group.flags & (WMO_GROUP_FLAG_EXTERIOR | WMO_GROUP_FLAG_EXTERIOR_LIT)) return 'outdoor';
   const { positions, indices, colors, polyFlags } = group;
@@ -197,24 +221,32 @@ export function propFloor(wmo, doodadIndex, [x, y, z]) {
   const bottom = z - PROP_FLOOR_BELOW;
   let best = null;
   for (let triangle = 0; triangle * 3 + 2 < indices.length; triangle += 1) {
-    const [a, b, c] = [indices[triangle * 3], indices[triangle * 3 + 1], indices[triangle * 3 + 2]];
-    const [ax, ay, az] = [positions[a * 3], positions[a * 3 + 1], positions[a * 3 + 2]];
-    const [bx, by, bz] = [positions[b * 3], positions[b * 3 + 1], positions[b * 3 + 2]];
-    const [cx, cy, cz] = [positions[c * 3], positions[c * 3 + 1], positions[c * 3 + 2]];
+    const a = indices[triangle * 3];
+    const b = indices[triangle * 3 + 1];
+    const c = indices[triangle * 3 + 2];
+    const ax = positions[a * 3];
+    const ay = positions[a * 3 + 1];
+    const bx = positions[b * 3];
+    const by = positions[b * 3 + 1];
+    const cx = positions[c * 3];
+    const cy = positions[c * 3 + 1];
+    // Most triangles are nowhere near the prop.
+    if ((x < ax && x < bx && x < cx) || (x > ax && x > bx && x > cx)
+      || (y < ay && y < by && y < cy) || (y > ay && y > by && y > cy)) continue;
     const area = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
     if (Math.abs(area) < 1e-9) continue;
     const wa = ((by - cy) * (x - cx) + (cx - bx) * (y - cy)) / area;
     const wb = ((cy - ay) * (x - cx) + (ax - cx) * (y - cy)) / area;
     const wc = 1 - wa - wb;
     if (wa < 0 || wb < 0 || wc < 0) continue;
-    const height = wa * az + wb * bz + wc * cz;
+    const height = wa * positions[a * 3 + 2] + wb * positions[b * 3 + 2] + wc * positions[c * 3 + 2];
     if (height > top || height < bottom || (best && height <= best.height)) continue;
     best = { height, triangle, weights: [[a, wa], [b, wb], [c, wc]] };
   }
   if (!best) return null;
   // BGRA bytes, blended by the hit's weights.
   const channel = (offset) => best.weights.reduce((sum, [vertex, weight]) => sum + colors[vertex * 4 + offset] * weight, 0);
-  const ambient = wmo.rootFlags & WMO_ROOT_FLAG_ADD_AMBIENT ? wmo.ambient : 0;
+  const ambient = wmo.rootFlags & WMO_ROOT_FLAG_UNIFIED ? wmo.ambient : 0;
   const lit = (offset) => Math.min(255, channel(offset) * 2 + ((ambient >> (offset * 8)) & 0xff)) / 255;
   const transition = polyFlags && polyFlags[best.triangle * 2] & MOPY_FLAG_TRANSITION;
   return [lit(2), lit(1), lit(0), transition ? channel(3) / 255 : 0];

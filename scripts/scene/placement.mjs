@@ -17,6 +17,18 @@ export function toM2Path(name) {
   return name.replace(/\.(mdx|mdl)$/i, '.m2');
 }
 
+// A point turned by a quaternion [x, y, z, w].
+export function rotateByQuaternion([x, y, z], [qx, qy, qz, qw]) {
+  const tx = 2 * (qy * z - qz * y);
+  const ty = 2 * (qz * x - qx * z);
+  const tz = 2 * (qx * y - qy * x);
+  return [
+    x + qw * tx + qy * tz - qz * ty,
+    y + qw * ty + qz * tx - qx * tz,
+    z + qw * tz + qx * ty - qy * tx,
+  ];
+}
+
 export function placementToWorld(position, rotation, scale = 1) {
   return {
     position: WowMap.getNormalizedDefPosition(position),

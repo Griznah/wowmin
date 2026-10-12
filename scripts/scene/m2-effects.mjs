@@ -14,14 +14,14 @@ const PARTICLE_FLAG_COMPRESSED_GRAVITY = 0x800000;
 const COMPRESSED_GRAVITY_SCALE = 0.04238648;
 
 const reader = (width, read) => ({ width, read });
-const FLOAT = reader(4, (buffer, at) => buffer.readFloatLE(at));
+export const FLOAT = reader(4, (buffer, at) => buffer.readFloatLE(at));
 const FIXED16 = reader(2, (buffer, at) => buffer.readInt16LE(at) / FIXED16_ONE);
 const UINT16 = reader(2, (buffer, at) => buffer.readUInt16LE(at));
 const UINT8 = reader(1, (buffer, at) => buffer.readUInt8(at));
 const UINT32 = reader(4, (buffer, at) => buffer.readUInt32LE(at));
 const INT32 = reader(4, (buffer, at) => buffer.readInt32LE(at));
 const VEC2 = { ...FLOAT, components: 2 };
-const VEC3 = { ...FLOAT, components: 3 };
+export const VEC3 = { ...FLOAT, components: 3 };
 
 function m2Array(buffer, at) {
   const count = buffer.readUInt32LE(at);

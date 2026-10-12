@@ -5,11 +5,13 @@
 // braziers' and bonfires' model lights), placed in server coordinates.
 // Served on demand as /assets/models/light/<mapId>.json.
 
-import { findChunk, readChunks } from './chunks.mjs';
+import { findChunk, readChunks, readFloats } from './chunks.mjs';
 import { readDbc } from './dbc.mjs';
-import { dedupeByUniqueId, readAdtPlacements, readWdt } from './placement.mjs';
+import { FLOAT, readTrack, VEC3 } from './m2-effects.mjs';
+import { dedupeByUniqueId, readAdtPlacements, readWdt, rotateByQuaternion } from './placement.mjs';
 import {
-  groupFileName, readDoodadDefinitions, readGroupHeader, selectDoodadIndices, WMO_GROUP_FLAG_EXTERIOR,
+  groupFileName, MOHD_AMBIENT, MOHD_FLAGS, MOPY_FLAG_TRANSITION, readDoodadDefinitions, readGroupHeader, selectDoodadIndices,
+  WMO_GROUP_FLAG_EXTERIOR, WMO_GROUP_FLAG_EXTERIOR_LIT, WMO_ROOT_FLAG_UNIFIED,
 } from './wmo.mjs';
 
 // Light.dbc: map, position, falloff start and end (the inner and outer
@@ -63,24 +65,6 @@ const M2_LIGHT_DIFFUSE_COLOR = 56;
 const M2_LIGHT_DIFFUSE_INTENSITY = 76;
 const M2_LIGHT_START = 96;
 const M2_LIGHT_END = 116;
-const M2_TRACK_KEYS = 12;
-// MOHD, a WMO's header: its ambient colour (BGRA) and flags. With flag 0x2
-// the client adds the ambient to the floor colour it lights units by.
-const MOHD_AMBIENT = 0x1c;
-const MOHD_FLAGS = 0x3c;
-const MOHD_FLAG_ADD_AMBIENT = 0x2;
-// A group lit by the outdoor light although it is not exterior.
-const WMO_GROUP_FLAG_EXTERIOR_LIT = 0x40;
-// A group's chunks after its MOGP header: MOPY, a flags byte and a material
-// per triangle (flag 0x1 a transition face, where a doorway or cave mouth
-// blends indoor light into outdoor), and MOBA, its render batches (24 bytes:
-// first index at 0x0c, index count at 0x10), in the order the scene's
-// primitives are.
-const MOGP_HEADER_SIZE = 0x44;
-const MOPY_FLAG_TRANSITION = 0x1;
-const MOBA_SIZE = 24;
-const MOBA_START_INDEX = 0x0c;
-const MOBA_INDEX_COUNT = 0x10;
 // AreaTable: parent area, and the ambient multiplier characters' light is
 // scaled by (Wow.exe FUN_007831a0).
 const AREA_MAP = 1;
@@ -101,12 +85,9 @@ function bandKeys(band) {
 
 // A point turned by a placement's quaternion, scaled, and moved to its
 // position.
-export function placePoint({ position, rotation: [x, y, z, w], scale }, [px, py, pz]) {
-  const [vx, vy, vz] = [px * scale, py * scale, pz * scale];
-  // v + 2w(q × v) + 2 q × (q × v)
-  const [cx, cy, cz] = [y * vz - z * vy, z * vx - x * vz, x * vy - y * vx];
-  const [dx, dy, dz] = [y * cz - z * cy, z * cx - x * cz, x * cy - y * cx];
-  return [position[0] + vx + 2 * (w * cx + dx), position[1] + vy + 2 * (w * cy + dy), position[2] + vz + 2 * (w * cz + dz)];
+export function placePoint({ position, rotation, scale }, [px, py, pz]) {
+  const [x, y, z] = rotateByQuaternion([px * scale, py * scale, pz * scale], rotation);
+  return [position[0] + x, position[1] + y, position[2] + z];
 }
 
 const toColor = (rgb) => rgb.reduce((color, channel) => (color << 8) | Math.round(Math.min(1, Math.max(0, channel)) * 255), 0);
@@ -118,7 +99,7 @@ export function readWmoLights(rootChunks) {
   for (let at = 0; molt && at + MOLT_SIZE <= molt.length; at += MOLT_SIZE) {
     if (!MOLT_POINT_TYPES.has(molt[at + MOLT_TYPE])) continue;
     lights.push({
-      position: [0, 1, 2].map((axis) => molt.readFloatLE(at + MOLT_POSITION + axis * 4)),
+      position: readFloats(molt, at + MOLT_POSITION, 3),
       color: molt.readUInt32LE(at + MOLT_COLOR) & 0xffffff,
       intensity: molt.readFloatLE(at + MOLT_INTENSITY),
       start: molt.readFloatLE(at + MOLT_START),
@@ -133,27 +114,24 @@ export function readM2Lights(buffer) {
   if (!buffer || buffer.length < M2_LIGHTS + 8) return [];
   const count = buffer.readUInt32LE(M2_LIGHTS);
   const offset = buffer.readUInt32LE(M2_LIGHTS + 4);
-  // The track's first key, `width` floats.
-  const firstKey = (track, width) => {
-    if (!buffer.readUInt32LE(track + M2_TRACK_KEYS)) return null;
-    const keys = buffer.readUInt32LE(track + M2_TRACK_KEYS + 4);
-    if (!buffer.readUInt32LE(keys)) return null;
-    const at = buffer.readUInt32LE(keys + 4);
-    return Array.from({ length: width }, (_, index) => buffer.readFloatLE(at + index * 4));
+  // The track's first key (its first sequence's), or null.
+  const firstKey = (track, type) => {
+    const values = readTrack(buffer, track, type).sequences[0]?.values ?? [];
+    return values.length ? values.slice(0, type.components ?? 1) : null;
   };
   const lights = [];
   for (let index = 0; index < count; index += 1) {
     const at = offset + index * M2_LIGHT_SIZE;
     if (at + M2_LIGHT_SIZE > buffer.length || buffer.readUInt16LE(at) !== M2_LIGHT_POINT) continue;
-    const color = firstKey(at + M2_LIGHT_DIFFUSE_COLOR, 3);
-    const intensity = firstKey(at + M2_LIGHT_DIFFUSE_INTENSITY, 1)?.[0] ?? 0;
-    const end = firstKey(at + M2_LIGHT_END, 1)?.[0] ?? 0;
+    const color = firstKey(at + M2_LIGHT_DIFFUSE_COLOR, VEC3);
+    const intensity = firstKey(at + M2_LIGHT_DIFFUSE_INTENSITY, FLOAT)?.[0] ?? 0;
+    const end = firstKey(at + M2_LIGHT_END, FLOAT)?.[0] ?? 0;
     if (!color || intensity <= 0 || end <= 0) continue;
     lights.push({
-      position: [0, 1, 2].map((axis) => buffer.readFloatLE(at + M2_LIGHT_POSITION + axis * 4)),
+      position: readFloats(buffer, at + M2_LIGHT_POSITION, 3),
       color: toColor(color),
       intensity,
-      start: firstKey(at + M2_LIGHT_START, 1)?.[0] ?? 0,
+      start: firstKey(at + M2_LIGHT_START, FLOAT)?.[0] ?? 0,
       end,
     });
   }
@@ -174,25 +152,19 @@ function mapPlacements(readFile, directory) {
   };
 }
 
-// A group's transition faces, by render batch: each batch's triangles
+// A group's transition faces (from its header, readGroupHeader), by render
+// batch, in the order the scene's primitives are: each batch's triangles
 // (counted from its first index) that have the transition flag, or null for
 // none. Empty when the group has none.
-export function transitionTriangles(groupBuffer) {
-  const mogp = findChunk(readChunks(groupBuffer), 'MOGP');
-  if (!mogp || mogp.length < MOGP_HEADER_SIZE) return [];
-  const chunks = readChunks(mogp, MOGP_HEADER_SIZE);
-  const mopy = findChunk(chunks, 'MOPY');
-  const moba = findChunk(chunks, 'MOBA');
-  if (!mopy || !moba) return [];
+export function transitionTriangles({ polyFlags, renderBatches }) {
+  if (!polyFlags) return [];
+  const triangleCount = polyFlags.length / 2;
   const batches = [];
   let any = false;
-  for (let at = 0; at + MOBA_SIZE <= moba.length; at += MOBA_SIZE) {
-    const first = moba.readUInt32LE(at + MOBA_START_INDEX) / 3;
-    const count = moba.readUInt16LE(at + MOBA_INDEX_COUNT) / 3;
+  for (const { first, count } of renderBatches) {
     const triangles = [];
-    for (let triangle = 0; triangle < count; triangle += 1) {
-      const flags = mopy[(first + triangle) * 2];
-      if (flags !== undefined && flags & MOPY_FLAG_TRANSITION) triangles.push(triangle);
+    for (let triangle = 0; triangle < count / 3 && first / 3 + triangle < triangleCount; triangle += 1) {
+      if (polyFlags[(first / 3 + triangle) * 2] & MOPY_FLAG_TRANSITION) triangles.push(triangle);
     }
     any ||= triangles.length > 0;
     batches.push(triangles.length ? triangles : null);
@@ -213,13 +185,14 @@ export function interiorGroups(readFile, wmoNames) {
     const mohd = rootBuffer && findChunk(readChunks(rootBuffer), 'MOHD');
     if (!mohd) continue;
     const groupCount = mohd.readUInt32LE(4);
-    const ambient = mohd.readUInt16LE(MOHD_FLAGS) & MOHD_FLAG_ADD_AMBIENT ? mohd.readUInt32LE(MOHD_AMBIENT) & 0xffffff : 0;
+    const ambient = mohd.readUInt16LE(MOHD_FLAGS) & WMO_ROOT_FLAG_UNIFIED ? mohd.readUInt32LE(MOHD_AMBIENT) & 0xffffff : 0;
     for (let index = 0; index < groupCount; index += 1) {
       const groupBuffer = readFile(groupFileName(name, index));
       if (!groupBuffer) continue;
-      const { flags, groupId } = readGroupHeader(groupBuffer);
+      const header = readGroupHeader(groupBuffer);
+      const { flags, groupId } = header;
       if (flags & WMO_GROUP_FLAG_EXTERIOR) continue;
-      const transitions = transitionTriangles(groupBuffer);
+      const transitions = transitionTriangles(header);
       const entry = {
         ...(ambient ? { ambient } : {}),
         ...(flags & WMO_GROUP_FLAG_EXTERIOR_LIT ? { outdoor: true } : {}),
@@ -303,18 +276,26 @@ export function mapLights(readFile, mapId) {
       ambient: bandKeys(band(BAND_AMBIENT)),
     };
   };
-  const own = [...lights.records()].filter((record) => record.uint(LIGHT_MAP) === mapId);
+  const records = [...lights.records()];
+  const own = records.filter((record) => record.uint(LIGHT_MAP) === mapId);
   const isDefault = (record) => [0, 1, 2].every((axis) => record.float(LIGHT_POSITION + axis) === 0);
   const described = own.map((record) => describe(record, isDefault(record)));
   if (!described.some((light) => light.defaultLight)) {
-    const fallback = [...lights.records()].find((record) => record.uint(0) === FALLBACK_LIGHT);
+    const fallback = records.find((record) => record.uint(0) === FALLBACK_LIGHT);
     if (fallback) described.push(describe(fallback, true));
   }
   const map = table('Map')?.byId().get(mapId);
   const directory = map?.string(MAP_DIRECTORY);
-  const placements = directory ? mapPlacements(readFile, directory) : { wmos: [], doodads: [] };
-  const objects = objectLights(readFile, placements);
-  const interiors = interiorGroups(readFile, placements.wmos.map((wmo) => wmo.name));
+  // The objects' and the interiors' passes read the same buildings once.
+  const buildings = new Map();
+  const readOnce = (name) => {
+    if (!/\.wmo$/i.test(name)) return readFile(name);
+    if (!buildings.has(name)) buildings.set(name, readFile(name));
+    return buildings.get(name);
+  };
+  const placements = directory ? mapPlacements(readOnce, directory) : { wmos: [], doodads: [] };
+  const objects = objectLights(readOnce, placements);
+  const interiors = interiorGroups(readOnce, placements.wmos.map((wmo) => wmo.name));
   const areas = table('AreaTable');
   const ambientMultiplier = areas ? zoneAmbientMultiplier(areas, mapId) : 0;
   const fixedTime = map ? map.int(MAP_TIME_OF_DAY_OVERRIDE) : -1;

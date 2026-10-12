@@ -54,11 +54,11 @@ const PET_OVERSIZED_DISPLAY_SCALE = 2;
 
 // How a unit's spells' kits change its model: a colour it is multiplied by
 // (0xRRGGBB, null for none) and how see-through it is (1 opaque); and its
-// light indoors (the building's on the floor under it), or null outdoors.
+// light indoors (the building's on the floor under it; none outdoors).
 export interface UnitLook {
   color: number | null;
   alpha: number;
-  indoor?: IndoorLook | null;
+  indoor?: IndoorLook;
 }
 
 // A unit's light indoors, and how far its light's direction leans from the
