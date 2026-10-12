@@ -1,7 +1,7 @@
 // Client icons as PNG for wowmin's overlay: a spell's icon (Spell.dbc →
 // SpellIcon.dbc → Interface\Icons), each side's PvP crest (the target
 // frame's), and the raid markers (1 star .. 8 skull), the last two cropped to
-// what's visible. Built on request from the viewer's own
+// what's visible; plus a spell chain's texture (SpellChainEffects). Built on request from the viewer's own
 // client data, like the unit models; never committed.
 
 import { PNG } from 'pngjs';
@@ -15,12 +15,18 @@ const FACTION_ICONS = {
 const SPELL_ICON_FIELD = 133;
 const ICON_PATH_FIELD = 1;
 const ICON_MAX_SIZE = 64;
+const CHAIN_TEXTURE_MAX_SIZE = 256;
 // Alpha below this counts as empty padding when cropping.
 const VISIBLE_ALPHA = 20;
 
-// The icon's BLP path, and whether to crop its padding, for a request's
-// params ({ faction } or { spellId }); null if there is none.
+// The icon's BLP path, whether to crop its padding, and its largest edge,
+// for a request's params ({ faction }, { marker }, { chain }, or
+// { spellId }); null if there is none.
 export function iconSource(params, tables) {
+  if (params.chain) {
+    const file = tables.chainTexture(Number(params.chain));
+    return file ? { path: file, crop: false, maxSize: CHAIN_TEXTURE_MAX_SIZE } : null;
+  }
   if (params.faction) return FACTION_ICONS[params.faction] ? { path: FACTION_ICONS[params.faction], crop: true } : null;
   if (params.marker) {
     const marker = Number(params.marker);
@@ -62,7 +68,7 @@ export function buildIconPng(readFile, params, tables) {
   const source = iconSource(params, tables);
   const blp = source && readFile(source.path);
   if (!blp) return null;
-  const decoded = decodeBlp(blp, ICON_MAX_SIZE);
+  const decoded = decodeBlp(blp, source.maxSize ?? ICON_MAX_SIZE);
   const image = source.crop ? cropToVisible(decoded) : decoded;
   return PNG.sync.write({ width: image.width, height: image.height, data: Buffer.from(image.rgba.buffer, image.rgba.byteOffset, image.rgba.byteLength) });
 }

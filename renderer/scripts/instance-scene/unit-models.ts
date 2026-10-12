@@ -6,6 +6,7 @@ import {
   Bone,
   Box3,
   BufferGeometry,
+  Color,
   DoubleSide,
   Float32BufferAttribute,
   FrontSide,
@@ -48,6 +49,13 @@ import { threeToServer, useServerAxes } from './iso-camera';
 // A pet's model scale above this is a giant's (see UnitModelPose.pet).
 const PET_OVERSIZED_DISPLAY_SCALE = 2;
 
+// How a unit's spells' kits change its model: a colour it is multiplied by
+// (0xRRGGBB, null for none) and how see-through it is (1 opaque).
+export interface UnitLook {
+  color: number | null;
+  alpha: number;
+}
+
 // One unit to draw, in server coordinates.
 export interface UnitModelPose {
   id: string;
@@ -72,8 +80,6 @@ export interface UnitModelPose {
   strike?: StrikeKind | null;
   // Recent attacks came from real events, so no made-up timed strikes.
   eventDriven?: boolean;
-  // Glow colour for a notable aura, or null for none.
-  tint?: string | null;
   // Animations the spell's kits name: a loop while casting or channelling,
   // and a one-off as a spell fires or lands (clip names; skipped if the
   // model lacks them).
@@ -184,9 +190,10 @@ interface UnitInstance {
   marker: UnitMarker;
   model: Object3D;
   points: Map<string, Object3D>;
-  tint: string | null;
-  // The shared materials swapped out for tinted copies, by mesh.
-  tinted: Map<Mesh, Material | Material[]>;
+  // How its spells change its model (UnitLook), as a key, and the shared
+  // materials swapped out for changed copies, by mesh.
+  look: string;
+  changed: Map<Mesh, Material | Material[]>;
 }
 
 const CROSSFADE_SECONDS = 0.2;
@@ -216,7 +223,6 @@ const MODEL_RENDER_ORDER = 2;
 const MARKER_LIFT = 0.05;
 const MARKER_MIN_RADIUS = 0.6;
 const MARKER_MAX_RADIUS = 8;
-const TINT_STRENGTH = 0.55;
 const COMBAT_COLOR = '#ef4444';
 const SELECTED_COLOR = '#fbbf24';
 
@@ -270,6 +276,7 @@ function mergeSkinnedParts(scene: Object3D): void {
 }
 
 const scratchVector = new Vector3();
+const tintColor = new Color();
 const scratchSphere = new Sphere();
 
 // Takes a cloned model's bones out of the scene graph (see
@@ -509,7 +516,7 @@ export class UnitModelLayer {
     if (template.state !== 'ready') return null;
     const mountPose: UnitModelPose = {
       ...pose, id: mountUnitId(pose.id), url: pose.mountUrl, scale: 1, pet: false, mountUrl: null,
-      style: null, weapons: NO_WEAPONS, sheathState: 0, strike: null, eventDriven: true, tint: null, kitLoop: null, kitOnce: null,
+      style: null, weapons: NO_WEAPONS, sheathState: 0, strike: null, eventDriven: true, kitLoop: null, kitOnce: null,
     };
     const mount = this.unitFor(mountPose, template, nowMs);
     this.place(mount, mountPose, nowMs);
@@ -533,9 +540,11 @@ export class UnitModelLayer {
     const loading = template;
     this.loader.load(url, (gltf) => {
       const footprint = new Box3();
+      // How opaque the display draws the model (a Shadowfiend is half see-through).
+      const modelAlpha = Number(gltf.scene.children[0]?.userData.wowModelAlpha ?? 1);
       gltf.scene.traverse((object) => {
         if (object instanceof Mesh) {
-          object.material = this.convertMaterial(object.material as MeshStandardMaterial);
+          object.material = this.convertMaterial(object.material as MeshStandardMaterial, modelAlpha);
           object.frustumCulled = false;
           object.renderOrder = MODEL_RENDER_ORDER;
         }
@@ -613,8 +622,8 @@ export class UnitModelLayer {
       marker,
       model,
       points: new Map(),
-      tint: null,
-      tinted: new Map(),
+      look: '',
+      changed: new Map(),
     };
     model.traverse((object) => {
       if (object.userData.wowSheath) unit.sheathItems.push(object);
@@ -649,7 +658,7 @@ export class UnitModelLayer {
     const unit = this.units.get(id);
     if (!unit) return;
     unit.mixer.stopAllAction();
-    this.setTint(unit, null);
+    this.setLook(unit, null);
     disposeMarker(unit.marker);
     this.group.remove(unit.root);
     this.units.delete(id);
@@ -674,7 +683,6 @@ export class UnitModelLayer {
     }
     if (pose.alive) unit.seenAlive = true;
     updateMarker(unit.marker, pose.marker, pose.alive);
-    this.setTint(unit, pose.tint ?? null);
     if (unit.sheathState !== pose.sheathState) {
       unit.sheathState = pose.sheathState;
       for (const item of unit.sheathItems) item.visible = isItemShown(item.userData.wowItem, item.userData.wowSheath, pose.sheathState);
@@ -765,48 +773,70 @@ export class UnitModelLayer {
     unit.strike = null;
   }
 
-  // Swaps the unit's materials for glowing copies, or back to the shared ones.
-  private setTint(unit: UnitInstance, color: string | null): void {
-    if (unit.tint === color) return;
-    unit.tint = color;
-    if (!color) {
-      for (const [mesh, original] of unit.tinted) {
+  // Changes units' models as their spells' kits ask (by unit ID); units
+  // left out go back to their models' own look.
+  setLooks(looks: ReadonlyMap<string, UnitLook>): void {
+    for (const [id, unit] of this.units) this.setLook(unit, looks.get(id) ?? null);
+  }
+
+  // Multiplies the unit's materials by a colour and an opacity, on copies
+  // of the shared ones, or puts the shared ones back.
+  private setLook(unit: UnitInstance, look: UnitLook | null): void {
+    const plain = !look || (look.color === null && look.alpha >= 1);
+    const key = plain ? '' : `${look.color}|${look.alpha.toFixed(3)}`;
+    if (unit.look === key) return;
+    unit.look = key;
+    if (plain) {
+      for (const [mesh, original] of unit.changed) {
         for (const copy of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) copy.dispose();
         mesh.material = original;
       }
-      unit.tinted.clear();
+      unit.changed.clear();
       return;
     }
+    tintColor.setHex(look.color ?? 0xffffff);
     unit.model.traverse((object) => {
       if (!(object instanceof Mesh)) return;
-      if (!unit.tinted.has(object)) {
-        unit.tinted.set(object, object.material);
-        object.material = Array.isArray(object.material)
-          ? object.material.map((material: Material) => material.clone())
-          : (object.material as Material).clone();
+      let original = unit.changed.get(object);
+      if (!original) {
+        original = object.material as Material | Material[];
+        unit.changed.set(object, original);
+        object.material = Array.isArray(original) ? original.map((material) => material.clone()) : original.clone();
       }
-      for (const material of Array.isArray(object.material) ? object.material : [object.material]) {
-        if (material instanceof MeshLambertMaterial) material.emissive.set(color).multiplyScalar(TINT_STRENGTH);
-      }
+      const originals = Array.isArray(original) ? original : [original];
+      const copies = Array.isArray(object.material) ? object.material : [object.material];
+      copies.forEach((copy, index) => {
+        const source = originals[index];
+        if (!(copy instanceof MeshLambertMaterial) || !(source instanceof MeshLambertMaterial)) return;
+        copy.color.copy(source.color).multiply(tintColor);
+        copy.opacity = source.opacity * look.alpha;
+        const seeThrough = copy.opacity < 1;
+        if (copy.transparent !== (source.transparent || seeThrough)) {
+          copy.transparent = source.transparent || seeThrough;
+          copy.needsUpdate = true;
+        }
+        copy.depthWrite = source.depthWrite && !seeThrough;
+      });
     });
   }
 
   // Lit, so models keep their shape; the scene itself is unlit.
-  private convertMaterial(source: MeshStandardMaterial): Material {
+  private convertMaterial(source: MeshStandardMaterial, modelAlpha = 1): Material {
     const cached = this.materials.get(source.uuid);
     if (cached) return cached;
     const blend = (source.userData.wowBlend ?? 'opaque') as string;
+    const opacity = source.opacity * modelAlpha;
     const material = new MeshLambertMaterial({
       name: source.name,
       map: source.map ?? null,
       color: source.color.clone(),
-      opacity: source.opacity,
+      opacity,
       side: source.side === DoubleSide ? DoubleSide : FrontSide,
       // One pass for both faces, as the client draws them (see scene-view.ts).
       forceSinglePass: true,
       alphaTest: blend === 'alphaKey' ? 0.5 : 0,
-      transparent: (blend !== 'opaque' && blend !== 'alphaKey') || source.opacity < 1,
-      depthWrite: (blend === 'opaque' || blend === 'alphaKey') && source.opacity >= 1,
+      transparent: (blend !== 'opaque' && blend !== 'alphaKey') || opacity < 1,
+      depthWrite: (blend === 'opaque' || blend === 'alphaKey') && opacity >= 1,
       blending: blend === 'add' ? AdditiveBlending : NormalBlending,
     });
     this.materials.set(source.uuid, material);

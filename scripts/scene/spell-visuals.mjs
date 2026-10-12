@@ -15,6 +15,23 @@ const SPELL_EFFECT_FIELDS = [71, 72, 73];
 const SPELL_AURA_FIELDS = [95, 96, 97];
 const EFFECT_ATTACK_ME = 114;
 const AURA_MOD_TAUNT = 11;
+// An aura that casts another spell every so often (Starfall, Bladestorm),
+// and the fields saying what each effect targets, how far it reaches
+// (SpellRadius), and which spell it triggers.
+const AURA_PERIODIC_TRIGGER_SPELL = 23;
+const SPELL_TARGET_FIELDS = [86, 87, 88, 89, 90, 91];
+const SPELL_RADIUS_FIELDS = [92, 93, 94];
+const SPELL_TRIGGER_FIELDS = [116, 117, 118];
+const SPELL_SCHOOL_MASK_FIELD = 225;
+// Targets round the caster (TARGET_SRC_CASTER), as a triggered area is.
+const TARGET_AREA_AROUND_CASTER = 22;
+const RADIUS_FIELD = 1;
+// A wand's Shoot has no art of its own: the client picks a bolt by the
+// wand's damage school. These visuals are the wand set (all share precast
+// kit 372, AnimationData 111, and nothing in Spell.dbc names them); which
+// school each serves is read from its missile model. By school bit.
+const WAND_SHOOT_SPELL = 5019;
+export const WAND_VISUALS = { 2: 228, 4: 225, 8: 2797, 16: 229, 32: 226, 64: 2799 };
 // SpellVisual fields naming a kit, by the stage the kit plays at.
 const VISUAL_KITS = {
   precast: 1, cast: 2, impact: 3, state: 4, stateDone: 5, channel: 6,
@@ -33,6 +50,13 @@ const KIT_FIRST_SLOT = 3;
 // (CharParamZero..Three, one array per parameter).
 const KIT_PROCS = 17;
 const KIT_PROC_PARAMS = [21, 25, 29, 33];
+// Procedure 0 draws a chain between units (Chain Heal, Chain Lightning, Drain
+// Life); its first parameter is the SpellChainEffects row.
+const CHAIN_PROCEDURE = 0;
+// SpellChainEffects: average segment length, width, noise, texture
+// repeats, how long a segment lasts and the delay to the next (ms), and its
+// texture.
+const CHAIN_FIELDS = { segmentLength: 1, width: 2, noise: 3, textureScale: 4, segmentMs: 5, delayMs: 6, texture: 7 };
 // Procedure 9 (undocumented) rains models over the area: Blizzard's ice,
 // Rain of Fire's fire. The data doesn't say which model falls; these are the
 // models the client has for them (creature Rain of Fire spells name the fire
@@ -106,10 +130,51 @@ export class SpellVisuals {
     const anim = kit.int(KIT_ANIM);
     const procs = [0, 1, 2, 3].flatMap((index) => {
       const code = kit.int(KIT_PROCS + index);
-      return code > 0 ? [{ code, params: KIT_PROC_PARAMS.map((field) => kit.float(field + index)) }] : [];
+      return code >= 0 ? [{ code, params: KIT_PROC_PARAMS.map((field) => kit.float(field + index)) }] : [];
     });
     if (!effects.length && !procs.length && anim < 0 && startAnim < 0) return null;
     return { id: kitId, startAnim, anim, effects, procs };
+  }
+
+  // A chain effect (SpellChainEffects) and its texture, or null.
+  chain(chainId) {
+    const chain = this.table('SpellChainEffects').get(chainId);
+    const texture = chain?.string(CHAIN_FIELDS.texture);
+    if (!texture || !this.hasFile(texture)) return null;
+    return {
+      id: chainId,
+      segmentLength: chain.float(CHAIN_FIELDS.segmentLength),
+      width: chain.float(CHAIN_FIELDS.width),
+      noise: chain.float(CHAIN_FIELDS.noise),
+      textureScale: chain.float(CHAIN_FIELDS.textureScale),
+      segmentMs: chain.int(CHAIN_FIELDS.segmentMs),
+      delayMs: chain.int(CHAIN_FIELDS.delayMs),
+    };
+  }
+
+  // The chain texture's file, for the icon builder.
+  chainTexture(chainId) {
+    return this.table('SpellChainEffects').get(chainId)?.string(CHAIN_FIELDS.texture) || null;
+  }
+
+  // For an aura that keeps casting an area spell round its bearer: the
+  // area's radius, the spells it casts, and its school; or null.
+  bearerArea(spell) {
+    const radii = this.table('SpellRadius');
+    const triggers = [];
+    let radius = 0;
+    SPELL_AURA_FIELDS.forEach((field, index) => {
+      if (spell.int(field) !== AURA_PERIODIC_TRIGGER_SPELL) return;
+      const trigger = this.table('Spell').get(spell.uint(SPELL_TRIGGER_FIELDS[index]));
+      if (!trigger) return;
+      const reach = Math.max(0, ...[0, 1, 2]
+        .filter((effect) => [effect, effect + 3].some((slot) => trigger.uint(SPELL_TARGET_FIELDS[slot]) === TARGET_AREA_AROUND_CASTER))
+        .map((effect) => radii.get(trigger.uint(SPELL_RADIUS_FIELDS[effect]))?.float(RADIUS_FIELD) ?? 0));
+      if (reach <= 0) return;
+      triggers.push(trigger.uint(0));
+      radius = Math.max(radius, reach);
+    });
+    return triggers.length ? { radius, triggers, schoolMask: spell.uint(SPELL_SCHOOL_MASK_FIELD) } : null;
   }
 
   // The spell's name, rank, and whether it taunts, or null if the client has
@@ -122,10 +187,28 @@ export class SpellVisuals {
     return { id: spellId, name: spell.string(SPELL_NAME_FIELD), rank: spell.string(SPELL_RANK_FIELD), taunt };
   }
 
-  // Everything wowmin draws for a spell, or null if it has no art.
+  // Everything wowmin draws for a spell, or null if it has no art. A wand's
+  // Shoot lists its art by school instead (`bySchool`).
   forSpell(spellId) {
     const spell = this.table('Spell').get(spellId);
-    const visual = spell ? this.table('SpellVisual').get(spell.uint(SPELL_VISUAL_FIELD)) : null;
+    if (!spell) return null;
+    if (spellId === WAND_SHOOT_SPELL) {
+      const bySchool = Object.fromEntries(Object.entries(WAND_VISUALS).flatMap(([school, visualId]) => {
+        const art = this.forVisual(visualId);
+        return art ? [[school, art]] : [];
+      }));
+      return Object.keys(bySchool).length ? { spellId, visualId: 0, missile: null, falling: null, kits: {}, bySchool } : null;
+    }
+    const art = this.forVisual(spell.uint(SPELL_VISUAL_FIELD));
+    if (!art) return null;
+    const bearerArea = this.bearerArea(spell);
+    return { spellId, ...art, ...(bearerArea ? { bearerArea } : {}) };
+  }
+
+  // A SpellVisual's missile, kits, falling model, and chain, or null if it
+  // has none of them.
+  forVisual(visualId) {
+    const visual = this.table('SpellVisual').get(visualId);
     if (!visual) return null;
     const kits = {};
     for (const [stage, field] of Object.entries(VISUAL_KITS)) {
@@ -135,8 +218,9 @@ export class SpellVisuals {
     const missile = this.effect(visual.uint(VISUAL_MISSILE_MODEL));
     if (!missile && !Object.keys(kits).length) return null;
     const falling = this.effect(FALLING_EFFECTS[visual.uint(0)] ?? 0);
+    const chainProc = Object.values(kits).flatMap((kit) => kit.procs).find((proc) => proc.code === CHAIN_PROCEDURE);
+    const chain = chainProc ? this.chain(chainProc.params[0]) : null;
     return {
-      spellId,
       visualId: visual.uint(0),
       missile: missile && {
         ...missile,
@@ -145,6 +229,7 @@ export class SpellVisuals {
       },
       falling,
       kits,
+      ...(chain ? { chain } : {}),
     };
   }
 }

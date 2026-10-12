@@ -18,6 +18,7 @@ export const unitKey = (guid: number, creature: boolean): UnitKey => `${creature
 export interface CastGlow {
   caster: UnitKey;
   spellId: number;
+  schoolMask: number;
   color: string;
   startAt: number;
   endAt: number;
@@ -31,6 +32,7 @@ export interface Projectile {
   source: UnitKey;
   target: UnitKey;
   spellId: number;
+  schoolMask: number;
   color: string;
   startAt: number;
   travelMs: number;
@@ -54,6 +56,7 @@ export interface Impact {
   target: UnitKey;
   // 0 for a white hit.
   spellId: number;
+  schoolMask: number;
   color: string;
   at: number;
   heal: boolean;
@@ -85,6 +88,16 @@ export interface AreaEffect {
   startAt: number;
   endAt: number;
   channeled: boolean;
+}
+
+// One link of a spell's chain: from the caster to its target (index 0), or
+// from one target on to the next it jumped to (Chain Heal, Chain Lightning).
+export interface ChainLink {
+  spellId: number;
+  from: UnitKey;
+  to: UnitKey;
+  index: number;
+  startAt: number;
 }
 
 export interface CombatNumber {
@@ -124,6 +137,11 @@ const AURA_MAX_MS = 10 * 60 * 1000;
 const MAX_NUMBERS = 200;
 const MAX_IMPACTS = 200;
 const MAX_PROJECTILES = 150;
+// Hits of a spell this soon after its cast are its chain's jumps; links are
+// kept this long after their chain began, for whoever draws them.
+export const CHAIN_JUMP_MS = 1000;
+export const CHAIN_LINK_MS = 3000;
+const MAX_CHAIN_LINKS = 100;
 const RATE_WINDOW_MS = 2000;
 
 // Auto Shot, Shoot (bow, gun, crossbow, wand), and Throw.
@@ -185,6 +203,16 @@ interface QueuedEvent {
   at: number;
 }
 
+// A cast whose later hits may be chain jumps: where it has reached, and the
+// units it has been to.
+interface OpenChain {
+  source: UnitKey;
+  spellId: number;
+  last: UnitKey;
+  visited: Set<UnitKey>;
+  at: number;
+}
+
 interface ActiveAura {
   target: UnitKey;
   spellId: number;
@@ -201,6 +229,8 @@ export class CombatEffectStore {
   private ringList: AreaRing[] = [];
   private areaList: AreaEffect[] = [];
   private numberList: CombatNumber[] = [];
+  private chainList: ChainLink[] = [];
+  private openChains: OpenChain[] = [];
   private readonly auras = new Map<string, ActiveAura>();
   private readonly lastStrikeAt = new Map<UnitKey, number>();
   private readonly arrivals: number[] = [];
@@ -226,6 +256,8 @@ export class CombatEffectStore {
     this.ringList = [];
     this.areaList = [];
     this.numberList = [];
+    this.chainList = [];
+    this.openChains = [];
     this.auras.clear();
     this.lastStrikeAt.clear();
     this.arrivals.length = 0;
@@ -256,12 +288,13 @@ export class CombatEffectStore {
   get rings(): readonly AreaRing[] { return this.ringList; }
   get areas(): readonly AreaEffect[] { return this.areaList; }
   get numbers(): readonly CombatNumber[] { return this.numberList; }
+  get chains(): readonly ChainLink[] { return this.chainList; }
   get dropped(): number { return this.droppedTotal; }
 
   // Whether anything is still to play or on screen, so the view keeps drawing.
   get active(): boolean {
     return Boolean(this.queue.length || this.castList.length || this.projectileList.length || this.beamList.length
-      || this.impactList.length || this.ringList.length || this.areaList.length || this.numberList.length);
+      || this.impactList.length || this.ringList.length || this.areaList.length || this.numberList.length || this.chainList.length);
   }
 
   // Events received over the last couple of seconds, per second.
@@ -309,7 +342,8 @@ export class CombatEffectStore {
       case 'castStart':
         this.endCast(source);
         this.castList.push({
-          caster: source, spellId: event.spellId, color, startAt: at, endAt: at + event.value + CAST_GRACE_MS, release: false, channeled: false,
+          caster: source, spellId: event.spellId, schoolMask: event.schoolMask, color, startAt: at, endAt: at + event.value + CAST_GRACE_MS,
+          release: false, channeled: false,
         });
         return null;
       case 'castCancel':
@@ -344,8 +378,9 @@ export class CombatEffectStore {
         this.numberList.push({ target, amount: event.value, color: numberColor, heal, periodic: event.periodic, at });
         // White hits already show as the swing.
         if (heal || event.spellId) {
-          this.impactList.push({ target, spellId: event.spellId, color: numberColor, at, heal, small: event.periodic });
+          this.impactList.push({ target, spellId: event.spellId, schoolMask: event.schoolMask, color: numberColor, at, heal, small: event.periodic });
         }
+        if (event.spellId && !event.periodic) this.jumpChain(source, target, event.spellId, at);
         return null;
       }
       default:
@@ -366,12 +401,16 @@ export class CombatEffectStore {
     const atOther = target !== null && target !== source;
     if (!event.triggered && !physical) {
       if (event.channeled && event.value > 0) {
-        this.castList.push({ caster: source, spellId: event.spellId, color, startAt: at, endAt: at + event.value, release: false, channeled: true });
+        this.castList.push({
+          caster: source, spellId: event.spellId, schoolMask: event.schoolMask, color, startAt: at, endAt: at + event.value, release: false, channeled: true,
+        });
         if (atOther) {
           this.beamList.push({ source, target: target!, spellId: event.spellId, color, startAt: at, endAt: at + event.value });
         }
       } else {
-        this.castList.push({ caster: source, spellId: event.spellId, color, startAt: at, endAt: at + RELEASE_FLASH_MS, release: true, channeled: false });
+        this.castList.push({
+          caster: source, spellId: event.spellId, schoolMask: event.schoolMask, color, startAt: at, endAt: at + RELEASE_FLASH_MS, release: true, channeled: false,
+        });
       }
     }
     // Triggered spells (procs, a channel's bolts) fly only with a real missile.
@@ -380,7 +419,8 @@ export class CombatEffectStore {
       const yards = distance(source, target!);
       if (yards !== null) {
         this.projectileList.push({
-          source, target: target!, spellId: event.spellId, color, startAt: at, travelMs: getTravelMs(yards, event.missileSpeed),
+          source, target: target!, spellId: event.spellId, schoolMask: event.schoolMask, color, startAt: at,
+          travelMs: getTravelMs(yards, event.missileSpeed),
           streak: event.missileSpeed <= 0, physical,
         });
       }
@@ -400,10 +440,26 @@ export class CombatEffectStore {
         endAt: at + (lasts ? event.value : 0), channeled: event.channeled,
       });
     }
+    // A chain starts at the caster's target; its spell's hits that follow are
+    // its jumps.
+    if (atOther && !event.channeled) {
+      this.openChains = this.openChains.filter((chain) => chain.source !== source || chain.spellId !== event.spellId);
+      this.openChains.push({ source, spellId: event.spellId, last: target!, visited: new Set([target!]), at });
+      this.chainList.push({ spellId: event.spellId, from: source, to: target!, index: 0, startAt: at });
+    }
     const kind = getCastStrikeKind(event);
     if (!kind) return null;
     this.lastStrikeAt.set(source, at);
     return { unit: source, kind };
+  }
+
+  // A hit by a chain's spell on a unit it hasn't been to is its next jump.
+  private jumpChain(source: UnitKey, target: UnitKey, spellId: number, at: number): void {
+    const chain = this.openChains.find((open) => open.source === source && open.spellId === spellId);
+    if (!chain || at - chain.at > CHAIN_JUMP_MS || chain.visited.has(target)) return;
+    chain.visited.add(target);
+    this.chainList.push({ spellId, from: chain.last, to: target, index: chain.visited.size - 1, startAt: chain.at });
+    chain.last = target;
   }
 
   private endCast(caster: UnitKey): void {
@@ -420,6 +476,8 @@ export class CombatEffectStore {
     // Instant areas stay a moment, so the layer sees them.
     this.areaList = this.areaList.filter((area) => Math.max(area.endAt, area.startAt + AREA_FLASH_MS) > now);
     this.numberList = this.numberList.filter((number) => number.at + NUMBER_LIFETIME_MS > now).slice(-MAX_NUMBERS);
+    this.chainList = this.chainList.filter((link) => link.startAt + CHAIN_LINK_MS > now).slice(-MAX_CHAIN_LINKS);
+    this.openChains = this.openChains.filter((chain) => now - chain.at <= CHAIN_JUMP_MS);
     for (const [key, aura] of this.auras) if (aura.endAt <= now) this.auras.delete(key);
     for (const [unit, at] of this.lastStrikeAt) if (now - at >= EVENT_DRIVEN_MS) this.lastStrikeAt.delete(unit);
   }

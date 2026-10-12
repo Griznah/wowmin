@@ -16,7 +16,8 @@ const BUILD_TIMEOUT_MS = 60000;
 // 5: a breath point (the mouth), for breath effects.
 // 6: a mount's saddle point and riders' seated (Mount) animation.
 // 7: flying mounts' Fly and Hover animations.
-export const UNIT_MODEL_CACHE_VERSION = 7;
+// 8: creature displays' model opacity (a Shadowfiend's see-through look).
+export const UNIT_MODEL_CACHE_VERSION = 8;
 // Spell art (effect models and spell lookups) changes more often than unit
 // models, so it has its own version and folder, art-v<version>/, and can be
 // rebuilt without rebuilding every unit.
@@ -25,7 +26,9 @@ export const UNIT_MODEL_CACHE_VERSION = 7;
 // 3: effect clips named for what they are: Stand (start), Hold (idle),
 // Decay (end), not Birth/Death.
 // 4: spell lookups say whether the spell taunts.
-export const SPELL_ART_CACHE_VERSION = 4;
+// 5: chain effects (Chain Heal), areas round an aura's bearer (Starfall),
+// and a wand's Shoot art by school.
+export const SPELL_ART_CACHE_VERSION = 5;
 const SPELL_ART_KINDS = new Set<UnitModelRequest['kind']>(['effect', 'visual', 'spell', 'icon', 'gameobject']);
 const EXTENSIONS: Partial<Record<UnitModelRequest['kind'], string>> = { visual: 'json', spell: 'json', icon: 'png' };
 // A look that could not be built is not retried for this long.
@@ -38,9 +41,9 @@ interface PendingBuild {
 
 export interface UnitModelRequest {
   // 'effect' is a SpellVisualEffectName model; 'visual' a spell's art (JSON);
-  // 'spell' a spell's name (JSON); 'icon' a client icon (PNG): a spell's, or
-  // a side's PvP crest, or a raid marker; 'gameobject' a game object
-  // display's model (GLB).
+  // 'spell' a spell's name (JSON); 'icon' a client icon (PNG): a spell's, a
+  // side's PvP crest, a raid marker, or a spell chain's texture; 'gameobject'
+  // a game object display's model (GLB).
   kind: 'creature' | 'character' | 'effect' | 'visual' | 'spell' | 'icon' | 'gameobject';
   key: string;
   params: Record<string, unknown>;
@@ -65,9 +68,10 @@ export function parseUnitModelPath(urlPath: string): UnitModelRequest | null {
   if (spell) return { kind: 'spell', key: spell[1], params: { spellId: Number(spell[1]) } };
   const gameObject = urlPath.match(/^\/assets\/models\/gameobject\/(\d{1,7})\.glb$/);
   if (gameObject) return { kind: 'gameobject', key: gameObject[1], params: { displayId: Number(gameObject[1]) } };
-  const icon = urlPath.match(/^\/assets\/models\/icon\/(faction-(alliance|horde)|spell-(\d{1,7})|marker-([1-8]))\.png$/);
+  const icon = urlPath.match(/^\/assets\/models\/icon\/(faction-(alliance|horde)|spell-(\d{1,7})|marker-([1-8])|chain-(\d{1,7}))\.png$/);
   if (icon) {
-    const params = icon[2] ? { faction: icon[2] } : icon[4] ? { marker: Number(icon[4]) } : { spellId: Number(icon[3]) };
+    const params = icon[2] ? { faction: icon[2] } : icon[4] ? { marker: Number(icon[4]) }
+      : icon[5] ? { chain: Number(icon[5]) } : { spellId: Number(icon[3]) };
     return { kind: 'icon', key: icon[1], params };
   }
   const character = urlPath.match(/^\/assets\/models\/character\/([0-9][0-9.-]{0,199})\.glb$/);

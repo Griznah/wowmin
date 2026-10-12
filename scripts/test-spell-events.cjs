@@ -19,7 +19,7 @@ function loadModule(relativePath) {
 }
 
 const {
-  AREA_FLASH_MS, CombatEffectStore, EVENT_DRIVEN_MS, HEAL_COLOR, NUMBER_LIFETIME_MS, RELEASE_FLASH_MS, STREAK_MS,
+  AREA_FLASH_MS, CHAIN_JUMP_MS, CHAIN_LINK_MS, CombatEffectStore, EVENT_DRIVEN_MS, HEAL_COLOR, NUMBER_LIFETIME_MS, RELEASE_FLASH_MS, STREAK_MS,
   auraTintColor, getCastStrikeKind, getTravelMs, schoolColor, unitKey,
 } = loadModule('../renderer/scripts/utils/spell-events.ts');
 const { LIVE_RENDER_DELAY_MS } = loadModule('../renderer/scripts/utils/live-positions.ts');
@@ -273,4 +273,23 @@ test('groups area circles into merged shapes by colour and height', () => {
   // At most 32 circles per shape.
   const many = groupAreaCircles(Array.from({ length: 40 }, (_, index) => circle('#a', 0, index)));
   assert.deepEqual(JSON.parse(JSON.stringify(many.map((group) => group.length))), [32, 8]);
+});
+
+test('a chain links its caster to its target, then each unit its spell goes on to hit soon after', () => {
+  const store = new CombatEffectStore();
+  const heal = (targetGuid, ageMs = 0) => event({
+    kind: 'heal', spellId: 55459, schoolMask: 8, helpful: true, targetGuid, targetCreature: false, value: 3000, ageMs,
+  });
+  store.push(update([
+    event({ spellId: 55459, schoolMask: 8, helpful: true, targetGuid: 2, targetCreature: false }),
+    heal(2), heal(3), heal(2), heal(4), event({ kind: 'heal', spellId: 55459, targetGuid: 5, targetCreature: false, periodic: true }),
+  ]), 0);
+  store.advance(LIVE_RENDER_DELAY_MS, tenYards);
+  assert.deepEqual(plain(store.chains.map(({ from, to, index }) => `${index}:${from}>${to}`)), ['0:p1>p2', '1:p2>p3', '2:p3>p4']);
+  // Hits after the jump window are not jumps; links go after their time.
+  store.push(update([heal(6)]), CHAIN_JUMP_MS + 1);
+  store.advance(LIVE_RENDER_DELAY_MS + CHAIN_JUMP_MS + 1, tenYards);
+  assert.equal(store.chains.length, 3);
+  store.advance(LIVE_RENDER_DELAY_MS + CHAIN_LINK_MS, tenYards);
+  assert.equal(store.chains.length, 0);
 });

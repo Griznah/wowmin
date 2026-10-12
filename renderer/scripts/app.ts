@@ -7070,11 +7070,10 @@ function getInstanceUnitPoses(
   strikes: ReadonlyMap<UnitKey, StrikeKind>,
   scenery: ReadonlySet<number>,
 ): UnitModelPose[] {
-  // Real attacks and aura glows from the combat events.
+  // Real attacks from the combat events.
   const combat = (id: UnitKey) => ({
     strike: strikes.get(id) ?? null,
     eventDriven: instanceCombatEffects.isEventDriven(id, now),
-    tint: instanceCombatEffects.tint(id, instanceAuraShownAsArt()),
   });
   const poses: UnitModelPose[] = [];
   const playersByGuid = new Map<number, MapPlayerPosition>();
@@ -7228,15 +7227,15 @@ function requestInstanceCreatureInfo(entries: number[]): void {
 const isBossCreature = (creature: StreamCreatureSample, info: CreatureInfo | null | undefined): boolean =>
   creature.boss || info?.rank === 3;
 
-// Which auras the 3D view shows as client art, so their tint gives way; in
-// the flat view (`drawn3d` false) there is no art and every tint shows.
+// Which auras the 3D view shows as client art, so a marker's halo gives
+// way; in the flat view (`drawn3d` false) there is no art and every halo shows.
 function instanceAuraShownAsArt(drawn3d: unknown = instanceView3d): (spellId: number) => boolean {
   const sceneView = drawn3d ? getInstanceSceneView() : null;
   return sceneView ? (spellId) => sceneView.hasAuraArt(spellId) : () => false;
 }
 
 // A glowing ring round a marker for a notable aura (crowd control, shield,
-// cooldowns); models glow themselves.
+// cooldowns); models show the client's aura art instead.
 function drawInstanceAuraHalo(ctx: CanvasRenderingContext2D, tint: string | null, point: { x: number; y: number }, radius: number): void {
   if (!tint) return;
   ctx.save();

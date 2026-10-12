@@ -96,7 +96,9 @@ accessed from a browser.
   smooth movement, mobs, bot paths and decisions (with `mod-playerbots`),
   battleground banners, flags, and doors, raid markers, and debuffs
 - The client's own spell art for casts, missiles, impacts, channels, ground
-  effects, and auras, plus floating combat numbers
+  effects, auras, and chains (Chain Heal), with wand bolts in the wand's
+  school and models coloured and made see-through as the client does it
+  (Frostbolt's slow, Ice Block, Shadowform), plus floating combat numbers
 - TidyPlates-style nameplates (Neon, Grey, or Quatre) with health, power, cast
   bars with spell names and icons, debuffs, threat, and battleground crests
 - A party fade that keeps the floors and rooms around the party solid and
@@ -539,7 +541,7 @@ when Test Deck is not available from the browser at the default
 4. **Click a participant marker or sidebar row** to focus the view on them; **Fit** restores a view that fits everyone, **−**/**+** zoom around the cursor, and **Clear focus** releases the focused participant.
 5. Battlegrounds additionally show the match phase, team scores, alive counts, decoded objectives, resurrection state, and the server-selected bot strategy (read-only).
 6. The encounter card lists boss states and the session death history; the participant list shows faction, group/subgroup, LFG role, health and power, and target.
-7. Where a 3D scene has been generated, the map opens in 3D (the **3D** button switches back to the flat map). **Q**/**E** rotate by a quarter turn; middle-drag or Shift+drag rotates and tilts freely; the scroll wheel zooms about the pointer.
+7. Where a 3D scene has been generated, the map opens in 3D (the **3D** button switches back to the flat map). **Q**/**E** rotate by a quarter turn; middle-drag or Shift+drag rotates and tilts freely; the compass under the buttons shows where north is; the scroll wheel zooms about the pointer.
 8. **Fade** keeps the area around the party solid and fades the rest; **Height fade** and **Horizontal fade** set how far. Turn **Fade** off to see a whole battleground. **Render scale** lowers the 3D resolution on slow GPUs.
 9. **Mobs** (Near party, All, Off), **Plates** (Neon, Grey, Quatre, or plain Labels), and the **Follow**, **Trails**, **Paths**, **Decisions**, **Models**, and **Numbers** toggles choose what is drawn; each remembers its setting per browser.
 10. Add `?debug` to the page URL for a frame-rate, draw-call, and stream-rate overlay, and open `/spell-preview` to play any spell's client art on test models.

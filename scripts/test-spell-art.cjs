@@ -249,3 +249,109 @@ test('rains only for spells whose area runs procedure 9, at its rate, spread ove
   assert.deepEqual(plain(kits.pointInDisc([10, 20, 3], 8, 1, 0)), [18, 20, 3]);
   assert.deepEqual(plain(kits.pointInDisc([10, 20, 3], 8, 0, 0.5)), [10, 20, 3]);
 });
+
+test('plays the art of the cast\'s school for a spell with art by school', () => {
+  const { artForSchool } = loadModule('../renderer/scripts/utils/spell-kits.ts');
+  const frost = { missile: { id: 4807, scale: 1 }, kits: {} };
+  const shoot = { missile: null, kits: {}, bySchool: { 16: frost, 32: { missile: { id: 3493, scale: 1 }, kits: {} } } };
+  assert.equal(artForSchool(shoot, 16), frost);
+  assert.equal(artForSchool(shoot, 1), null);
+  assert.equal(artForSchool(frost, 1), frost);
+});
+
+// A WDBC table of `fieldCount` fields from records given as { field: value }:
+// strings go to the string block, float(x) is written as a float, and other
+// numbers as integers.
+const float = (value) => ({ float: value });
+function dbc(fieldCount, records) {
+  const strings = ['\0'];
+  let stringBytes = 1;
+  const body = Buffer.alloc(records.length * fieldCount * 4);
+  records.forEach((record, index) => {
+    for (const [field, value] of Object.entries(record)) {
+      const at = (index * fieldCount + Number(field)) * 4;
+      if (typeof value === 'string') {
+        body.writeUInt32LE(stringBytes, at);
+        strings.push(`${value}\0`);
+        stringBytes += Buffer.byteLength(`${value}\0`);
+      } else if (typeof value === 'object') body.writeFloatLE(value.float, at);
+      else body.writeInt32LE(value, at);
+    }
+  });
+  const block = Buffer.from(strings.join(''));
+  const header = Buffer.alloc(20);
+  header.write('WDBC');
+  header.writeUInt32LE(records.length, 4);
+  header.writeUInt32LE(fieldCount, 8);
+  header.writeUInt32LE(fieldCount * 4, 12);
+  header.writeUInt32LE(block.length, 16);
+  return Buffer.concat([header, body, block]);
+}
+
+// A kit with no animation and no effects, plus `fields`.
+const kitRecord = (id, fields = {}) => ({ 0: id, 1: -1, 2: -1, 17: -1, 18: -1, 19: -1, 20: -1, ...fields });
+
+test('exports a spell\'s chain, the area its aura keeps casting round its bearer, and a wand\'s art by school', async () => {
+  const { SpellVisuals, WAND_VISUALS } = await load('spell-visuals.mjs');
+  const files = {
+    'DBFilesClient\\Spell.dbc': dbc(234, [
+      { 0: 55459, 131: 3659 },
+      { 0: 48505, 131: 11571, 95: 23, 116: 50286, 225: 64 },
+      { 0: 50286, 86: 22, 92: 9 },
+      { 0: 5019 },
+    ]),
+    'DBFilesClient\\SpellRadius.dbc': dbc(4, [{ 0: 9, 1: float(30) }]),
+    'DBFilesClient\\SpellVisual.dbc': dbc(32, [
+      { 0: 3659, 2: 3169 },
+      { 0: 11571, 4: 10695 },
+      { 0: WAND_VISUALS[32], 8: 3493 },
+    ]),
+    'DBFilesClient\\SpellVisualKit.dbc': dbc(38, [
+      kitRecord(3169, { 2: 53, 17: 0, 21: float(736), 25: float(1) }),
+      kitRecord(10695, { 5: 4477 }),
+    ]),
+    'DBFilesClient\\SpellVisualEffectName.dbc': dbc(8, [
+      { 0: 4477, 2: 'Spells\\Starfall_Caster.mdx', 4: float(1) },
+      { 0: 3493, 2: 'Spells\\Shadowbolt_Missile.mdx', 4: float(1) },
+    ]),
+    'DBFilesClient\\SpellChainEffects.dbc': dbc(48, [
+      { 0: 736, 1: float(0.3), 2: float(0.2), 3: float(0.001), 4: float(1.66), 5: 999, 6: 200, 7: 'Textures\\SpellChainEffects\\HealBeam.blp' },
+    ]),
+  };
+  const present = new Set(['spells\\starfall_caster.m2', 'spells\\shadowbolt_missile.m2', 'textures\\spellchaineffects\\healbeam.blp']);
+  const visuals = new SpellVisuals((name) => files[name] ?? (present.has(name.toLowerCase()) ? Buffer.alloc(1) : null));
+
+  const chainHeal = visuals.forSpell(55459);
+  assert.deepEqual(plain(chainHeal.kits.cast.procs), [{ code: 0, params: [736, 1, 0, 0] }]);
+  assert.equal(chainHeal.chain.id, 736);
+  near(chainHeal.chain.width, 0.2, 'width');
+  assert.deepEqual([chainHeal.chain.segmentMs, chainHeal.chain.delayMs], [999, 200]);
+  assert.equal(visuals.chainTexture(736), 'Textures\\SpellChainEffects\\HealBeam.blp');
+
+  assert.deepEqual(plain(visuals.forSpell(48505).bearerArea), { radius: 30, triggers: [50286], schoolMask: 64 });
+  assert.equal(visuals.forSpell(55459).bearerArea, undefined);
+
+  const shoot = visuals.forSpell(5019);
+  assert.deepEqual(Object.keys(shoot.bySchool), ['32']);
+  assert.equal(shoot.bySchool[32].missile.id, 3493);
+});
+
+test('kits colour their unit as the client does: procedure 1 while they play, 13 as a flash fading to white', () => {
+  const { DEFAULT_ALPHA_FADE_MS, flashColor, kitAlpha, kitColor, kitColorFlash } = loadModule('../renderer/scripts/utils/spell-kits.ts');
+  const kit = (procs) => ({ id: 1, anim: -1, effects: [], procs });
+  // Frostbolt's slow: only the colour counts.
+  assert.equal(kitColor(kit([{ code: 1, params: [3947775, 0, 0, 3] }])), 0x3c3cff);
+  assert.equal(kitColor(kit([{ code: 9, params: [0, 5, 0, 0] }])), null);
+  const flash = kitColorFlash(kit([{ code: 13, params: [0xff0000, 0.5, 1, 0] }]));
+  assert.deepEqual(plain(flash), { color: 0xff0000, holdMs: 500, fadeMs: 1000 });
+  assert.equal(flashColor(flash, 100), 0xff0000);
+  assert.equal(flashColor(flash, 1000), 0xff8080);
+  assert.equal(flashColor(flash, 1500), null);
+  assert.equal(kitColorFlash(kit([])), null);
+  // Shadowform: dark purple, and 0.65 opaque reached over two seconds.
+  const shadowform = kit([{ code: 1, params: [2555970, 0.2, 2, 0] }, { code: 14, params: [0.65, 0, 2, 0] }]);
+  assert.equal(kitColor(shadowform), 0x270042);
+  assert.deepEqual(plain(kitAlpha(shadowform)), { alpha: 0.65, fadeMs: 2000 });
+  assert.equal(kitAlpha(kit([{ code: 14, params: [0.5, 0, 0, 0] }])).fadeMs, DEFAULT_ALPHA_FADE_MS);
+  assert.equal(kitAlpha(kit([{ code: 14, params: [0, 0, 1, 0] }])), null);
+});

@@ -41,7 +41,7 @@ import { applyIsoCamera, threeToServer } from './iso-camera';
 import { SpellEffectLayer, type UnitAnchorRole } from './spell-effects';
 import { buildLayerArray, BYTE_SHADING_SCALE, createTerrainMaterial, prepareAlphaAtlas } from './terrain-material';
 import { GameObjectLayer, type GameObjectPose } from './game-objects';
-import { SpellVisualLayer, type UnitInfo } from './spell-visual-layer';
+import { type BearerAreaCircle, SpellVisualLayer, type UnitInfo } from './spell-visual-layer';
 import { type UnitModelPose, UnitModelLayer } from './unit-models';
 
 type WowBlend = 'opaque' | 'alphaKey' | 'alpha' | 'add' | 'mod' | 'mod2x';
@@ -100,6 +100,7 @@ const HEAD_HEIGHT = 0.9;
 // server coordinates; three.js is Y-up, so server (x, y, z) is (x, -z, y) here.
 // The reach uniforms' values when there is none (floats, so not Infinity).
 const NO_REACH = 1e9;
+const floorAreaColor = new Color();
 // All fade values live in one uniform buffer shared by every scene material,
 // uploaded once a frame (per-material uniform arrays were re-sent on every
 // material switch). three.js r186 mislays arrays of vectors in a uniforms
@@ -109,7 +110,25 @@ const FADE_VOLUME_MAX_OFFSET = MAX_FADE_VOLUMES * 4;
 const FADE_REACH_MIN_OFFSET = FADE_VOLUME_MAX_OFFSET * 2;
 const FADE_REACH_MAX_OFFSET = FADE_REACH_MIN_OFFSET + 4;
 const FADE_PARAMS_OFFSET = FADE_REACH_MAX_OFFSET + 4;
-const FADE_BLOCK_FLOATS = FADE_PARAMS_OFFSET + 4;
+// Floor areas (Starfall's reach) share the block: each a centre and radius,
+// and a colour; then their count.
+const MAX_FLOOR_AREAS = 8;
+const FLOOR_AREA_OFFSET = FADE_PARAMS_OFFSET + 4;
+const FLOOR_AREA_COLOR_OFFSET = FLOOR_AREA_OFFSET + MAX_FLOOR_AREAS * 4;
+const FLOOR_AREA_COUNT_OFFSET = FLOOR_AREA_COLOR_OFFSET + MAX_FLOOR_AREAS * 4;
+const FADE_BLOCK_FLOATS = FLOOR_AREA_COUNT_OFFSET + 4;
+// A floor area paints only surfaces facing up at least this much, within
+// this many yards of its centre's height, so walls, ceilings, and other
+// floors stay clear: a faint fill and a thin, lighter rim.
+const FLOOR_AREA_MIN_UPWARD = 0.6;
+const FLOOR_AREA_HEIGHT_REACH = 5;
+const FLOOR_AREA_FILL = 0.075;
+const FLOOR_AREA_RIM = 0.35;
+const FLOOR_AREA_RIM_LIGHTEN = 0.35;
+// Floor areas lean a little towards blue from their school's colour, so
+// Starfall's reads less pink.
+const FLOOR_AREA_BLUE = new Color('#60a5fa');
+const FLOOR_AREA_BLUE_SHIFT = 0.35;
 const FADE_VERTEX_DECLARATIONS = 'varying vec3 vWowPosition;\n';
 const FADE_VERTEX = `
 vec4 wowLocal = vec4(transformed, 1.0);
@@ -128,6 +147,9 @@ layout(std140) uniform ${FADE_BLOCK} {
   vec4 wowReachMaxPacked;
   // Height range, horizontal range, volume count.
   vec4 wowFadeParams;
+  vec4 wowFloorAreaPacked[${MAX_FLOOR_AREAS}];
+  vec4 wowFloorAreaColorPacked[${MAX_FLOOR_AREAS}];
+  vec4 wowFloorAreaCountPacked;
 };
 #define wowReachMin wowReachMinPacked.xyz
 #define wowReachMax wowReachMaxPacked.xyz
@@ -139,6 +161,27 @@ float wowBayer4(vec2 position) {
   const float pattern[16] = float[16](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
   ivec2 cell = ivec2(mod(position, 4.0));
   return (pattern[cell.x + cell.y * 4] + 0.5) / 16.0;
+}
+// Floor areas' light on this surface: none on walls, nor on floors well
+// above or below an area. The rim is about a pixel and a half wide.
+vec3 wowFloorAreas() {
+  int count = int(wowFloorAreaCountPacked.x);
+  if (count == 0) return vec3(0.0);
+  vec3 normal = normalize(cross(dFdx(vWowPosition), dFdy(vWowPosition)));
+  float pixel = max(length(fwidth(vWowPosition.xy)), 1e-4) * 0.7;
+  if (abs(normal.z) < ${FLOOR_AREA_MIN_UPWARD.toFixed(2)}) return vec3(0.0);
+  vec3 light = vec3(0.0);
+  for (int index = 0; index < ${MAX_FLOOR_AREAS}; index++) {
+    if (index >= count) break;
+    vec4 area = wowFloorAreaPacked[index];
+    if (abs(vWowPosition.z - area.z) > ${FLOOR_AREA_HEIGHT_REACH.toFixed(1)}) continue;
+    float edge = length(vWowPosition.xy - area.xy) - area.w;
+    float inside = 1.0 - smoothstep(-pixel, pixel, edge);
+    float rim = 1.0 - smoothstep(0.75 * pixel, 1.5 * pixel, abs(edge + pixel));
+    vec3 color = wowFloorAreaColorPacked[index].rgb;
+    light += color * inside * ${FLOOR_AREA_FILL.toFixed(2)} + mix(color, vec3(1.0), ${FLOOR_AREA_RIM_LIGHTEN.toFixed(2)}) * rim * ${FLOOR_AREA_RIM.toFixed(2)};
+  }
+  return light;
 }
 float wowVolumeFade(int index) {
   vec3 outside = max(max(wowVolumeMinPacked[index].xyz - vWowPosition, vWowPosition - wowVolumeMaxPacked[index].xyz), 0.0);
@@ -392,11 +435,30 @@ export class InstanceSceneView {
       facing: (unit) => this.units.orientationOf(unit) ?? 0,
     };
     this.spellVisuals.update(store, now, units, this.camera, auras);
+    this.units.setLooks(this.spellVisuals.unitLooks(now));
     this.effects.update(store, now, anchor,
       (entry) => this.spellVisuals.handles(entry) && !('radius' in entry && isTaunt(entry.spellId)));
-    const count = this.effects.count + this.spellVisuals.count;
+    const areas = this.setFloorAreas(store && auras ? this.spellVisuals.bearerAreas(auras) : [], anchor);
+    const count = this.effects.count + this.spellVisuals.count + areas;
     // One more frame after the last effect ends, to clear it.
     this.effectsShown = count > 0 || before > 0;
+    return count;
+  }
+
+  // Puts bearer areas round their units' feet into the fade block, for the
+  // scene's shaders to paint on the floor; returns how many there are.
+  private setFloorAreas(areas: readonly BearerAreaCircle[], anchor: (unit: UnitKey, role: UnitAnchorRole) => Point3 | null): number {
+    const data = this.fadeData;
+    let count = 0;
+    for (const area of areas) {
+      const feet = anchor(area.unit, 'feet');
+      if (!feet || area.radius <= 0 || count >= MAX_FLOOR_AREAS) continue;
+      data.set([feet[0], feet[1], feet[2], area.radius], FLOOR_AREA_OFFSET + count * 4);
+      floorAreaColor.set(area.color).lerp(FLOOR_AREA_BLUE, FLOOR_AREA_BLUE_SHIFT);
+      data.set([floorAreaColor.r, floorAreaColor.g, floorAreaColor.b], FLOOR_AREA_COLOR_OFFSET + count * 4);
+      count += 1;
+    }
+    data[FLOOR_AREA_COUNT_OFFSET] = count;
     return count;
   }
 
@@ -410,7 +472,7 @@ export class InstanceSceneView {
     return this.gameObjects.count;
   }
 
-  // Whether an aura's spell shows the client's art (so its tint gives way).
+  // Whether an aura's spell shows the client's art (so a marker's halo gives way).
   hasAuraArt(spellId: number): boolean {
     return this.spellVisuals.hasAuraArt(spellId);
   }
@@ -620,7 +682,8 @@ export class InstanceSceneView {
     shader.vertexShader = FADE_VERTEX_DECLARATIONS + shader.vertexShader
       .replace('#include <project_vertex>', `#include <project_vertex>\n${FADE_VERTEX}`);
     shader.fragmentShader = FADE_FRAGMENT_DECLARATIONS + shader.fragmentShader
-      .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>\n${FADE_FRAGMENT}`);
+      .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>\n${FADE_FRAGMENT}`)
+      .replace('#include <opaque_fragment>', '#include <opaque_fragment>\ngl_FragColor.rgb += wowFloorAreas();');
   };
 
   private readonly injectExteriorLight = (shader: WebGLProgramParametersWithUniforms): void => {

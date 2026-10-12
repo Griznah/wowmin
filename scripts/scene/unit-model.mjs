@@ -57,7 +57,9 @@ function animatedChannels(clips, boneCount) {
   return paths;
 }
 
-export function buildUnitDocument(model, { name, textureFor, scale = 1, textureMax = 256, attachments = [], points = [] }) {
+// `alpha` (0 to 1) is how opaque the display draws the model (a
+// Shadowfiend is half see-through); it goes on the root for the renderer.
+export function buildUnitDocument(model, { name, textureFor, scale = 1, alpha = 1, textureMax = 256, attachments = [], points = [] }) {
   const document = new Document();
   const buffer = document.createBuffer();
   const accessor = (type, array, normalized = false) =>
@@ -239,7 +241,7 @@ export function buildUnitDocument(model, { name, textureFor, scale = 1, textureM
   }
   // Durations restore each clip's full length (the last key can come early);
   // speeds are the yards per second a movement clip was made for.
-  root.setExtras({ wowClipDurations: durations, wowClipSpeeds: speeds });
+  root.setExtras({ wowClipDurations: durations, wowClipSpeeds: speeds, ...(alpha < 1 ? { wowModelAlpha: alpha } : {}) });
   return document;
 }
 
@@ -262,8 +264,9 @@ export class UnitData {
     return this.tables.get(name);
   }
 
-  // CreatureDisplayInfo → model, texture variations, and scale. Humanoid
-  // displays (with extra display info) are characters, resolved separately.
+  // CreatureDisplayInfo → model, texture variations, scale, and opacity
+  // (CreatureModelAlpha, 0 to 255). Humanoid displays (with extra display
+  // info) are characters, resolved separately.
   creatureDisplay(displayId) {
     const display = this.table('CreatureDisplayInfo').get(displayId);
     if (!display) return null;
@@ -276,6 +279,7 @@ export class UnitData {
       modelName,
       extraId: display.uint(3),
       scale: display.float(4) || 1,
+      alpha: (display.int(5) || 255) / 255,
       variations: [6, 7, 8].map((field) => display.string(field)).map((variation) => (variation ? `${directory}\\${variation}.blp` : null)),
     };
   }
@@ -304,7 +308,7 @@ async function buildCreatureGlb(unitData, displayId, { weapons = {} } = {}) {
   const attachments = creatureWeaponAttachments(unitData.characters, display.modelName, weapons);
   const points = effectPoints(readM2Attachments(unitData.readFile(display.modelName)));
   const document = buildUnitDocument(model, {
-    name: `creature-${displayId}`, textureFor, scale: display.scale, attachments, points,
+    name: `creature-${displayId}`, textureFor, scale: display.scale, alpha: display.alpha, attachments, points,
   });
   return writeGlb(document);
 }
