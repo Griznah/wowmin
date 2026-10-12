@@ -77,6 +77,9 @@ const WATER_FRAGMENT = `
 // the same range. Tuned by eye against Azjol-Nerub.
 const VERTEX_LIT_BRIGHTNESS = 2;
 const UNLIT_BRIGHTNESS = 0.75;
+// Outdoor WMO groups are lit like the world outside; the client adds their
+// vertex colours to that light rather than using them as all of it.
+const EXTERIOR_LIGHT_FRAGMENT = `diffuseColor.rgb *= vColor.rgb + ${UNLIT_BRIGHTNESS.toFixed(2)};`;
 const BACKGROUND = 0x08111d;
 // High-density displays draw at most this many pixels per CSS pixel (before
 // the viewer's render scale), so a 2x screen costs about half the pixels.
@@ -154,6 +157,13 @@ for (int index = 0; index < WOW_MAX_VOLUMES; index++) {
 }
 if (wowFade <= 0.0 || wowFade < wowBayer4(gl_FragCoord.xy)) discard;
 `;
+
+// A WMO group's extras sit on its node: the mesh itself, or the group of
+// meshes holding its primitives.
+function isExteriorGroup(mesh: Mesh): boolean {
+  const node = mesh.userData.kind === 'wmoGroup' ? mesh : mesh.parent;
+  return node?.userData.kind === 'wmoGroup' && Boolean(node.userData.exterior);
+}
 
 // Building batches share one vertex buffer per WMO group, so three.js would
 // size every batch's bounds to the whole group. Fit them to the vertices the
@@ -613,6 +623,11 @@ export class InstanceSceneView {
       .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>\n${FADE_FRAGMENT}`);
   };
 
+  private readonly injectExteriorLight = (shader: WebGLProgramParametersWithUniforms): void => {
+    this.injectPartyFade(shader);
+    shader.fragmentShader = shader.fragmentShader.replace('#include <color_fragment>', EXTERIOR_LIGHT_FRAGMENT);
+  };
+
   // Binds the fade block to a material whose shader has the party fade.
   private withFade<T extends Material>(material: T): T {
     (material as T & { uniformsGroups: UniformsGroup[] }).uniformsGroups = [this.fadeGroup];
@@ -669,6 +684,7 @@ export class InstanceSceneView {
 
   private convertMaterial(mesh: Mesh, terrain: TerrainTextures | null): Material | Material[] {
     const vertexLit = Boolean(mesh.geometry.getAttribute('color'));
+    const exteriorLit = vertexLit && isExteriorGroup(mesh);
     const convert = (source: Material): Material => {
       // Terrain: its texture layers blended through its alpha atlas, lit by
       // the scene's lights (it has no baked lighting), with its vertex
@@ -690,7 +706,7 @@ export class InstanceSceneView {
       }
       // Instanced props get their own copy: three.js re-derives the shader
       // program whenever a material switches between instanced and plain.
-      const key = `${source.uuid}|${vertexLit}|${mesh instanceof InstancedMesh}`;
+      const key = `${source.uuid}|${vertexLit}|${exteriorLit}|${mesh instanceof InstancedMesh}`;
       const cached = this.materials.get(key);
       if (cached) return cached;
       const standard = source as MeshStandardMaterial;
@@ -699,7 +715,7 @@ export class InstanceSceneView {
         name: source.name,
         map: standard.map ?? null,
         color: (standard.color ?? new Color(1, 1, 1)).clone()
-          .multiplyScalar(vertexLit ? VERTEX_LIT_BRIGHTNESS : UNLIT_BRIGHTNESS),
+          .multiplyScalar(exteriorLit ? 1 : vertexLit ? VERTEX_LIT_BRIGHTNESS : UNLIT_BRIGHTNESS),
         opacity: source.opacity,
         vertexColors: vertexLit,
         side: source.side === DoubleSide ? DoubleSide : FrontSide,
@@ -713,7 +729,7 @@ export class InstanceSceneView {
         blending: blend === 'add' ? AdditiveBlending : blend === 'mod' || blend === 'mod2x' ? MultiplyBlending : NormalBlending,
         premultipliedAlpha: blend === 'mod' || blend === 'mod2x',
       });
-      material.onBeforeCompile = this.injectPartyFade;
+      material.onBeforeCompile = exteriorLit ? this.injectExteriorLight : this.injectPartyFade;
       this.withFade(material);
       this.materials.set(key, material);
       return material;
