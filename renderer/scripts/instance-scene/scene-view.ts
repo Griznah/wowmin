@@ -389,14 +389,20 @@ function propFloors(mesh: Mesh): ArrayLike<number> | null {
 // Gives a building's prop its light per instance, on its own copy of the
 // geometry (the buffers are shared): wowPropKind is [kind, share] and
 // wowPropDirect the floor's direct light and the brightness (see
-// CLIENT_LIGHT_FRAGMENT); built once per prop, shared by its primitives. Indoors the client's light from the floor (its
+// CLIENT_LIGHT_FRAGMENT). Worked out once per prop; each primitive gets its
+// own copy, as culling repacks each one's copies (chooseVisible), and keeps
+// the originals for that. Indoors the client's light from the floor (its
 // direct light; Wow.exe FUN_007a0d60 keeps the floor's ambient apart, and the
 // prop's light setup FUN_007c1730 reads the sky ambient it was made with);
 // outdoors the map's light as its own props; with no floor, a flat light as
 // unlit props have. Brightness is relative to the shaded props' colour.
-const propLights = new WeakMap<object, { kind: InstancedBufferAttribute; direct: InstancedBufferAttribute }>();
+interface PropLight {
+  kind: Float32Array;
+  direct: Float32Array;
+}
+const propLights = new WeakMap<object, PropLight>();
 
-function propLight(floors: ArrayLike<number>): { kind: InstancedBufferAttribute; direct: InstancedBufferAttribute } {
+function propLight(floors: ArrayLike<number>): PropLight {
   const count = floors.length / 4;
   const kind = new Float32Array(count * 2);
   const direct = new Float32Array(count * 4);
@@ -413,7 +419,7 @@ function propLight(floors: ArrayLike<number>): { kind: InstancedBufferAttribute;
       direct.set([...indoorLight([r, g, b]).direct, 1 / PROP_BRIGHTNESS], index * 4);
     }
   }
-  return { kind: new InstancedBufferAttribute(kind, 2), direct: new InstancedBufferAttribute(direct, 4) };
+  return { kind, direct };
 }
 
 function applyPropLight(mesh: Mesh, floors: ArrayLike<number>): void {
@@ -428,8 +434,9 @@ function applyPropLight(mesh: Mesh, floors: ArrayLike<number>): void {
   geometry.boundingSphere = source.boundingSphere?.clone() ?? null;
   geometry.setDrawRange(source.drawRange.start, source.drawRange.count);
   geometry.userData = source.userData;
-  geometry.setAttribute('wowPropKind', light.kind);
-  geometry.setAttribute('wowPropDirect', light.direct);
+  geometry.setAttribute('wowPropKind', new InstancedBufferAttribute(light.kind.slice(), 2));
+  geometry.setAttribute('wowPropDirect', new InstancedBufferAttribute(light.direct.slice(), 4));
+  mesh.userData.wowPropLight = light;
   mesh.geometry = geometry;
 }
 
@@ -1045,6 +1052,19 @@ export class InstanceSceneView {
         array.set(matrices.subarray(from, from + 16), slot * 16);
       }
       mesh.instanceMatrix.needsUpdate = true;
+      // A building's prop's light follows its copies into their new slots.
+      const light = mesh.userData.wowPropLight as PropLight | undefined;
+      if (light) {
+        for (const [name, source, size] of [['wowPropKind', light.kind, 2], ['wowPropDirect', light.direct, 4]] as const) {
+          const attribute = mesh.geometry.getAttribute(name) as InstancedBufferAttribute;
+          const target = attribute.array as Float32Array;
+          for (let slot = 0; slot < count; slot += 1) {
+            const from = instances.shown[slot] * size;
+            target.set(source.subarray(from, from + size), slot * size);
+          }
+          attribute.needsUpdate = true;
+        }
+      }
       mesh.computeBoundingSphere();
     }
   }
