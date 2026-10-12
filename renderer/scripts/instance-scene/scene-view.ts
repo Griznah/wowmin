@@ -8,6 +8,7 @@ import {
   DirectionalLight,
   DoubleSide,
   FrontSide,
+  Frustum,
   InstancedMesh,
   Material,
   Matrix4,
@@ -203,6 +204,7 @@ interface InstanceBounds {
 // Server-coordinate box of `geometry` placed by `matrix`; three.js is Y-up,
 // so server (x, y, z) is (x, -z, y).
 const scratchBox = new Box3();
+const scratchMatrix = new Matrix4();
 function serverBox(geometry: BufferGeometry, matrix: Matrix4): [number, number, number, number, number, number] {
   const box = scratchBox.copy(geometry.boundingBox!).applyMatrix4(matrix);
   return [box.min.x, box.max.x, -box.max.z, -box.min.z, box.min.y, box.max.y];
@@ -265,6 +267,10 @@ export class InstanceSceneView {
   // The fade the last frame drew with, for picking only what can be seen.
   private lastFade: { volumes: FadeVolume[]; fade: FadeSettings } | null = null;
   private readonly raycaster = new Raycaster();
+  // The server point at the centre of the last frame drawn, and the view's
+  // frustum, for the units' animation budget.
+  private lastViewCentre: Point3 | null = null;
+  private readonly frustum = new Frustum();
   // The viewer's render scale (0.5 to 1), times the capped pixel ratio.
   private renderScale = 1;
   // The canvas size and pixel ratio last set, to resize only on a change.
@@ -331,10 +337,16 @@ export class InstanceSceneView {
     if (this.lost) return new Set();
     // Animations the spells' kits ask for (from the last frame's effects).
     const animations = this.spellVisuals.takeAnimations();
+    // The animation budget goes by the last frame's camera and centre.
+    const view = this.lastViewCentre ? {
+      frustum: this.frustum.setFromProjectionMatrix(
+        scratchMatrix.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse)),
+      centre: this.lastViewCentre,
+    } : null;
     return this.units.update(animations.size ? poses.map((pose) => {
       const animation = animations.get(pose.id);
       return animation ? { ...pose, kitLoop: animation.loop, kitOnce: animation.once } : pose;
-    }) : poses, nowMs);
+    }) : poses, nowMs, view);
   }
 
   // Where an effect sits on a unit, in server coordinates: the model's own
@@ -515,6 +527,7 @@ export class InstanceSceneView {
       this.renderer.setSize(width, height, false);
     }
     applyIsoCamera(this.camera, view, width, height);
+    this.lastViewCentre = [view.center[0], view.center[1], view.center[2]];
     // setUnits has already updated the unit models' matrices this frame.
     for (const child of this.scene.children) if (child !== root && child !== this.units.group) child.updateMatrixWorld();
     this.renderer.render(this.scene, this.camera);

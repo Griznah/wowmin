@@ -3,6 +3,7 @@ import {
   type AnimationAction,
   type AnimationClip,
   AnimationMixer,
+  Bone,
   Box3,
   BufferGeometry,
   DoubleSide,
@@ -11,16 +12,21 @@ import {
   Group,
   LoopOnce,
   LoopRepeat,
+  type Frustum,
   type Material,
+  Matrix4,
   Mesh,
   MeshBasicMaterial,
   MeshLambertMaterial,
   type MeshStandardMaterial,
   NormalBlending,
-  type Object3D,
+  Object3D,
   RingGeometry,
+  Skeleton,
   SkinnedMesh,
+  Sphere,
   Vector3,
+  DetachedBindMode,
 } from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js';
@@ -120,9 +126,36 @@ interface UnitMarker {
   healthShown: number | null;
 }
 
+// A rigid model (helm, weapon) the converter hangs on a bone. Bones live
+// outside the scene graph (see UnitInstance.skeleton), so the item is drawn
+// under the model and follows its bone by hand.
+interface BoneAttachment {
+  object: Object3D;
+  // Its parent in the skeleton, and its matrix relative to that parent.
+  parent: Object3D;
+  local: Matrix4;
+}
+
 interface UnitInstance {
   url: string;
   root: Group;
+  // The bones, kept out of the scene graph so three.js doesn't walk and
+  // update them every frame: they move in the skinned mesh's own space
+  // (the mesh binds them detached), and the unit's root places the model.
+  // Posed only on frames the animation budget lets the unit animate.
+  skeleton: Object3D;
+  // The skeleton's space within the model's top node.
+  skeletonToTop: Matrix4;
+  top: Object3D;
+  attachments: BoneAttachment[];
+  // Animation time not yet applied to the mixer (seconds), and when the
+  // unit next animates if it is not among the nearest.
+  pending: number;
+  nextPoseAt: number;
+  // Posed this frame, so its bone matrices go to the GPU.
+  posed: boolean;
+  // A fixed random 0 to 1 that spreads reduced-rate units over frames.
+  phase: number;
   mixer: AnimationMixer;
   template: ModelTemplate;
   loop: AnimationAction | null;
@@ -160,6 +193,14 @@ const SPEED_SMOOTHING = 0.25;
 // The longest step the mixers advance in one frame, so a stalled tab doesn't
 // jump animations.
 const MAX_STEP_SECONDS = 0.1;
+// Animation budget: the units nearest the view's centre animate every frame,
+// the rest about ten times a second (spread so they don't all land on one
+// frame); units out of view are hidden and not animated. Positions move
+// every frame either way.
+const FULL_RATE_UNITS = 48;
+const REDUCED_RATE_MS = 100;
+// The most animation time a hidden unit catches up on when it comes back.
+const MAX_PENDING_SECONDS = 1;
 // Floor rings: drawn after the scene without depth testing, so the floor
 // never hides them, and before the models, which stand on them.
 const MARKER_RENDER_ORDER = 1;
@@ -175,6 +216,43 @@ const SELECTED_COLOR = '#fbbf24';
 export function getMarkerRadius(sizeX: number, sizeY: number, displayScale: number): number {
   const radius = Math.max(sizeX, sizeY) * 0.45;
   return Math.min(MARKER_MAX_RADIUS, Math.max(MARKER_MIN_RADIUS, radius)) * (displayScale || 1);
+}
+
+const scratchVector = new Vector3();
+const scratchSphere = new Sphere();
+
+// Takes a cloned model's bones out of the scene graph (see
+// UnitInstance.skeleton): they go under a holder in the skinned mesh's own
+// space, the mesh binds them detached, and the rigid items hung on bones
+// move under the model's top node, to follow their bones by hand.
+function detachSkeleton(model: Object3D): { top: Object3D; skeleton: Object3D; skeletonToTop: Matrix4; attachments: BoneAttachment[] } {
+  const top = model.children[0] ?? model;
+  const mesh = top.children.find((child): child is SkinnedMesh => child instanceof SkinnedMesh);
+  // The converter leaves the mesh at the top node's origin; this keeps the
+  // maths right if it ever does not.
+  const skeletonToTop = mesh ? mesh.matrix.clone() : new Matrix4();
+  const skeleton = new Object3D();
+  skeleton.matrixAutoUpdate = false;
+  skeleton.matrix.copy(skeletonToTop).invert();
+  for (const child of [...top.children]) if (child instanceof Bone) skeleton.add(child);
+  skeleton.updateMatrixWorld(true);
+  const attachments: BoneAttachment[] = [];
+  // The first node below a bone that is not a bone and holds a mesh (an
+  // item with several primitives is a group of meshes, which carries the
+  // item's tags), so it moves as a whole.
+  const holdsMesh = (object: Object3D): boolean => object instanceof Mesh || object.children.some(holdsMesh);
+  skeleton.traverse((object) => {
+    if (object instanceof Bone || !(object.parent instanceof Bone) || !holdsMesh(object)) return;
+    attachments.push({ object, parent: object.parent, local: object.matrix.clone() });
+  });
+  for (const { object } of attachments) {
+    top.add(object);
+    object.matrixAutoUpdate = false;
+  }
+  top.traverse((object) => {
+    if (object instanceof SkinnedMesh) object.bindMode = DetachedBindMode;
+  });
+  return { top, skeleton, skeletonToTop, attachments };
 }
 
 function healthColor(fraction: number): string {
@@ -265,10 +343,16 @@ export class UnitModelLayer {
   // An effect point on a drawn unit, in server coordinates, or null if the
   // unit isn't drawn as a model or its model has no such point.
   pointOf(id: string, role: UnitPointRole): Point3 | null {
-    const point = this.units.get(id)?.points.get(role);
-    if (!point) return null;
-    const position = this.group.worldToLocal(point.getWorldPosition(new Vector3()));
+    const unit = this.units.get(id);
+    const point = unit?.points.get(role);
+    if (!unit || !point) return null;
+    const position = this.group.worldToLocal(this.pointWorld(unit, point, scratchVector));
     return [position.x, position.y, position.z];
+  }
+
+  // A point in a unit's skeleton, in world space.
+  private pointWorld(unit: UnitInstance, point: Object3D, target: Vector3): Vector3 {
+    return target.setFromMatrixPosition(point.matrixWorld).applyMatrix4(unit.skeletonToTop).applyMatrix4(unit.top.matrixWorld);
   }
 
   // Which way a drawn unit faces (radians about Z), or null.
@@ -291,7 +375,9 @@ export class UnitModelLayer {
 
   // Places and animates the given units; returns the IDs drawn as models.
   // Units whose model is still loading, or has none, are left to markers.
-  update(poses: UnitModelPose[], nowMs: number): Set<string> {
+  // `view` (the last frame's camera, and the server point at the view's
+  // centre) sets the animation budget; without it every unit animates.
+  update(poses: UnitModelPose[], nowMs: number, view: { frustum: Frustum; centre: Point3 } | null = null): Set<string> {
     const step = this.lastUpdateAt ? Math.min(MAX_STEP_SECONDS, Math.max(0, (nowMs - this.lastUpdateAt) / 1000)) : 0;
     this.lastUpdateAt = nowMs;
     const shown = new Set<string>();
@@ -299,14 +385,57 @@ export class UnitModelLayer {
     for (const pose of poses) {
       const template = this.template(pose.url);
       if (template.state !== 'ready') continue;
-      const seated = this.placeMount(pose, nowMs, step, shown);
+      const seated = this.placeMount(pose, nowMs, shown);
       const unit = this.unitFor(seated ?? pose, template, nowMs);
-      this.place(unit, seated ?? pose, nowMs, step);
+      this.place(unit, seated ?? pose, nowMs);
       shown.add(pose.id);
     }
     for (const id of [...this.units.keys()]) if (!shown.has(id)) this.remove(id);
+    this.animate(step, nowMs, view);
     this.group.updateMatrixWorld(true);
     return shown;
+  }
+
+  // Steps the animations the budget allows this frame (see FULL_RATE_UNITS).
+  private animate(step: number, nowMs: number, view: { frustum: Frustum; centre: Point3 } | null): void {
+    const candidates: Array<{ unit: UnitInstance; distance: number }> = [];
+    for (const unit of this.units.values()) {
+      unit.posed = false;
+      unit.pending = Math.min(MAX_PENDING_SECONDS, unit.pending + step);
+      const { x, y, z } = unit.root.position;
+      const height = (unit.template.height ?? 2) * unit.root.scale.x;
+      const reach = Math.max(height, (unit.template.radius ?? 1) * 1.6 * unit.root.scale.x);
+      // Server (x, y, z) is (x, z, -y) in three.js's world.
+      const inView = !view || view.frustum.intersectsSphere(scratchSphere.set(scratchVector.set(x, z + height / 2, -y), reach));
+      unit.root.visible = inView;
+      if (!inView || this.settled(unit)) continue;
+      candidates.push({ unit, distance: view ? (x - view.centre[0]) ** 2 + (y - view.centre[1]) ** 2 + (z - view.centre[2]) ** 2 : 0 });
+    }
+    if (candidates.length > FULL_RATE_UNITS) candidates.sort((a, b) => a.distance - b.distance);
+    candidates.forEach(({ unit }, index) => {
+      if (index >= FULL_RATE_UNITS && nowMs < unit.nextPoseAt) return;
+      // Spread the reduced-rate units' frames by their jitter.
+      unit.nextPoseAt = nowMs + REDUCED_RATE_MS * (0.75 + unit.phase * 0.5);
+      unit.mixer.update(unit.pending);
+      unit.pending = 0;
+      this.finishStrike(unit);
+      this.pose(unit);
+    });
+  }
+
+  // A corpse whose death clip has played to its end holds still.
+  private settled(unit: UnitInstance): boolean {
+    return unit.stance === 'dead' && unit.nextPoseAt > 0 && unit.loop !== null && !unit.loop.isRunning() && !unit.strike
+      && unit.loop.time >= unit.loop.getClip().duration;
+  }
+
+  // Brings the skeleton and the items on it up to the mixer's pose.
+  private pose(unit: UnitInstance): void {
+    unit.skeleton.updateMatrixWorld(true);
+    for (const { object, parent, local } of unit.attachments) {
+      object.matrix.multiplyMatrices(unit.skeletonToTop, parent.matrixWorld).multiply(local);
+    }
+    unit.posed = true;
   }
 
   private unitFor(pose: UnitModelPose, template: ModelTemplate, nowMs: number): UnitInstance {
@@ -321,7 +450,7 @@ export class UnitModelLayer {
   // Draws a mounted pose's mount where the unit is, and returns the rider's
   // pose on its saddle; null to draw the unit on foot (not mounted, or the
   // mount's model isn't ready or has no saddle).
-  private placeMount(pose: UnitModelPose, nowMs: number, step: number, shown: Set<string>): UnitModelPose | null {
+  private placeMount(pose: UnitModelPose, nowMs: number, shown: Set<string>): UnitModelPose | null {
     if (!pose.mountUrl) return null;
     const template = this.template(pose.mountUrl);
     if (template.state !== 'ready') return null;
@@ -330,12 +459,13 @@ export class UnitModelLayer {
       style: null, weapons: NO_WEAPONS, sheathState: 0, strike: null, eventDriven: true, tint: null, kitLoop: null, kitOnce: null,
     };
     const mount = this.unitFor(mountPose, template, nowMs);
-    this.place(mount, mountPose, nowMs, step);
+    this.place(mount, mountPose, nowMs);
     shown.add(mountPose.id);
     const saddle = mount.points.get('mount');
     if (!saddle) return null;
+    // The saddle as of the mount's last pose, where the mount is now.
     mount.root.updateWorldMatrix(false, true);
-    const position = this.group.worldToLocal(saddle.getWorldPosition(new Vector3()));
+    const position = this.group.worldToLocal(this.pointWorld(mount, saddle, scratchVector));
     return {
       ...pose, x: position.x, y: position.y, z: position.z, orientation: mount.root.rotation.z, riding: true,
       marker: { ...pose.marker, hidden: true },
@@ -388,11 +518,20 @@ export class UnitModelLayer {
     const marker = createMarker(template.radius ?? MARKER_MIN_RADIUS);
     root.add(marker.group, model);
     this.group.add(root);
+    const { top, skeleton, skeletonToTop, attachments } = detachSkeleton(model);
     const jitter = Math.random();
     const unit: UnitInstance = {
       url: pose.url,
       root,
-      mixer: new AnimationMixer(model),
+      skeleton,
+      skeletonToTop,
+      top,
+      attachments,
+      pending: 0,
+      nextPoseAt: 0,
+      phase: Math.random(),
+      posed: false,
+      mixer: new AnimationMixer(skeleton),
       template,
       loop: null,
       loopName: null,
@@ -415,7 +554,18 @@ export class UnitModelLayer {
     };
     model.traverse((object) => {
       if (object.userData.wowSheath) unit.sheathItems.push(object);
+    });
+    skeleton.traverse((object) => {
       if (object.userData.wowPoint) unit.points.set(object.userData.wowPoint as string, object);
+    });
+    this.pose(unit);
+    // Bone matrices go to the GPU only on frames the unit was posed.
+    model.traverse((object) => {
+      if (!(object instanceof SkinnedMesh)) return;
+      const bones = object.skeleton;
+      bones.update = () => {
+        if (unit.posed) Skeleton.prototype.update.call(bones);
+      };
     });
     this.units.set(pose.id, unit);
     return unit;
@@ -431,7 +581,8 @@ export class UnitModelLayer {
     this.units.delete(id);
   }
 
-  private place(unit: UnitInstance, pose: UnitModelPose, nowMs: number, step: number): void {
+  // Places the unit and chooses its animations; animate() steps them.
+  private place(unit: UnitInstance, pose: UnitModelPose, nowMs: number): void {
     unit.root.position.set(pose.x, pose.y, pose.z);
     unit.root.rotation.z = pose.orientation;
     const displayScale = unit.template.scene?.children[0]?.scale.x ?? 1;
@@ -489,8 +640,6 @@ export class UnitModelLayer {
       unit.jitter = Math.random();
       this.playStrike(unit, chosen.strike);
     }
-    unit.mixer.update(step);
-    this.finishStrike(unit);
   }
 
   private playLoop(unit: UnitInstance, name: string | null, holdLastFrame: boolean, animateDeath: boolean): void {
