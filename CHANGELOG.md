@@ -36,6 +36,7 @@ and session recording built on the separate `mod-wowmin-telemetry` module.
 - Managed-mode SOAP and database connections are now owned by the Node service instead of individual browsers. Independent services start non-fatally, retry with bounded backoff, expose non-secret status, support per-database host/credential overrides, and cannot be disconnected by another browser session.
 - WoWMin is now a web-only Node.js service; Electron entrypoints, packaging, desktop update checks, and platform installers were removed.
 - The content security policy allows WebAssembly (meshopt decoding of 3D scenes) and `blob:` images and connections (glTF textures).
+- The web service reads its settings files itself, without `--env-file`: `/etc/wowmin.env` (`%ProgramData%\wowmin\wowmin.env` on Windows) takes precedence over the project's `.env`, and variables already set in the environment over both.
 
 ### Fixed
 

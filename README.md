@@ -312,10 +312,17 @@ export WOWMIN_DATA_DIR="$PWD/.wowmin-data"
 npm start
 ```
 
-Instead of exporting them, you can put these settings in a `.env` file in the
-project root (one `NAME=value` per line, kept out of git). The web service reads
-it at startup; variables already set in the environment take precedence. Keep
-it private (`chmod 600 .env`), as it holds passwords.
+Instead of exporting them, you can put these settings in a file (one
+`NAME=value` per line). The web service reads them at startup, in this order of
+precedence:
+
+1. variables already set in the environment (an export, or a systemd unit's
+   `EnvironmentFile`);
+2. the system file: `/etc/wowmin.env`, or `%ProgramData%\wowmin\wowmin.env` on
+   Windows;
+3. `.env` in the project root (kept out of git), as the fallback.
+
+Keep these files private (`chmod 600`), as they hold passwords.
 
 Open `http://server-address:3000/` and sign in with the configured HTTP
 credentials. The browser UI provides SOAP, database, map, economy, inventory,
