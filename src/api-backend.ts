@@ -4,11 +4,12 @@ import packageJson from '../package.json';
 import { SoapClient } from './soap-client';
 import { ConfigStore } from './config-store';
 import { getDbService, DatabaseService } from './database/db-service';
-import { SoapConfig, SoapResult, ConnectionProfile, DbConfig, DbConnectionState, QueryResult, FieldInfo, EntityMediaPreviewRequest, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, LogMonitorFileTailResult, MapPlayerPosition, MapPlayerSnapshot, MapOnlineCounts, OnlinePlayerRow, MapBotWaypointRequest, MapBotWaypoint, CharacterInventoryResult, CharacterInventoryItemRow, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow, SessionIndexEntry, SessionRecord, BackendConnectionStatus, ManagedServiceName } from './types/api';
+import { SoapConfig, SoapResult, ConnectionProfile, DbConfig, DbConnectionState, QueryResult, FieldInfo, EntityMediaPreviewRequest, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, LogMonitorFileTailResult, MapPlayerPosition, MapPlayerSnapshot, MapOnlineCounts, OnlinePlayerRow, MapBotWaypointRequest, MapBotWaypoint, CharacterInventoryResult, CharacterInventoryItemRow, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow, SessionIndexEntry, SessionRecord, BackendConnectionStatus, ManagedServiceName, CreatureInfo } from './types/api';
 import { ManagedConnectionLifecycle } from './managed-connection-lifecycle';
 import { inspectRemoteLogs, readRemoteLogTail } from './log-monitor-service';
 import { buildLiveMapTelemetryCommand, parseLiveMapTelemetrySnapshot } from './live-map-telemetry';
 import { SessionRecorder } from './session-recorder';
+import { TelemetryStream } from './telemetry-stream';
 
 export const APP_NAME = 'WoW Admin';
 export const APP_VERSION = packageJson.version;
@@ -33,6 +34,15 @@ let managedConnections: ManagedConnectionLifecycle | null = null;
 let telemetryPollInFlight: Promise<MapPlayerSnapshot | null> | null = null;
 let latestTelemetrySnapshot: MapPlayerSnapshot | null = null;
 const telemetryPollIntervalMs = Math.max(500, Number(process.env.WOWMIN_TELEMETRY_POLL_MS) || 1000);
+// Live position stream from mod-wowmin-telemetry (WowMinTelemetry.Stream.*).
+// The UDP socket opens only while a session is being watched.
+export const telemetryStream = new TelemetryStream(
+  (command) => soapClient
+    ? soapClient.executeCommand(command)
+    : Promise.resolve({ success: false, message: 'Not connected to the worldserver.' }),
+  process.env.WOWMIN_STREAM_HOST || '127.0.0.1',
+  Number(process.env.WOWMIN_STREAM_PORT) || 7979,
+);
 
 export interface ManagedBackendConfig {
   soap: SoapConfig;
@@ -1148,6 +1158,45 @@ apiRouter.handle('sessions:list', async (): Promise<SessionIndexEntry[]> => sess
 apiRouter.handle('sessions:get', async (_event, id: string): Promise<SessionRecord | null> => sessionRecorder.get(id));
 
 apiRouter.handle('sessions:purgeCompleted', async (): Promise<number> => sessionRecorder.purgeCompleted());
+
+// Names, levels, and ranks for creatures in the live stream, by entry.
+apiRouter.handle('map:getCreatureInfo', async (_event, entries: unknown): Promise<CreatureInfo[]> => {
+  const ids = [...new Set((Array.isArray(entries) ? entries : []).map(Number))]
+    .filter((id) => Number.isInteger(id) && id > 0)
+    .slice(0, 500);
+  const charDb = getCharactersDbService();
+  if (!ids.length || !charDb?.config) return [];
+  const worldDb = process.env.WOWMIN_WORLD_DB || deriveWorldDatabaseName(charDb.config.database);
+  const result = await charDb.query<{
+    entry: number;
+    name: string;
+    subname: string | null;
+    minlevel: number;
+    maxlevel: number;
+    rank: number;
+    unit_flags: number;
+    flags_extra: number;
+    npcflag: number;
+    type: number;
+  }>(
+    `SELECT entry, name, subname, minlevel, maxlevel, \`rank\`, unit_flags, flags_extra, npcflag, \`type\`
+       FROM ${escapeIdentifier(worldDb)}.\`creature_template\`
+      WHERE entry IN (${ids.map(() => '?').join(', ')})`,
+    ids,
+  );
+  return result.rows.map((row) => ({
+    entry: Number(row.entry),
+    name: row.name,
+    subname: row.subname ?? '',
+    minLevel: Number(row.minlevel),
+    maxLevel: Number(row.maxlevel),
+    rank: Number(row.rank),
+    unitFlags: Number(row.unit_flags) || 0,
+    flagsExtra: Number(row.flags_extra) || 0,
+    npcFlags: Number(row.npcflag) || 0,
+    creatureType: Number(row.type) || 0,
+  }));
+});
 
 apiRouter.handle('map:getBotWaypoint', async (_event, request: MapBotWaypointRequest): Promise<MapBotWaypoint | null> => {
   try {

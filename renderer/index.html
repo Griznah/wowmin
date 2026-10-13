@@ -1200,12 +1200,59 @@ SELECT * FROM creature_template WHERE entry = 1;" spellcheck="false"></textarea>
                 <output id="instance-icon-scale-value" for="instance-icon-scale">125%</output>
               </span>
             </label>
+            <label title="How far above or below the party the 3D scene fades out">Height fade
+              <span class="player-icon-scale-control">
+                <input type="range" id="instance-fade-range" min="5" max="50" step="5" value="15" />
+                <output id="instance-fade-range-value" for="instance-fade-range">15 yd</output>
+              </span>
+            </label>
+            <label title="How far around each party member the 3D scene stays visible: solid out to half this distance, gone at the full distance. 0 turns it off.">Horizontal fade
+              <span class="player-icon-scale-control">
+                <input type="range" id="instance-horizontal-fade" min="0" max="200" step="10" value="40" />
+                <output id="instance-horizontal-fade-value" for="instance-horizontal-fade">40 yd</output>
+              </span>
+            </label>
+            <label title="Draws the 3D scene at this share of the screen's resolution and stretches it to fit. Lower is faster but blurrier.">Render scale
+              <span class="player-icon-scale-control">
+                <input type="range" id="instance-render-scale" min="0.5" max="1" step="0.05" value="1" />
+                <output id="instance-render-scale-value" for="instance-render-scale">100%</output>
+              </span>
+            </label>
+            <label title="Creatures in the instance, from the live stream. Near party shows those within 50 yards of a player.">Mobs
+              <select id="instance-mobs-mode">
+                <option value="near">Near party</option>
+                <option value="all">All</option>
+                <option value="off">Off</option>
+              </select>
+            </label>
+            <label title="How names show over units in the 3D view: nameplates with health, level, and casts, in the look of the TidyPlates addon's Neon, Grey, or Quatre themes, or plain labels.">Plates
+              <select id="instance-plates-mode">
+                <option value="neon">Neon</option>
+                <option value="grey">Grey</option>
+                <option value="quatre">Quatre</option>
+                <option value="labels">Labels</option>
+              </select>
+            </label>
+            <label title="How the 3D view is lit: by each map's own light from the client, at your local time of day, or by a fixed neutral white.">Lighting
+              <select id="instance-lighting-mode">
+                <option value="client">Client</option>
+                <option value="neutral">Neutral</option>
+              </select>
+            </label>
             <div class="btn-row">
               <button id="instance-refresh-btn" class="btn btn-small">Refresh now</button>
-              <button id="instance-fit-btn" class="btn btn-small" title="Reset pan and zoom">Fit view</button>
+              <button id="instance-fit-btn" class="btn btn-small" title="Reset pan, zoom, rotation, and tilt">Fit view</button>
               <button id="instance-zoom-out-btn" class="btn btn-small" title="Zoom out">−</button>
               <button id="instance-zoom-in-btn" class="btn btn-small" title="Zoom in">+</button>
               <button id="instance-clear-focus-btn" class="btn btn-small hidden" title="Clear participant focus">Clear focus</button>
+              <button id="instance-follow-btn" class="btn btn-small" title="Keep the selected participant centred" aria-pressed="false">Follow</button>
+              <button id="instance-trails-btn" class="btn btn-small" title="Show the faded line of where each player has been." aria-pressed="true">Trails</button>
+              <button id="instance-paths-btn" class="btn btn-small" title="Show where bots and mobs are heading. Needs the live stream." aria-pressed="true">Paths</button>
+              <button id="instance-decisions-btn" class="btn btn-small" title="Show what each bot is doing and where it chose to move. Needs the live stream and mod-playerbots." aria-pressed="true">Decisions</button>
+              <button id="instance-models-btn" class="btn btn-small" title="Draw players and mobs with their game models, animated. Needs the live stream and 3D." aria-pressed="true">Models</button>
+              <button id="instance-numbers-btn" class="btn btn-small" title="Float damage and healing numbers over units, like the game's combat text. Needs the live stream." aria-pressed="false">Numbers</button>
+              <button id="instance-fades-btn" class="btn btn-small" title="Fade the 3D scene out away from the party, by the height and horizontal fade settings. Turn off to see the whole map, as suits battlegrounds and outdoor areas." aria-pressed="true">Fade</button>
+              <button id="instance-object-lights-btn" class="btn btn-small" title="Light the ground, props, and units near the party with the torches, braziers, and lamps on the map. Turn off if the 3D view is slow." aria-pressed="true">Lights</button>
             </div>
           </div>
         </div>
@@ -1226,6 +1273,11 @@ SELECT * FROM creature_template WHERE entry = 1;" spellcheck="false"></textarea>
             <div id="instance-boss-list" class="instance-boss-list"></div>
             <div id="instance-death-history" class="instance-death-history"></div>
           </div>
+        </div>
+
+        <div id="instance-bot-card" class="card instance-bot-card hidden">
+          <div class="card-header"><h3>Bot decisions</h3></div>
+          <div id="instance-bot-decisions" class="card-body instance-bot-decisions"></div>
         </div>
 
         <div class="card instance-player-list-card">
@@ -1249,7 +1301,24 @@ SELECT * FROM creature_template WHERE entry = 1;" spellcheck="false"></textarea>
           </div>
         </div>
         <div class="instance-canvas-wrapper">
-          <canvas id="instance-watch-canvas"></canvas>
+          <canvas id="instance-watch-scene" class="instance-watch-scene" hidden></canvas>
+          <canvas id="instance-watch-canvas" tabindex="0"></canvas>
+          <pre id="instance-debug-overlay" class="instance-debug-overlay" hidden></pre>
+          <div id="instance-view-controls" class="map-zoom-controls instance-view-controls hidden">
+            <button id="instance-rotate-left-btn" class="btn btn-tiny" title="Rotate left (Q). Middle-drag or Shift+drag to rotate and tilt freely." aria-label="Rotate view left">⟲</button>
+            <button id="instance-rotate-right-btn" class="btn btn-tiny" title="Rotate right (E). Middle-drag or Shift+drag to rotate and tilt freely." aria-label="Rotate view right">⟳</button>
+            <button id="instance-view-3d-btn" class="btn btn-tiny" title="Switch between the 3D scene and the flat map" aria-pressed="true">3D</button>
+            <svg id="instance-compass" class="instance-compass" viewBox="-32 -32 64 64" role="img" aria-label="Compass" hidden>
+              <title>Map orientation</title>
+              <ellipse id="instance-compass-ring" class="instance-compass-ring" rx="15" ry="15"></ellipse>
+              <polygon id="instance-compass-north" class="instance-compass-north"></polygon>
+              <polygon id="instance-compass-south" class="instance-compass-south"></polygon>
+              <text data-point="N" class="instance-compass-label north">N</text>
+              <text data-point="E" class="instance-compass-label">E</text>
+              <text data-point="S" class="instance-compass-label">S</text>
+              <text data-point="W" class="instance-compass-label">W</text>
+            </svg>
+          </div>
           <div id="instance-watch-empty" class="instance-watch-empty">
             <strong>No active instance or battleground sessions</strong>
             <span>This is expected when nobody is currently inside one.</span>

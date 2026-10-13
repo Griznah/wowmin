@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import BLPFile from 'js-blp';
 import { PNG } from 'pngjs';
-import { archivePriority } from './extract-map-assets.mjs';
+import { archivePriority } from './client-archives.mjs';
 
 const require = createRequire(import.meta.url);
 const { MpqArchive } = require('stormlib-js');

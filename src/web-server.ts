@@ -1,10 +1,12 @@
-import { APP_VERSION, getBackendConnectionStatus, initializeApiBackend, initializeManagedConnections, shutdownApiBackend } from './api-backend';
+import './load-env';
+import { APP_VERSION, getBackendConnectionStatus, initializeApiBackend, initializeManagedConnections, shutdownApiBackend, telemetryStream } from './api-backend';
 import { apiRouter } from './api-router';
 import { createHash, timingSafeEqual } from 'crypto';
 import * as fs from 'fs';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import * as path from 'path';
 import { inspectLocalLogs, readLocalLogTail } from './local-logs';
+import { parseUnitModelPath, UnitModels } from './unit-models';
 import { buildContentSecurityPolicy, deriveDungeonClearUrl, normalizeDungeonClearUrl } from './dungeon-clear-config';
 import type { DbConfig, SoapConfig } from './types/api';
 
@@ -16,6 +18,19 @@ const projectRoot = path.resolve(__dirname, '..');
 const maxRequestBytes = 2 * 1024 * 1024;
 const managed = Boolean(process.env.WOWMIN_SOAP_USERNAME && process.env.WOWMIN_SOAP_PASSWORD && process.env.WOWMIN_DB_PASSWORD);
 const configuredDungeonClearUrl = normalizeDungeonClearUrl(process.env.WOWMIN_DUNGEON_CLEAR_URL);
+
+// A watched instance's updates go to every page watching it, so each is
+// serialized once however many pages there are.
+const serializedEvents = new WeakMap<object, string>();
+function eventJson(data: unknown): string {
+  if (typeof data !== 'object' || data === null) return JSON.stringify(data);
+  let json = serializedEvents.get(data);
+  if (json === undefined) {
+    json = JSON.stringify(data);
+    serializedEvents.set(data, json);
+  }
+  return json;
+}
 
 function managedSoapConfig(): SoapConfig {
   return {
@@ -65,10 +80,13 @@ const staticFiles: Record<string, string> = {
   '/styles/output.css': path.join(projectRoot, 'renderer', 'styles', 'output.css'),
   '/dist/web-api.js': path.join(projectRoot, 'dist', 'web-api.js'),
   '/dist/renderer.js': path.join(projectRoot, 'dist', 'renderer.js'),
+  '/spell-preview': path.join(projectRoot, 'renderer', 'spell-preview.html'),
+  '/dist/spell-preview.js': path.join(projectRoot, 'dist', 'spell-preview.js'),
 };
 
 const mimeTypes: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
+  '.glb': 'model/gltf-binary',
   '.html': 'text/html; charset=utf-8',
   '.ico': 'image/x-icon',
   '.jpeg': 'image/jpeg',
@@ -151,11 +169,30 @@ function resolveStaticFile(urlPath: string): string | null {
   return null;
 }
 
+const assetsRoot = path.join(projectRoot, 'assets');
+const unitModels = new UnitModels(
+  path.join(assetsRoot, 'models'),
+  path.join(projectRoot, 'scripts', 'scene', 'unit-model-worker.mjs'),
+);
+
 function serveFile(request: IncomingMessage, response: ServerResponse, filePath: string): void {
   fs.stat(filePath, (statError, stats) => {
     if (statError || !stats.isFile()) {
       sendJson(response, 404, { error: 'Not found' });
       return;
+    }
+    // Extracted map assets (scenes run to megabytes) may be cached, but are
+    // revalidated on every use so a re-extraction shows up immediately.
+    if (filePath.startsWith(`${assetsRoot}${path.sep}`)) {
+      const etag = `W/"${stats.size.toString(36)}-${Math.floor(stats.mtimeMs).toString(36)}"`;
+      response.setHeader('Cache-Control', 'no-cache');
+      response.setHeader('ETag', etag);
+      response.setHeader('Last-Modified', stats.mtime.toUTCString());
+      if (request.headers['if-none-match'] === etag) {
+        response.writeHead(304);
+        response.end();
+        return;
+      }
     }
     response.writeHead(200, {
       'Content-Type': mimeTypes[path.extname(filePath).toLowerCase()] || 'application/octet-stream',
@@ -203,6 +240,45 @@ const server = createServer(async (request, response) => {
   if (!isAuthorized(request)) {
     response.setHeader('WWW-Authenticate', 'Basic realm="WoW Admin", charset="UTF-8"');
     sendJson(response, 401, { error: 'Authentication required' });
+    return;
+  }
+
+  // Server-Sent Events: live positions for one session, from the module's UDP
+  // stream. Events: "status" (starting | streaming | unavailable) and "frame".
+  if (url.pathname === '/api/stream') {
+    const mapId = Number(url.searchParams.get('map'));
+    const instanceId = Number(url.searchParams.get('instance'));
+    if (!Number.isInteger(mapId) || mapId < 0 || !Number.isInteger(instanceId) || instanceId <= 0) {
+      sendJson(response, 400, { error: 'map and instance are required' });
+      return;
+    }
+    response.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    response.write('retry: 3000\n\n');
+    const send = (event: string, data: unknown) => response.write(`event: ${event}\ndata: ${eventJson(data)}\n\n`);
+    const unwatch = telemetryStream.watch(mapId, instanceId, {
+      onFrame: (frame) => send('frame', frame),
+      onStatus: (status) => send('status', status),
+      onPaths: (update) => send('paths', update),
+      onCreatures: (update) => send('creatures', update),
+      onBots: (update) => send('bots', update),
+      onAppearances: (update) => send('appearances', update),
+      onCombatEvents: (update) => send('combat', update),
+      onUnitAuras: (update) => send('auras', update),
+      onPassengers: (update) => send('passengers', update),
+      onGameObjects: (update) => send('gameobjects', update),
+      onDebuffs: (update) => send('debuffs', update),
+      onMarkers: (update) => send('markers', update),
+    });
+    // Comment lines keep idle connections open through proxies.
+    const keepAlive = setInterval(() => response.write(': keep-alive\n\n'), 15000);
+    request.on('close', () => {
+      clearInterval(keepAlive);
+      unwatch();
+    });
     return;
   }
 
@@ -270,6 +346,14 @@ const server = createServer(async (request, response) => {
     decodedPath = decodeURIComponent(url.pathname);
   } catch {
     sendJson(response, 400, { error: 'Invalid URL path' });
+    return;
+  }
+  // Unit models are built from the client's files the first time they are asked for.
+  const unitModel = parseUnitModelPath(decodedPath);
+  if (unitModel) {
+    const modelPath = await unitModels.ensure(unitModel);
+    if (modelPath) serveFile(request, response, modelPath);
+    else sendJson(response, 404, { error: 'No model' });
     return;
   }
   const filePath = resolveStaticFile(decodedPath);

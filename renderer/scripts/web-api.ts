@@ -70,8 +70,28 @@ const wowminAPI: WowminAPI = {
     connect: (config) => invoke('map:connect', config),
     disconnect: () => invoke('map:disconnect'),
     getPlayerPositions: (mapId, instanceId) => invoke('map:getPlayerPositions', mapId, instanceId),
+    streamPositions: (mapId, instanceId, listeners) => {
+      const source = new EventSource(`/api/stream?map=${mapId}&instance=${instanceId}`);
+      const data = (event: Event) => JSON.parse((event as MessageEvent<string>).data);
+      source.addEventListener('frame', (event) => listeners.onFrame(data(event)));
+      source.addEventListener('status', (event) => listeners.onStatus(data(event)));
+      source.addEventListener('paths', (event) => listeners.onPaths?.(data(event)));
+      source.addEventListener('creatures', (event) => listeners.onCreatures?.(data(event)));
+      source.addEventListener('bots', (event) => listeners.onBots?.(data(event)));
+      source.addEventListener('appearances', (event) => listeners.onAppearances?.(data(event)));
+      source.addEventListener('combat', (event) => listeners.onCombatEvents?.(data(event)));
+      source.addEventListener('auras', (event) => listeners.onUnitAuras?.(data(event)));
+      source.addEventListener('passengers', (event) => listeners.onPassengers?.(data(event)));
+      source.addEventListener('gameobjects', (event) => listeners.onGameObjects?.(data(event)));
+      source.addEventListener('debuffs', (event) => listeners.onDebuffs?.(data(event)));
+      source.addEventListener('markers', (event) => listeners.onMarkers?.(data(event)));
+      // EventSource reconnects by itself; report the gap meanwhile.
+      source.addEventListener('error', () => listeners.onStatus('starting'));
+      return () => source.close();
+    },
     getOnlineCounts: () => invoke('map:getOnlineCounts'),
     getBotWaypoint: (request) => invoke('map:getBotWaypoint', request),
+    getCreatureInfo: (entries) => invoke('map:getCreatureInfo', entries),
   },
   sessions: {
     list: () => invoke('sessions:list'),

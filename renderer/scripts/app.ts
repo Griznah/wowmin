@@ -1,13 +1,27 @@
 /// <reference path="./types/window.d.ts" />
 import { ts, escapeHtml, showResult, debounce, getMapName, CLASS_COLORS, RACE_NAMES, CLASS_NAMES } from './utils/helpers';
 import { parseOnlineList, playersFromDatabase } from './utils/online-players';
-import { type ActiveInstanceSession, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getInstanceCoordinateBounds, getInstanceFactionColor, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, groupActiveInstanceSessions, parseInstanceSessionKey, projectInstancePosition, projectMinimapTilePosition, zoomInstanceViewAt } from './utils/instance-watch';
+import { type ActiveInstanceSession, type DungeonFloor, type DungeonMapFloor, type InstanceCoordinateBounds, type InstanceProjectionViewport, type InstanceViewTransform, applyInstanceViewTransform, getBattlegroundObjectiveLabels, getBattlegroundStatusLabel, getBattlegroundStrategyLabel, getInstanceCoordinateBounds, getInstanceFactionColor, getInstanceMapProfile, getInstanceProjectionViewport, getParticipantDungeonFloor, groupActiveInstanceSessions, parseInstanceSessionKey, zoomInstanceViewAt, INSTANCE_MAX_ZOOM, isSceneryCreature } from './utils/instance-watch';
+import { clampIsoPitch, type CompassPoint, createFlatProjection, createIsoView, DEFAULT_ISO_YAW, type FadeSettings, getCompassDirections, getFadeVolumes, getHeightBand, getIsoPanForCenter, getNextQuarterTurn, ISO_PITCH, type IsoView, type MapProjection, resolveMinimapTileProjection, type SceneBox } from './utils/map-projection';
+import { InstanceSceneView, type SceneLighting } from './instance-scene/scene-view';
+import type { MapLights } from './utils/map-light';
+import type { UnitModelPose } from './instance-scene/unit-models';
+import type { GameObjectPose } from './instance-scene/game-objects';
+import {
+  CAST_GRACE_MS, CombatEffectStore, NUMBER_LIFETIME_MS, type Point3, type StrikeKind, type UnitKey, unitKey,
+} from './utils/spell-events';
+import { drawFactionCrest, drawNameplate, FACTION_NAME_COLORS, type Faction, levelColor, type Nameplate, plateBounds, type PlateStyle, POWER_COLORS } from './instance-scene/nameplates';
+import { ClientIcons } from './utils/client-icons';
+import { SpellNames } from './utils/spell-names';
+import { applyLiveSample, creaturePathKey, getMountModelUrl, getUnitModelUrl, LiveAppearanceStore, LiveAuraStore, LiveDebuffStore, LiveGameObjectStore, LiveMarkerStore, LivePassengerStore, LiveBotStore, LiveCreatureBuffer, LivePathStore, LivePositionBuffer, trimPathToPosition } from './utils/live-positions';
+import { getCreatureCombatStyle, getPlayerCombatStyle } from './utils/unit-animation';
 import { CONTINENT_BOUNDS, worldToCanvas } from './utils/map-coords';
 import { getEnglishMotd, getServerUptime } from './utils/dashboard-data';
 import { calculateSessionTotalsAt, formatSessionReplayTime, isSessionRouteDiscontinuity } from './utils/session-replay';
 import { getClassIconHtml, getClassIconImage, getPlayerStateIconsHtml, getPlayerStateIndicators, getRacePortraitHtml, getResponsivePlayerIconScale, getStateIconImage, loadPlayerIconManifest } from './utils/player-icons';
 import { formatBattlegroundOutcome } from '../../src/session-outcome';
 import { AppState, createInitialState, PlayerInfo } from './types/state';
+import type { CreatureInfo, StreamBotDecision, StreamCreatureSample, StreamStatus } from '../../src/types/api';
 import type { ConnectionProfile, DbConfig, SoapConfig, EntityMediaPreviewResult, LogMonitorConfig, LogMonitorInspectionResult, MapBattlegroundState, MapInstanceDeath, MapInstanceState, MapPlayerPosition, MapBotWaypoint, CharacterInventoryResult, EconomyOverview, EconomyCharacterGoldResult, EconomyAuctionRow, EconomyMarketSummaryRow, SessionIndexEntry, SessionRecord, SessionRoutePoint } from '../../src/types/api';
 import { bindInventoryTableTooltips, formatInventoryLocation, ITEM_QUALITY_COLOR } from './inventory/wow-item-tooltip';
 
@@ -6447,6 +6461,32 @@ const $instanceBossList = $<HTMLElement>('instance-boss-list');
 const $instanceDeathHistory = $<HTMLElement>('instance-death-history');
 const $instanceWatchCanvas = $<HTMLCanvasElement>('instance-watch-canvas');
 const $instanceWatchEmpty = $<HTMLElement>('instance-watch-empty');
+const $instanceWatchScene = $<HTMLCanvasElement>('instance-watch-scene');
+const $instanceViewControls = $<HTMLElement>('instance-view-controls');
+const $instanceRotateLeftBtn = $<HTMLButtonElement>('instance-rotate-left-btn');
+const $instanceRotateRightBtn = $<HTMLButtonElement>('instance-rotate-right-btn');
+const $instanceView3dBtn = $<HTMLButtonElement>('instance-view-3d-btn');
+const $instanceCompass = document.getElementById('instance-compass') as SVGSVGElement | null;
+const $instanceFadeRange = $<HTMLInputElement>('instance-fade-range');
+const $instanceFadeRangeValue = $<HTMLOutputElement>('instance-fade-range-value');
+const $instanceHorizontalFade = $<HTMLInputElement>('instance-horizontal-fade');
+const $instanceFadesBtn = $<HTMLButtonElement>('instance-fades-btn');
+const $instanceHorizontalFadeValue = $<HTMLOutputElement>('instance-horizontal-fade-value');
+const $instanceRenderScale = $<HTMLInputElement>('instance-render-scale');
+const $instanceRenderScaleValue = $<HTMLOutputElement>('instance-render-scale-value');
+const $instanceFollowBtn = $<HTMLButtonElement>('instance-follow-btn');
+const $instancePathsBtn = $<HTMLButtonElement>('instance-paths-btn');
+const $instanceTrailsBtn = $<HTMLButtonElement>('instance-trails-btn');
+const $instanceMobsMode = $<HTMLSelectElement>('instance-mobs-mode');
+const $instancePlatesMode = $<HTMLSelectElement>('instance-plates-mode');
+const $instanceLightingMode = $<HTMLSelectElement>('instance-lighting-mode');
+const $instanceObjectLightsBtn = $<HTMLButtonElement>('instance-object-lights-btn');
+const $instanceDecisionsBtn = $<HTMLButtonElement>('instance-decisions-btn');
+const $instanceModelsBtn = $<HTMLButtonElement>('instance-models-btn');
+const $instanceNumbersBtn = $<HTMLButtonElement>('instance-numbers-btn');
+const $instanceBotCard = $<HTMLElement>('instance-bot-card');
+const $instanceBotDecisions = $<HTMLElement>('instance-bot-decisions');
+const $instanceDebugOverlay = $<HTMLElement>('instance-debug-overlay');
 const $instanceWatchTitle = $<HTMLElement>('instance-watch-title');
 const $instanceWatchSubtitle = $<HTMLElement>('instance-watch-subtitle');
 const $instanceWatchStatus = $<HTMLElement>('instance-watch-status');
@@ -6477,6 +6517,24 @@ interface InstanceMapAssetMetadata {
   floors?: DungeonMapFloor[];
 }
 
+// <mapId>.scene.json, written by npm run extract:scenes.
+interface InstanceSceneMetadata {
+  schemaVersion: number;
+  mapId: number;
+  file: string;
+  bounds: SceneBox;
+  groups: Array<{ wmoGroupId: number; exterior: boolean; minZ: number; maxZ: number }>;
+  // Every floor; minZ/maxZ only where its WMO groups give a height range.
+  floors: Array<DungeonFloor & { minZ?: number; maxZ?: number }>;
+  // The box the buildings in the play area fill.
+  buildingReach?: SceneBox | null;
+}
+
+// The scene is cut off this far beyond the outermost buildings, above the
+// tallest roof, and below the lowest foundation in the play area: players
+// don't get beyond.
+const INSTANCE_REACH_PADDING = 20;
+
 interface LoadedInstanceMapAsset {
   metadata: InstanceMapAssetMetadata;
   image?: HTMLImageElement;
@@ -6500,8 +6558,267 @@ let instanceBaseViewport: InstanceProjectionViewport | null = null;
 let instanceMarkerHitAreas: Array<{ name: string; x: number; y: number; radius: number }> = [];
 let instancePanStart: { x: number; y: number; panX: number; panY: number; moved: boolean } | null = null;
 const instanceMapAssets = new Map<number, LoadedInstanceMapAsset | null>();
+// Live position stream for the selected session.
+const instanceLivePositions = new LivePositionBuffer();
+const instanceLivePaths = new LivePathStore();
+const instanceLiveCreatures = new LiveCreatureBuffer();
+type InstanceMobsMode = 'near' | 'all' | 'off';
+const INSTANCE_MOBS_STORAGE_KEY = 'wowmin.instanceMobs';
+let instanceMobsMode = readStoredInstanceMobsMode();
+// "Near party" shows creatures within this many yards (horizontally) of a
+// visible player, and within INSTANCE_MOBS_NEAR_HEIGHT of their height.
+const INSTANCE_MOBS_NEAR_YARDS = 50;
+const INSTANCE_MOBS_NEAR_HEIGHT = 20;
+// Ordinary mobs are labelled from this zoom in; bosses always are.
+const INSTANCE_MOB_LABEL_ZOOM = 2.5;
+// Names over units in the 3D view: TidyPlates-style nameplates, or the plain
+// labels the flat map uses.
+type InstancePlatesMode = PlateStyle | 'labels';
+const INSTANCE_PLATES_STORAGE_KEY = 'wowmin.instancePlates';
+let instancePlatesMode = readStoredInstancePlatesMode();
+const INSTANCE_LIGHTING_STORAGE_KEY = 'wowmin.instanceLighting';
+let instanceLighting: SceneLighting = readStoredSetting(INSTANCE_LIGHTING_STORAGE_KEY) === 'neutral' ? 'neutral' : 'client';
+const INSTANCE_OBJECT_LIGHTS_STORAGE_KEY = 'wowmin.instanceObjectLights';
+let instanceObjectLights = readStoredFlag(INSTANCE_OBJECT_LIGHTS_STORAGE_KEY, true);
+// Each map's lights (assets/models/light/<id>.json, from the client), null
+// when it has none or they could not be built.
+const instanceMapLights = new Map<number, MapLights | null>();
+const instanceMapLightLoads = new Set<number>();
+// Plates are drawn at this size with the icon size setting at its default.
+const INSTANCE_PLATE_BASE_ICON_SCALE = 1.25;
+// Players' pets get plates this much smaller.
+const INSTANCE_PET_PLATE_SIZE = 0.75;
+// Mob plates: hostile, neutral, and a player's pet or guardian.
+const INSTANCE_PLATE_HOSTILE_COLOR = '#d42a1e';
+const INSTANCE_PLATE_NEUTRAL_COLOR = '#e8c62a';
+const INSTANCE_PLATE_FRIENDLY_COLOR = '#3fbf3f';
+const instanceSpellNames = new SpellNames(() => renderInstanceCanvas());
+// Spell icons for cast bars and the sides' crests, from the client.
+const instanceClientIcons = new ClientIcons(() => renderInstanceCanvas());
+// creature_template details by entry; null while loading or when unknown.
+const instanceCreatureInfo = new Map<number, CreatureInfo | null>();
+let instanceCreatureInfoQueue = new Set<number>();
+let instanceCreatureInfoTimer: ReturnType<typeof setTimeout> | null = null;
+const INSTANCE_PATHS_STORAGE_KEY = 'wowmin.instancePaths';
+let instanceShowPaths = readStoredInstancePaths();
+// The faded line of where each player has been.
+const INSTANCE_TRAILS_STORAGE_KEY = 'wowmin.instanceTrails';
+let instanceShowTrails = readStoredInstanceTrails();
+// What each bot is deciding (mod-playerbots), keyed by name.
+const instanceLiveBots = new LiveBotStore();
+const INSTANCE_DECISIONS_STORAGE_KEY = 'wowmin.instanceDecisions';
+let instanceShowDecisions = readStoredInstanceDecisions();
+// Where a bot chose to move is drawn while the choice is this recent.
+const INSTANCE_MOVE_TARGET_MS = 10_000;
+// An action is what a bot is doing while it last ran this recently.
+const INSTANCE_CURRENT_ACTION_MS = 3000;
+const INSTANCE_BOT_CARD_INTERVAL_MS = 250;
+let instanceBotCardRenderedAt = 0;
+// How each unit looks (display, gear), for drawing client models in 3D.
+const instanceLiveAppearances = new LiveAppearanceStore();
+// Which auras with spell art each unit wears, for the client's aura art.
+const instanceLiveAuras = new LiveAuraStore();
+// Which vehicle and seat each player rides.
+const instanceLivePassengers = new LivePassengerStore();
+// Spawned game objects with models (battleground banners and flags, doors).
+const instanceLiveGameObjects = new LiveGameObjectStore();
+// Harmful auras and raid markers, for the plates.
+const instanceLiveDebuffs = new LiveDebuffStore();
+const instanceLiveMarkers = new LiveMarkerStore();
+// GameobjectTypes door, and GOState active: an open door, drawn as gone.
+const GAMEOBJECT_TYPE_DOOR = 0;
+const GO_STATE_ACTIVE = 0;
+const INSTANCE_MODELS_STORAGE_KEY = 'wowmin.instanceModels';
+let instanceShowModels = readStoredInstanceModels();
+// Casts, auras, swings, damage, and heals from the live stream, as effects.
+const instanceCombatEffects = new CombatEffectStore();
+const INSTANCE_NUMBERS_STORAGE_KEY = 'wowmin.instanceNumbers';
+let instanceShowNumbers = readStoredInstanceNumbers();
+// Rough model heights in yards, for placing labels and click targets above
+// a model rather than at its feet.
+const INSTANCE_PLAYER_MODEL_HEIGHT = 2.2;
+const INSTANCE_CREATURE_MODEL_HEIGHT = 2.5;
+// ?debug in the page URL shows render and stream statistics over the view.
+const instanceDebug = new URLSearchParams(window.location.search).has('debug');
+const INSTANCE_DEBUG_WINDOW_MS = 2000;
+const INSTANCE_DEBUG_INTERVAL_MS = 500;
+const instanceDebugEvents = new Map<string, Array<{ at: number; value: number }>>();
+let instanceDebugCounts = { players: 0, mobsShown: 0, mobsStreamed: 0, paths: 0, bots: 0, models: 0, effects: 0, spellArt: 0, particles: 0 };
+let instanceDebugLastFrameAt = 0;
+let instanceDebugRenderedAt = 0;
+// Redraw cap while animating live positions.
+const INSTANCE_LIVE_FRAME_MS = 33;
+let instanceLiveStream: { key: string; stop: () => void; status: StreamStatus } | null = null;
+let instanceLiveAnimating = false;
+let instanceLiveLastDrawAt = 0;
+const INSTANCE_VIEW_3D_STORAGE_KEY = 'wowmin.instanceView3d';
+// Scene geometry fades out over this many yards above and below the height
+// range of the focused party, and is not drawn beyond it. Set per viewer.
+const INSTANCE_FADE_RANGE_STORAGE_KEY = 'wowmin.instanceFadeRange';
+const INSTANCE_FADE_RANGE_DEFAULT = 15;
+const INSTANCE_FADE_RANGE_MIN = 5;
+const INSTANCE_FADE_RANGE_MAX = 50;
+let instanceFadeRange = readStoredInstanceFadeRange();
+// Horizontal reach of the party fade in yards; 0 turns it off.
+const INSTANCE_HORIZONTAL_FADE_STORAGE_KEY = 'wowmin.instanceHorizontalFade';
+const INSTANCE_HORIZONTAL_FADE_DEFAULT = 40;
+const INSTANCE_HORIZONTAL_FADE_MAX = 200;
+let instanceHorizontalFade = readStoredInstanceHorizontalFade();
+// The 3D scene's resolution as a share of the screen's (capped) resolution.
+const INSTANCE_RENDER_SCALE_STORAGE_KEY = 'wowmin.instanceRenderScale';
+const INSTANCE_RENDER_SCALE_DEFAULT = 1;
+const INSTANCE_RENDER_SCALE_MIN = 0.5;
+let instanceRenderScale = readStoredInstanceRenderScale();
+// Both fades on or off; off shows and frames the whole map (battlegrounds,
+// outdoor areas).
+const INSTANCE_FADES_STORAGE_KEY = 'wowmin.instanceFades';
+let instanceFades = readStoredInstanceFades();
+const INSTANCE_ROTATE_DURATION_MS = 220;
+const instanceViewYaws = new Map<string, number>();
+const instanceViewPitches = new Map<string, number>();
+// Captured 3D framing per session (see renderInstanceScene).
+const instanceSceneFrames = new Map<string, { floorId: number | null; box: SceneBox }>();
+// Radians of orbit per pixel dragged.
+const INSTANCE_ORBIT_SPEED = 0.008;
+const INSTANCE_FOLLOW_STORAGE_KEY = 'wowmin.instanceFollow';
+let instanceFollowSelected = readStoredInstanceFollow();
+const INSTANCE_FOLLOW_EASE_MS = 700;
+// Where Follow is gliding the pan to, and when it last stepped.
+let instanceFollowAnimation: { toX: number; toY: number; lastAt: number } | null = null;
+// An orbit drag spins about `center`, which stays at canvas pixel `anchor`.
+let instanceOrbitStart: {
+  x: number; y: number; yaw: number; pitch: number; center: [number, number, number]; anchor: { x: number; y: number };
+} | null = null;
+let instanceView3d = readStoredInstanceView3d();
+let instanceSceneView: InstanceSceneView | null | undefined;
+let instanceIsoContext: { box: SceneBox; width: number; height: number; view: IsoView } | null = null;
+let instanceRotation: { from: number; to: number; startedAt: number; center: [number, number, number] } | null = null;
 const instanceMapAssetLoads = new Set<number>();
+const instanceScenes = new Map<number, InstanceSceneMetadata | null>();
+const instanceSceneLoads = new Set<number>();
 const INSTANCE_DISCOVERY_INTERVAL_MS = 10_000;
+
+// Opens the stream for the selected session while Instance Watch is showing
+// with auto-refresh on, and closes it otherwise.
+function syncInstanceLiveStream(): void {
+  const session = getSelectedInstanceSession();
+  const wanted = session && session.instanceId > 0 && state.connected
+    && getActiveMainTabId() === 'instances' && $instanceAutoRefresh?.checked
+    ? session
+    : null;
+  if (instanceLiveStream && instanceLiveStream.key === wanted?.key) return;
+  instanceLiveStream?.stop();
+  instanceLiveStream = null;
+  instanceLivePositions.clear();
+  instanceLivePaths.clear();
+  instanceLiveCreatures.clear();
+  instanceLiveBots.clear();
+  instanceLiveAppearances.clear();
+  instanceLiveAuras.clear();
+  instanceLivePassengers.clear();
+  instanceLiveGameObjects.clear();
+  instanceLiveDebuffs.clear();
+  instanceLiveMarkers.clear();
+  instanceCombatEffects.clear();
+  instanceDebugEvents.clear();
+  if (!wanted) return;
+  const stream: { key: string; stop: () => void; status: StreamStatus } = { key: wanted.key, stop: () => {}, status: 'starting' };
+  stream.stop = window.wowminAPI.map.streamPositions(wanted.mapId, wanted.instanceId, {
+    onFrame: (frame) => {
+      if (instanceLiveStream !== stream) return;
+      const now = performance.now();
+      if (instanceDebug) {
+        noteInstanceDebug('frame', instanceDebugLastFrameAt ? now - instanceDebugLastFrameAt : 0, now);
+        instanceDebugLastFrameAt = now;
+      }
+      instanceLivePositions.push(frame, now);
+      startInstanceLiveAnimation();
+    },
+    onStatus: (status) => {
+      if (instanceLiveStream !== stream) return;
+      stream.status = status;
+    },
+    onPaths: (update) => {
+      if (instanceLiveStream !== stream) return;
+      instanceLivePaths.push(update, performance.now());
+      noteInstanceDebug('paths', update.paths.length);
+    },
+    onCreatures: (update) => {
+      if (instanceLiveStream !== stream) return;
+      instanceLiveCreatures.push(update, performance.now());
+      noteInstanceDebug('creatures', update.creatures.length);
+      requestInstanceCreatureInfo(update.creatures.map((creature) => creature.entry));
+    },
+    onBots: (update) => {
+      if (instanceLiveStream !== stream) return;
+      instanceLiveBots.push(update, performance.now());
+      noteInstanceDebug('bots', update.bots.length);
+    },
+    onAppearances: (update) => {
+      if (instanceLiveStream !== stream) return;
+      instanceLiveAppearances.push(update, performance.now());
+      noteInstanceDebug('appearances', update.units.length);
+    },
+    onCombatEvents: (update) => {
+      if (instanceLiveStream !== stream) return;
+      instanceCombatEffects.push(update, performance.now());
+      noteInstanceDebug('combat', update.events.length);
+    },
+    onUnitAuras: (update) => {
+      if (instanceLiveStream !== stream) return;
+      instanceLiveAuras.push(update, performance.now());
+      noteInstanceDebug('auras', update.units.length);
+    },
+    onPassengers: (update) => {
+      if (instanceLiveStream !== stream) return;
+      instanceLivePassengers.push(update, performance.now());
+    },
+    onGameObjects: (update) => {
+      if (instanceLiveStream !== stream) return;
+      instanceLiveGameObjects.push(update, performance.now());
+      noteInstanceDebug('gameobjects', update.objects.length);
+    },
+    onDebuffs: (update) => {
+      if (instanceLiveStream !== stream) return;
+      instanceLiveDebuffs.push(update, performance.now());
+    },
+    onMarkers: (update) => {
+      if (instanceLiveStream !== stream) return;
+      instanceLiveMarkers.push(update, performance.now());
+    },
+  });
+  instanceLiveStream = stream;
+}
+
+function startInstanceLiveAnimation(): void {
+  if (instanceLiveAnimating) return;
+  instanceLiveAnimating = true;
+  const step = (now: number) => {
+    if (!instanceLivePositions.isActive(now) || getActiveMainTabId() !== 'instances') {
+      instanceLiveAnimating = false;
+      return;
+    }
+    if (now - instanceLiveLastDrawAt >= INSTANCE_LIVE_FRAME_MS) {
+      instanceLiveLastDrawAt = now;
+      renderInstanceCanvas();
+    }
+    requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+// The session with stream positions applied, for drawing the map.
+function withLivePositions(session: ActiveInstanceSession | null): ActiveInstanceSession | null {
+  if (!session || instanceLiveStream?.key !== session.key) return session;
+  const now = performance.now();
+  return {
+    ...session,
+    players: session.players.map((player) => {
+      const sample = instanceLivePositions.sampleAt(player.name, now);
+      return sample ? applyLiveSample(player, sample) : player;
+    }),
+  };
+}
 
 function getSelectedInstanceSession(): ActiveInstanceSession | null {
   return activeInstanceSessions.find((session) => session.key === selectedInstanceKey) ?? null;
@@ -6519,15 +6836,879 @@ function getSelectedInstanceDeaths(): MapInstanceDeath[] {
   return selectedInstanceKey ? activeInstanceDeaths.get(selectedInstanceKey) ?? [] : [];
 }
 
+function getInstanceMetadataUrl(mapId: number): URL {
+  return new URL(`../assets/instances/${mapId}.json`, window.location.href);
+}
+
+function clampInstanceFadeRange(yards: number): number {
+  return Number.isFinite(yards)
+    ? clamp(yards, INSTANCE_FADE_RANGE_MIN, INSTANCE_FADE_RANGE_MAX)
+    : INSTANCE_FADE_RANGE_DEFAULT;
+}
+
+function readStoredInstanceFadeRange(): number {
+  const stored = readStoredSetting(INSTANCE_FADE_RANGE_STORAGE_KEY);
+  return clampInstanceFadeRange(stored === null ? INSTANCE_FADE_RANGE_DEFAULT : Number(stored));
+}
+
+function setInstanceFadeRange(yards: number, render = true): void {
+  instanceFadeRange = clampInstanceFadeRange(yards);
+  if ($instanceFadeRange) $instanceFadeRange.value = String(instanceFadeRange);
+  if ($instanceFadeRangeValue) $instanceFadeRangeValue.textContent = `${instanceFadeRange} yd`;
+  storeSetting(INSTANCE_FADE_RANGE_STORAGE_KEY, String(instanceFadeRange));
+  if (render) renderInstanceCanvas();
+}
+
+function clampInstanceHorizontalFade(yards: number): number {
+  return Number.isFinite(yards) ? clamp(yards, 0, INSTANCE_HORIZONTAL_FADE_MAX) : INSTANCE_HORIZONTAL_FADE_DEFAULT;
+}
+
+function readStoredInstanceHorizontalFade(): number {
+  const stored = readStoredSetting(INSTANCE_HORIZONTAL_FADE_STORAGE_KEY);
+  return clampInstanceHorizontalFade(stored === null ? INSTANCE_HORIZONTAL_FADE_DEFAULT : Number(stored));
+}
+
+function setInstanceHorizontalFade(yards: number, render = true): void {
+  instanceHorizontalFade = clampInstanceHorizontalFade(yards);
+  if ($instanceHorizontalFade) $instanceHorizontalFade.value = String(instanceHorizontalFade);
+  if ($instanceHorizontalFadeValue) {
+    $instanceHorizontalFadeValue.textContent = instanceHorizontalFade ? `${instanceHorizontalFade} yd` : 'Off';
+  }
+  storeSetting(INSTANCE_HORIZONTAL_FADE_STORAGE_KEY, String(instanceHorizontalFade));
+  if (render) renderInstanceCanvas();
+}
+
+// Instance Watch settings in localStorage, per browser; without storage
+// (private windows, blocked site data) they last for the page only.
+function readStoredSetting(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+// A stored on/off setting, `fallback` until one is stored.
+function readStoredFlag(key: string, fallback: boolean): boolean {
+  const stored = readStoredSetting(key);
+  return stored === null ? fallback : fallback ? stored !== 'false' : stored === 'true';
+}
+
+function storeSetting(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // Per-page only when storage is unavailable.
+  }
+}
+
+function readStoredInstanceView3d(): boolean {
+  return readStoredFlag(INSTANCE_VIEW_3D_STORAGE_KEY, true);
+}
+
+function clampInstanceRenderScale(scale: number): number {
+  return Number.isFinite(scale)
+    ? clamp(scale, INSTANCE_RENDER_SCALE_MIN, 1)
+    : INSTANCE_RENDER_SCALE_DEFAULT;
+}
+
+function readStoredInstanceRenderScale(): number {
+  const stored = readStoredSetting(INSTANCE_RENDER_SCALE_STORAGE_KEY);
+  return clampInstanceRenderScale(stored === null ? INSTANCE_RENDER_SCALE_DEFAULT : Number(stored));
+}
+
+function setInstanceRenderScale(scale: number, render = true): void {
+  instanceRenderScale = clampInstanceRenderScale(scale);
+  if ($instanceRenderScale) $instanceRenderScale.value = String(instanceRenderScale);
+  if ($instanceRenderScaleValue) $instanceRenderScaleValue.textContent = `${Math.round(instanceRenderScale * 100)}%`;
+  instanceSceneView?.setRenderScale(instanceRenderScale);
+  storeSetting(INSTANCE_RENDER_SCALE_STORAGE_KEY, String(instanceRenderScale));
+  if (render) renderInstanceCanvas();
+}
+
+function getInstanceSceneView(): InstanceSceneView | null {
+  if (instanceSceneView === undefined) {
+    instanceSceneView = $instanceWatchScene && InstanceSceneView.isSupported()
+      ? new InstanceSceneView($instanceWatchScene, () => renderInstanceWatcher())
+      : null;
+    instanceSceneView?.setRenderScale(instanceRenderScale);
+  }
+  return instanceSceneView?.available ? instanceSceneView : null;
+}
+
+function getInstanceSceneManifestUrl(mapId: number): URL {
+  return new URL(`../assets/instances/${mapId}.scene.json`, window.location.href);
+}
+
+// The map's scene manifest, or null when it has none (or it is still loading).
+function getInstanceScene(mapId: number): InstanceSceneMetadata | null {
+  return instanceScenes.get(mapId) ?? null;
+}
+
+// Loaded apart from the flat map's metadata (loadInstanceMapAsset): either can
+// be missing or broken without taking the other with it.
+async function loadInstanceScene(mapId: number): Promise<void> {
+  if (instanceScenes.has(mapId) || instanceSceneLoads.has(mapId)) return;
+  instanceSceneLoads.add(mapId);
+  try {
+    const response = await fetch(getInstanceSceneManifestUrl(mapId));
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const scene = await response.json() as InstanceSceneMetadata;
+    if (scene.schemaVersion !== 1 || scene.mapId !== mapId) throw new Error('unsupported scene manifest');
+    instanceScenes.set(mapId, scene);
+  } catch {
+    instanceScenes.set(mapId, null);
+  } finally {
+    instanceSceneLoads.delete(mapId);
+    if (getSelectedInstanceSession()?.mapId === mapId) renderInstanceWatcher();
+  }
+}
+
+function getInstanceSceneUrl(mapId: number): string | null {
+  const scene = getInstanceScene(mapId);
+  return scene ? new URL(scene.file, getInstanceSceneManifestUrl(mapId)).href : null;
+}
+
+function isInstanceSceneShowing(mapId: number): boolean {
+  const url = getInstanceSceneUrl(mapId);
+  return Boolean(url && instanceView3d && getInstanceSceneView()?.state(url) === 'ready');
+}
+
+// The floors the view in use splits the map by: the scene's (every
+// DungeonMap.dbc floor) while it shows, otherwise the flat view's (only floors
+// with artwork). The ids are DungeonMap.dbc's in both.
+function getInstanceFloors(mapId: number): DungeonFloor[] {
+  if (isInstanceSceneShowing(mapId)) return getInstanceScene(mapId)?.floors ?? [];
+  const metadata = instanceMapAssets.get(mapId)?.metadata;
+  return metadata?.projection?.type === 'dungeonFloors' ? metadata.floors ?? [] : [];
+}
+
+function getInstanceViewYaw(): number {
+  return (selectedInstanceKey ? instanceViewYaws.get(selectedInstanceKey) : undefined) ?? DEFAULT_ISO_YAW;
+}
+
+function getInstanceViewPitch(): number {
+  return (selectedInstanceKey ? instanceViewPitches.get(selectedInstanceKey) : undefined) ?? ISO_PITCH;
+}
+
+function readStoredInstanceFollow(): boolean {
+  return readStoredFlag(INSTANCE_FOLLOW_STORAGE_KEY, false);
+}
+
+function setInstanceFollowSelected(enabled: boolean): void {
+  instanceFollowSelected = enabled;
+  if (!enabled) instanceFollowAnimation = null;
+  $instanceFollowBtn?.setAttribute('aria-pressed', String(enabled));
+  storeSetting(INSTANCE_FOLLOW_STORAGE_KEY, String(enabled));
+  renderInstanceCanvas();
+}
+
+function readStoredInstancePaths(): boolean {
+  return readStoredFlag(INSTANCE_PATHS_STORAGE_KEY, true);
+}
+
+function readStoredInstanceTrails(): boolean {
+  return readStoredFlag(INSTANCE_TRAILS_STORAGE_KEY, true);
+}
+
+function setInstanceShowTrails(enabled: boolean): void {
+  instanceShowTrails = enabled;
+  $instanceTrailsBtn?.setAttribute('aria-pressed', String(enabled));
+  storeSetting(INSTANCE_TRAILS_STORAGE_KEY, String(enabled));
+  renderInstanceCanvas();
+}
+
+function setInstanceShowPaths(enabled: boolean): void {
+  instanceShowPaths = enabled;
+  $instancePathsBtn?.setAttribute('aria-pressed', String(enabled));
+  storeSetting(INSTANCE_PATHS_STORAGE_KEY, String(enabled));
+  renderInstanceCanvas();
+}
+
+function readStoredInstanceModels(): boolean {
+  return readStoredFlag(INSTANCE_MODELS_STORAGE_KEY, true);
+}
+
+function readStoredInstanceFades(): boolean {
+  return readStoredFlag(INSTANCE_FADES_STORAGE_KEY, true);
+}
+
+function setInstanceFades(enabled: boolean, render = true): void {
+  instanceFades = enabled;
+  $instanceFadesBtn?.setAttribute('aria-pressed', String(enabled));
+  if ($instanceFadeRange) $instanceFadeRange.disabled = !enabled;
+  if ($instanceHorizontalFade) $instanceHorizontalFade.disabled = !enabled;
+  storeSetting(INSTANCE_FADES_STORAGE_KEY, String(enabled));
+  if (render) renderInstanceCanvas();
+}
+
+function readStoredInstanceNumbers(): boolean {
+  return readStoredFlag(INSTANCE_NUMBERS_STORAGE_KEY, false);
+}
+
+function setInstanceShowNumbers(enabled: boolean): void {
+  instanceShowNumbers = enabled;
+  $instanceNumbersBtn?.setAttribute('aria-pressed', String(enabled));
+  storeSetting(INSTANCE_NUMBERS_STORAGE_KEY, String(enabled));
+  renderInstanceCanvas();
+}
+
+function setInstanceShowModels(enabled: boolean): void {
+  instanceShowModels = enabled;
+  $instanceModelsBtn?.setAttribute('aria-pressed', String(enabled));
+  storeSetting(INSTANCE_MODELS_STORAGE_KEY, String(enabled));
+  renderInstanceCanvas();
+}
+
+// A player's marker colour: their side's, as in the participant list.
+function getInstancePlayerColor(player: MapPlayerPosition): string {
+  return getInstanceFactionColor(player.teamId) ?? '#94a3b8';
+}
+
+function getCreatureMarkerColor(creature: StreamCreatureSample): string {
+  return !creature.alive ? '#64748b'
+    : creature.playerControlled ? '#4ade80'
+      : creature.hostile ? '#ef4444' : '#facc15';
+}
+
+// Players and creatures with a client model for their current look, posed
+// from the stream.
+function getInstanceUnitPoses(
+  players: MapPlayerPosition[],
+  creatures: StreamCreatureSample[],
+  decisions: Map<string, StreamBotDecision>,
+  now: number,
+  strikes: ReadonlyMap<UnitKey, StrikeKind>,
+  scenery: ReadonlySet<number>,
+): UnitModelPose[] {
+  // Real attacks from the combat events.
+  const combat = (id: UnitKey) => ({
+    strike: strikes.get(id) ?? null,
+    eventDriven: instanceCombatEffects.isEventDriven(id, now),
+  });
+  const poses: UnitModelPose[] = [];
+  const playersByGuid = new Map<number, MapPlayerPosition>();
+  for (const player of players) {
+    const guid = instanceLivePositions.guidOf(player.name);
+    if (guid === null) continue;
+    playersByGuid.set(guid, player);
+    const appearance = instanceLiveAppearances.get(false, guid, now);
+    const url = getUnitModelUrl(appearance);
+    // A passenger the client hides isn't drawn: the vehicle stands for them.
+    const passenger = instanceLivePassengers.get(guid, now);
+    if (!appearance || !url || passenger?.hidden) continue;
+    poses.push({
+      id: unitKey(guid, false),
+      url,
+      x: player.position_x,
+      y: player.position_y,
+      z: player.position_z,
+      orientation: player.orientation,
+      wmoGroupId: player.wmoGroupId,
+      scale: appearance.scale || 1,
+      alive: player.alive,
+      inCombat: player.inCombat,
+      style: getPlayerCombatStyle(player.class, appearance, {
+        shapeshifted: appearance.displayId !== appearance.nativeDisplayId,
+        strategies: decisions.get(player.name)?.strategies,
+      }),
+      weapons: appearance,
+      sheathState: appearance.sheathState,
+      // In a vehicle's open seat: seated where the server puts them, the
+      // vehicle wearing the ring.
+      mountUrl: passenger ? null : getMountModelUrl(appearance, Boolean(player.mounted)),
+      riding: passenger ? true : undefined,
+      flying: Boolean(player.flying),
+      sitting: Boolean(player.sitting),
+      ...combat(unitKey(guid, false)),
+      marker: {
+        color: player.alive ? getInstancePlayerColor(player) : '#475569',
+        inCombat: player.inCombat,
+        selected: player.name === selectedInstancePlayerName,
+        healthPct: null,
+        hidden: Boolean(passenger),
+      },
+    });
+  }
+  // Vehicles players ride aren't pets, whatever their size.
+  const vehicles = instanceLivePassengers.vehicles(now);
+  for (const creature of creatures) {
+    const appearance = instanceLiveAppearances.get(true, creature.guid, now);
+    const url = getUnitModelUrl(appearance);
+    if (!appearance || !url) continue;
+    const target = creature.targetIsPlayer ? playersByGuid.get(creature.targetGuid) : undefined;
+    poses.push({
+      id: unitKey(creature.guid, true),
+      url,
+      x: creature.x,
+      y: creature.y,
+      z: creature.z,
+      orientation: creature.orientation,
+      wmoGroupId: creature.wmoGroupId,
+      scale: appearance.scale || 1,
+      pet: creature.playerControlled && !vehicles.has(creature.guid),
+      alive: creature.alive,
+      inCombat: creature.inCombat,
+      style: getCreatureCombatStyle(
+        target ? Math.hypot(target.position_x - creature.x, target.position_y - creature.y) : null, true),
+      weapons: appearance,
+      sheathState: appearance.sheathState,
+      ...combat(unitKey(creature.guid, true)),
+      marker: {
+        color: getCreatureMarkerColor(creature),
+        inCombat: creature.inCombat,
+        selected: false,
+        healthPct: creature.healthPct,
+        hidden: scenery.has(creature.guid),
+      },
+    });
+  }
+  return poses;
+}
+
+// The streamed game objects to draw: an open door goes (it has swung or slid
+// out of the way); the rest stand where the server put them, turned about Z.
+function getInstanceGameObjectPoses(now: number): GameObjectPose[] {
+  return instanceLiveGameObjects.all(now)
+    .filter((object) => !(object.type === GAMEOBJECT_TYPE_DOOR && object.state === GO_STATE_ACTIVE))
+    .map((object) => ({
+      guid: object.guid,
+      displayId: object.displayId,
+      position: [object.x, object.y, object.z] as Point3,
+      yaw: 2 * Math.atan2(object.rotation[2], object.rotation[3]),
+      scale: object.scale || 1,
+    }));
+}
+
+function readStoredInstanceDecisions(): boolean {
+  return readStoredFlag(INSTANCE_DECISIONS_STORAGE_KEY, true);
+}
+
+function setInstanceShowDecisions(enabled: boolean): void {
+  instanceShowDecisions = enabled;
+  $instanceDecisionsBtn?.setAttribute('aria-pressed', String(enabled));
+  storeSetting(INSTANCE_DECISIONS_STORAGE_KEY, String(enabled));
+  instanceBotCardRenderedAt = 0;
+  renderInstanceCanvas();
+}
+
+function readStoredInstanceMobsMode(): InstanceMobsMode {
+  const stored = readStoredSetting(INSTANCE_MOBS_STORAGE_KEY);
+  return stored === 'all' || stored === 'off' ? stored : 'near';
+}
+
+function readStoredInstancePlatesMode(): InstancePlatesMode {
+  const stored = readStoredSetting(INSTANCE_PLATES_STORAGE_KEY);
+  return stored === 'grey' || stored === 'quatre' || stored === 'labels' ? stored : 'neon';
+}
+
+function setInstancePlatesMode(mode: InstancePlatesMode): void {
+  instancePlatesMode = mode;
+  if ($instancePlatesMode) $instancePlatesMode.value = mode;
+  storeSetting(INSTANCE_PLATES_STORAGE_KEY, mode);
+  renderInstanceCanvas();
+}
+
+function setInstanceLighting(mode: SceneLighting): void {
+  instanceLighting = mode;
+  if ($instanceLightingMode) $instanceLightingMode.value = mode;
+  storeSetting(INSTANCE_LIGHTING_STORAGE_KEY, mode);
+  renderInstanceCanvas();
+}
+
+function setInstanceObjectLights(enabled: boolean, render = true): void {
+  instanceObjectLights = enabled;
+  $instanceObjectLightsBtn?.setAttribute('aria-pressed', String(enabled));
+  storeSetting(INSTANCE_OBJECT_LIGHTS_STORAGE_KEY, String(enabled));
+  if (render) renderInstanceCanvas();
+}
+
+async function loadInstanceMapLights(mapId: number): Promise<void> {
+  if (instanceMapLights.has(mapId) || instanceMapLightLoads.has(mapId)) return;
+  instanceMapLightLoads.add(mapId);
+  try {
+    const response = await fetch(`assets/models/light/${mapId}.json`);
+    instanceMapLights.set(mapId, response.ok ? await response.json() as MapLights : null);
+  } catch {
+    instanceMapLights.set(mapId, null);
+  } finally {
+    instanceMapLightLoads.delete(mapId);
+    if (getSelectedInstanceSession()?.mapId === mapId) renderInstanceCanvas();
+  }
+}
+
+function setInstanceMobsMode(mode: InstanceMobsMode): void {
+  instanceMobsMode = mode;
+  if ($instanceMobsMode) $instanceMobsMode.value = mode;
+  storeSetting(INSTANCE_MOBS_STORAGE_KEY, mode);
+  renderInstanceCanvas();
+}
+
+// Looks up names and ranks for creature entries not seen before, batching the
+// entries from a burst of stream updates into one request.
+function requestInstanceCreatureInfo(entries: number[]): void {
+  for (const entry of entries) {
+    if (!instanceCreatureInfo.has(entry)) {
+      instanceCreatureInfo.set(entry, null);
+      instanceCreatureInfoQueue.add(entry);
+    }
+  }
+  if (!instanceCreatureInfoQueue.size || instanceCreatureInfoTimer) return;
+  instanceCreatureInfoTimer = setTimeout(() => {
+    instanceCreatureInfoTimer = null;
+    const batch = [...instanceCreatureInfoQueue];
+    instanceCreatureInfoQueue = new Set();
+    window.wowminAPI.map.getCreatureInfo(batch).then((infos) => {
+      for (const info of infos) instanceCreatureInfo.set(info.entry, info);
+    }).catch(() => {
+      // Unlabelled until the next session; markers still draw.
+    });
+  }, 100);
+}
+
+const isBossCreature = (creature: StreamCreatureSample, info: CreatureInfo | null | undefined): boolean =>
+  creature.boss || info?.rank === 3;
+
+// Which auras the 3D view shows as client art, so a marker's halo gives
+// way; in the flat view (`drawn3d` false) there is no art and every halo shows.
+function instanceAuraShownAsArt(drawn3d: unknown = instanceView3d): (spellId: number) => boolean {
+  const sceneView = drawn3d ? getInstanceSceneView() : null;
+  return sceneView ? (spellId) => sceneView.hasAuraArt(spellId) : () => false;
+}
+
+// A glowing ring round a marker for a notable aura (crowd control, shield,
+// cooldowns); models show the client's aura art instead.
+function drawInstanceAuraHalo(ctx: CanvasRenderingContext2D, tint: string | null, point: { x: number; y: number }, radius: number): void {
+  if (!tint) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
+  ctx.strokeStyle = tint;
+  ctx.lineWidth = 3;
+  ctx.shadowColor = tint;
+  ctx.shadowBlur = 8;
+  ctx.stroke();
+  ctx.restore();
+}
+
+// Where the first, second, ... number at once on one unit sits, in pixels.
+const INSTANCE_NUMBER_OFFSETS: Array<[number, number]> = [[0, 0], [-34, -10], [34, -10], [-18, -22], [18, -22]];
+
+// Damage and heals rising from above each unit and fading, like the game's
+// combat text. Several at once on one unit fan out.
+function drawInstanceCombatNumbers(
+  ctx: CanvasRenderingContext2D,
+  now: number,
+  scale: number,
+  overhead: (unit: UnitKey) => { x: number; y: number } | null,
+): void {
+  const perUnit = new Map<UnitKey, number>();
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.lineJoin = 'round';
+  // Newest last, so they draw on top.
+  for (const number of instanceCombatEffects.numbers) {
+    if (number.at > now) continue;
+    const point = overhead(number.target);
+    if (!point) continue;
+    const t = Math.min(1, (now - number.at) / NUMBER_LIFETIME_MS);
+    const index = perUnit.get(number.target) ?? 0;
+    perUnit.set(number.target, index + 1);
+    const size = Math.round((number.periodic ? 11 : 14) * clamp(scale, 0.8, 1.4));
+    ctx.font = `700 ${size}px system-ui, sans-serif`;
+    ctx.globalAlpha = 1 - t * t;
+    const [offsetX, offsetY] = INSTANCE_NUMBER_OFFSETS[index % INSTANCE_NUMBER_OFFSETS.length];
+    const x = point.x + offsetX * scale;
+    const y = point.y - 4 + offsetY * scale - t * 30 * scale;
+    const text = `${number.heal ? '+' : ''}${number.amount}`;
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(2,6,23,0.85)';
+    ctx.strokeText(text, x, y);
+    ctx.fillStyle = number.color;
+    ctx.fillText(text, x, y);
+  }
+  ctx.restore();
+}
+
+// A unit's debuffs and raid marker for its plate or label, from the live
+// stores, with their client icons once loaded.
+function getInstancePlateExtras(key: UnitKey, now: number): Pick<Nameplate, 'debuffs' | 'marker'> {
+  const marker = instanceLiveMarkers.get(key, now);
+  return {
+    debuffs: instanceLiveDebuffs.get(key, now).map((debuff) => ({
+      icon: instanceClientIcons.get(`spell-${debuff.spellId}`), remainingMs: debuff.remainingMs, stacks: debuff.stacks,
+    })),
+    marker: marker === null ? null : instanceClientIcons.get(`marker-${marker + 1}`),
+  };
+}
+
+// Nameplates stack upward out of each other's way, the most important placed
+// first and drawn last (on top). Plates for players, bosses, and mobs in a
+// fight (`keep`) always show; an idle mob's is left out when it can't find
+// room close to its unit.
+const INSTANCE_PLATE_MOB_NUDGES = 2;
+
+function drawInstancePlates(
+  ctx: CanvasRenderingContext2D,
+  style: PlateStyle,
+  plates: { plate: Nameplate; x: number; y: number; priority: number; keep: boolean; size?: number }[],
+  scale: number,
+): void {
+  const ordered = [...plates].sort((left, right) => Number(right.keep) - Number(left.keep) || right.priority - left.priority);
+  const placed: { left: number; right: number; top: number; bottom: number }[] = [];
+  const shown: typeof plates = [];
+  for (const entry of ordered) {
+    const bounds = plateBounds(style, entry.plate, scale * (entry.size ?? 1));
+    const rectAt = (y: number) => ({ left: entry.x + bounds.left, right: entry.x + bounds.right, top: y + bounds.top, bottom: y + bounds.bottom });
+    const overlap = (y: number) => {
+      const rect = rectAt(y);
+      return placed.find((used) => rect.left < used.right && rect.right > used.left && rect.top < used.bottom && rect.bottom > used.top);
+    };
+    const nudges = entry.keep ? 8 : INSTANCE_PLATE_MOB_NUDGES;
+    for (let attempt = 0; attempt < nudges; attempt += 1) {
+      const hit = overlap(entry.y);
+      if (!hit) break;
+      entry.y = hit.top - 1 - bounds.bottom;
+    }
+    if (!entry.keep && overlap(entry.y)) continue;
+    placed.push(rectAt(entry.y));
+    shown.push(entry);
+  }
+  for (const entry of shown.reverse()) drawNameplate(ctx, style, entry.plate, entry.x, entry.y, scale * (entry.size ?? 1));
+}
+
+// Creature marker: red if hostile, yellow otherwise, green for players' pets,
+// grey when dead. Elites get a gold rim, bosses a larger skull marker, and a
+// health ring shows once a creature is hurt.
+function drawInstanceCreature(
+  ctx: CanvasRenderingContext2D,
+  creature: StreamCreatureSample,
+  info: CreatureInfo | null | undefined,
+  point: { x: number; y: number },
+  scale: number,
+  scenery = false,
+): void {
+  // Scenery is a small plain dot: no combat or health rings.
+  if (scenery) {
+    ctx.save();
+    ctx.globalAlpha = 0.6;
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, 2.5 * scale, 0, Math.PI * 2);
+    ctx.fillStyle = '#94a3b8';
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
+  const boss = isBossCreature(creature, info);
+  const elite = info?.rank === 1 || info?.rank === 2;
+  const radius = (boss ? 7 : elite ? 4.5 : 3.5) * scale;
+  const color = getCreatureMarkerColor(creature);
+  ctx.save();
+  ctx.globalAlpha = !creature.alive ? 0.55 : creature.inCombat || boss ? 1 : 0.75;
+  if (creature.inCombat && creature.alive) {
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, radius + 3 * scale, 0, Math.PI * 2);
+    ctx.strokeStyle = '#f97316';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+  ctx.beginPath();
+  ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
+  ctx.fillStyle = boss && creature.alive ? '#7f1d1d' : color;
+  ctx.fill();
+  ctx.lineWidth = boss || elite ? 1.75 : 1;
+  ctx.strokeStyle = boss || elite ? '#fbbf24' : 'rgba(8,17,29,0.9)';
+  ctx.stroke();
+  if (boss) drawCanvasSkull(ctx, point.x, point.y, radius * 0.62, creature.alive ? '#f8fafc' : '#cbd5e1');
+  if (creature.alive && creature.healthPct < 100) {
+    const fraction = Math.max(0, creature.healthPct) / 100;
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, radius + 1.5 * scale, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * fraction);
+    ctx.strokeStyle = fraction > 0.5 ? '#22c55e' : fraction > 0.2 ? '#eab308' : '#dc2626';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawCanvasSkull(ctx: CanvasRenderingContext2D, x: number, y: number, size: number, color: string): void {
+  ctx.save();
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(x, y - size * 0.15, size * 0.75, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillRect(x - size * 0.42, y + size * 0.3, size * 0.84, size * 0.45);
+  ctx.fillStyle = '#7f1d1d';
+  ctx.beginPath();
+  ctx.arc(x - size * 0.3, y - size * 0.15, size * 0.2, 0, Math.PI * 2);
+  ctx.arc(x + size * 0.3, y - size * 0.15, size * 0.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// Draws a player's or creature's remaining movement path: a dashed line from the marker
+// through each waypoint, with a ring at the destination. A truncated path's
+// skipped middle is drawn fainter.
+function drawInstancePath(
+  ctx: CanvasRenderingContext2D,
+  player: Pick<MapPlayerPosition, 'position_x' | 'position_y' | 'position_z'>,
+  points: Array<[number, number, number]>,
+  truncated: boolean,
+  project: (x: number, y: number, z: number) => { x: number; y: number },
+  color: string,
+  scale: number,
+): void {
+  const screen = [project(player.position_x, player.position_y, player.position_z),
+    ...points.map(([x, y, z]) => project(x, y, z))];
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 1.75;
+  ctx.setLineDash([6, 4]);
+  ctx.globalAlpha = 0.85;
+  const solidEnd = truncated ? screen.length - 1 : screen.length;
+  ctx.beginPath();
+  screen.slice(0, solidEnd).forEach((point, index) => {
+    if (index === 0) ctx.moveTo(point.x, point.y); else ctx.lineTo(point.x, point.y);
+  });
+  ctx.stroke();
+  if (truncated && screen.length > 1) {
+    ctx.globalAlpha = 0.35;
+    ctx.setLineDash([2, 5]);
+    ctx.beginPath();
+    ctx.moveTo(screen[screen.length - 2].x, screen[screen.length - 2].y);
+    ctx.lineTo(screen[screen.length - 1].x, screen[screen.length - 1].y);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 0.85;
+  for (const point of screen.slice(1, -1)) {
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, 2 * scale, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  const destination = screen[screen.length - 1];
+  ctx.beginPath();
+  ctx.arc(destination.x, destination.y, 4.5 * scale, 0, Math.PI * 2);
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.restore();
+}
+
+// Starts an orbit drag (middle button, or Shift with the main button) when the
+// 3D scene is showing. Spins and tilts about the scene point under the
+// pointer, which stays under it; over empty space, about the view centre.
+function beginInstanceOrbit(event: PointerEvent): boolean {
+  const session = getSelectedInstanceSession();
+  if (!session || !instanceIsoContext || !$instanceWatchCanvas
+    || !isInstanceSceneShowing(session.mapId)) {
+    return false;
+  }
+  instanceRotation = null;
+  instanceFollowAnimation = null;
+  const { view, width, height } = instanceIsoContext;
+  const rect = $instanceWatchCanvas.getBoundingClientRect();
+  const x = (event.clientX - rect.left) * (width / rect.width);
+  const y = (event.clientY - rect.top) * (height / rect.height);
+  const picked = getInstanceSceneView()?.pick(view, width, height, x, y) ?? null;
+  instanceOrbitStart = {
+    x: event.clientX,
+    y: event.clientY,
+    yaw: getInstanceViewYaw(),
+    pitch: getInstanceViewPitch(),
+    center: picked ?? view.center,
+    anchor: picked ? { x, y } : { x: width / 2, y: height / 2 },
+  };
+  return true;
+}
+
+function updateInstanceOrbit(event: PointerEvent): void {
+  if (!instanceOrbitStart || !selectedInstanceKey || !instanceIsoContext) return;
+  const yaw = instanceOrbitStart.yaw - (event.clientX - instanceOrbitStart.x) * INSTANCE_ORBIT_SPEED;
+  const pitch = clampIsoPitch(instanceOrbitStart.pitch + (event.clientY - instanceOrbitStart.y) * INSTANCE_ORBIT_SPEED);
+  const { box, width, height } = instanceIsoContext;
+  const { zoom } = getInstanceViewTransform();
+  instanceViewYaws.set(selectedInstanceKey, yaw);
+  instanceViewPitches.set(selectedInstanceKey, pitch);
+  const { panX, panY } = getIsoPanForCenter(box, width, height, yaw, pitch, zoom, instanceOrbitStart.center);
+  const { anchor } = instanceOrbitStart;
+  setInstanceViewTransform({ zoom, panX: panX + anchor.x - width / 2, panY: panY + anchor.y - height / 2 });
+  renderInstanceCanvas();
+}
+
+// Draws the 3D scene under the overlay and returns its projection, or null
+// when the flat view should be used (no scene, 3D off, still loading, no WebGL).
+// The scene shows around the party and around `landmarks` (bosses, which are
+// always drawn), but is framed on the party: `floorPlayers`, the players on the
+// focused floor.
+function renderInstanceScene(
+  session: ActiveInstanceSession,
+  floor: DungeonFloor | null,
+  floorPlayers: MapPlayerPosition[],
+  width: number,
+  height: number,
+  landmarks: Point3[] = [],
+): IsoView | null {
+  const scene = getInstanceScene(session.mapId);
+  const url = getInstanceSceneUrl(session.mapId);
+  const sceneView = getInstanceSceneView();
+  if (!scene || !url || !instanceView3d || !sceneView) return null;
+  sceneView.load(url);
+  if (sceneView.state(url) !== 'ready') return null;
+
+  const floorHeights = floor ? scene.floors.find((candidate) => candidate.id === floor.id) : undefined;
+  const buildings = scene.buildingReach;
+  const pad = INSTANCE_REACH_PADDING;
+  const reach: SceneBox | null = buildings ? {
+    minX: buildings.minX - pad, maxX: buildings.maxX + pad, minY: buildings.minY - pad, maxY: buildings.maxY + pad,
+    minZ: buildings.minZ - pad, maxZ: buildings.maxZ + pad,
+  } : null;
+  const fade: FadeSettings = { height: instanceFadeRange, horizontal: instanceHorizontalFade || null, reach };
+  // With the fades off nothing fades (no volumes) and the whole map is framed.
+  const volumes = !instanceFades ? [] : getFadeVolumes([
+    ...floorPlayers.map((player): Point3 => [player.position_x, player.position_y, player.position_z]),
+    ...landmarks,
+  ], fade);
+  const band = getHeightBand(floorPlayers.map((player) => player.position_z));
+  // Without a dungeon floor, the reach box (the scene's own bounds cover
+  // only its buildings, not ground-built places like Eye of the Storm's
+  // start platforms).
+  let fitBox: SceneBox = floor && floorHeights?.minZ !== undefined && floorHeights.maxZ !== undefined
+    ? { ...floor.bounds, minZ: floorHeights.minZ, maxZ: floorHeights.maxZ }
+    : reach ?? scene.bounds;
+  // With a horizontal fade most of the floor is hidden, so frame the party's
+  // bubble instead. The framing is captured, not live: it is taken on the
+  // first view, on Fit view, and when the party changes floor, so the view
+  // does not drift as the party moves (Follow handles tracking).
+  if (instanceFades && fade.horizontal && floorPlayers.length) {
+    const floorId = floor?.id ?? null;
+    let framed = instanceSceneFrames.get(session.key);
+    if (!framed || framed.floorId !== floorId) {
+      const xs = floorPlayers.map((player) => player.position_x);
+      const ys = floorPlayers.map((player) => player.position_y);
+      framed = {
+        floorId,
+        box: {
+          minX: Math.min(...xs) - fade.horizontal, maxX: Math.max(...xs) + fade.horizontal,
+          minY: Math.min(...ys) - fade.horizontal, maxY: Math.max(...ys) + fade.horizontal,
+          minZ: fitBox.minZ, maxZ: fitBox.maxZ,
+        },
+      };
+      if (instanceSceneFrames.has(session.key)) setInstanceViewTransform({ zoom: 1, panX: 0, panY: 0 });
+      instanceSceneFrames.set(session.key, framed);
+    }
+    fitBox = framed.box;
+  }
+  // Frame only the heights that can still be seen.
+  const minZ = Math.max(band && instanceFades ? Math.max(fitBox.minZ, band.minZ - instanceFadeRange) : fitBox.minZ, reach?.minZ ?? -Infinity);
+  const maxZ = Math.min(band && instanceFades ? Math.min(fitBox.maxZ, band.maxZ + instanceFadeRange) : fitBox.maxZ, reach?.maxZ ?? Infinity);
+  // Nor beyond the reach of the buildings.
+  const clampAxis = (low: number, high: number, reachLow?: number, reachHigh?: number): [number, number] => {
+    const from = Math.max(low, reachLow ?? -Infinity);
+    const to = Math.min(high, reachHigh ?? Infinity);
+    return from < to ? [from, to] : [low, high];
+  };
+  const [minX, maxX] = clampAxis(fitBox.minX, fitBox.maxX, reach?.minX, reach?.maxX);
+  const [minY, maxY] = clampAxis(fitBox.minY, fitBox.maxY, reach?.minY, reach?.maxY);
+  const box: SceneBox = { minX, maxX, minY, maxY, minZ: Math.min(minZ, maxZ - 1), maxZ };
+  const view = createIsoView(box, width, height, getInstanceViewYaw(), getInstanceViewPitch(), getInstanceViewTransform());
+  if (!sceneView.render(url, view, width, height, volumes, fade)) return null;
+  instanceIsoContext = { box, width, height, view };
+  return view;
+}
+
+// Below this tilt the compass would flatten into a line, so it stops tilting.
+const COMPASS_MIN_PITCH = Math.PI / 8;
+const COMPASS_RING_RADIUS = 15;
+const COMPASS_NEEDLE_LENGTH = 13;
+const COMPASS_NEEDLE_WIDTH = 3.5;
+const COMPASS_LABEL_RADIUS = 23;
+let instanceCompassOrientation = '';
+
+// Turns and tilts the compass with the camera, as if it lay on the ground.
+function updateInstanceCompass(): void {
+  if (!$instanceCompass) return;
+  const yaw = getInstanceViewYaw();
+  const pitch = Math.max(getInstanceViewPitch(), COMPASS_MIN_PITCH);
+  const orientation = `${yaw.toFixed(4)},${pitch.toFixed(4)}`;
+  if (orientation === instanceCompassOrientation) return;
+  instanceCompassOrientation = orientation;
+  const directions = getCompassDirections(yaw, pitch);
+  const at = (point: CompassPoint, distance: number) => ({ x: directions[point].x * distance, y: directions[point].y * distance });
+  const points = (...corners: Array<{ x: number; y: number }>) => corners.map(({ x, y }) => `${x.toFixed(2)},${y.toFixed(2)}`).join(' ');
+  const east = at('E', COMPASS_NEEDLE_WIDTH);
+  const west = at('W', COMPASS_NEEDLE_WIDTH);
+  $instanceCompass.querySelector('#instance-compass-ring')?.setAttribute('ry', (COMPASS_RING_RADIUS * Math.sin(pitch)).toFixed(2));
+  $instanceCompass.querySelector('#instance-compass-north')?.setAttribute('points', points(at('N', COMPASS_NEEDLE_LENGTH), east, west));
+  $instanceCompass.querySelector('#instance-compass-south')?.setAttribute('points', points(at('S', COMPASS_NEEDLE_LENGTH), east, west));
+  for (const label of $instanceCompass.querySelectorAll<SVGTextElement>('[data-point]')) {
+    const { x, y } = at(label.dataset.point as CompassPoint, COMPASS_LABEL_RADIUS);
+    label.setAttribute('x', x.toFixed(2));
+    label.setAttribute('y', y.toFixed(2));
+  }
+}
+
+function rotateInstanceView(quarterTurns: number): void {
+  const session = getSelectedInstanceSession();
+  if (!session || !instanceIsoContext || !isInstanceSceneShowing(session.mapId)) return;
+  // Repeated presses during an animation step on from its destination.
+  const animating = Boolean(instanceRotation);
+  const destination = instanceRotation?.to ?? getInstanceViewYaw();
+  instanceRotation = {
+    from: getInstanceViewYaw(),
+    to: getNextQuarterTurn(destination, quarterTurns > 0 ? 1 : -1),
+    startedAt: performance.now(),
+    center: instanceRotation?.center ?? instanceIsoContext.view.center,
+  };
+  if (!animating) requestAnimationFrame(stepInstanceRotation);
+}
+
+function stepInstanceRotation(now: number): void {
+  if (!instanceRotation || !selectedInstanceKey || !instanceIsoContext) {
+    instanceRotation = null;
+    return;
+  }
+  const progress = Math.min(1, (now - instanceRotation.startedAt) / INSTANCE_ROTATE_DURATION_MS);
+  const eased = 1 - (1 - progress) ** 3;
+  const yaw = instanceRotation.from + (instanceRotation.to - instanceRotation.from) * eased;
+  const { box, width, height } = instanceIsoContext;
+  const { zoom } = getInstanceViewTransform();
+  instanceViewYaws.set(selectedInstanceKey, yaw);
+  setInstanceViewTransform({
+    zoom,
+    ...getIsoPanForCenter(box, width, height, yaw, getInstanceViewPitch(), zoom, instanceRotation.center),
+  });
+  renderInstanceCanvas();
+  if (progress < 1) requestAnimationFrame(stepInstanceRotation);
+  else instanceRotation = null;
+}
+
+function setInstanceView3d(enabled: boolean): void {
+  instanceView3d = enabled;
+  storeSetting(INSTANCE_VIEW_3D_STORAGE_KEY, String(enabled));
+  setInstanceViewTransform({ zoom: 1, panX: 0, panY: 0 });
+  renderInstanceWatcher();
+}
+
+let instanceLegacyMetadataWarned = false;
+
 async function loadInstanceMapAsset(mapId: number): Promise<void> {
   if (instanceMapAssets.has(mapId) || instanceMapAssetLoads.has(mapId)) return;
   instanceMapAssetLoads.add(mapId);
   try {
-    const metadataUrl = new URL(`../assets/instances/${mapId}.json`, window.location.href);
+    const metadataUrl = getInstanceMetadataUrl(mapId);
     const response = await fetch(metadataUrl);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const metadata = await response.json() as InstanceMapAssetMetadata;
-    if (![1, 2].includes(metadata.schemaVersion) || metadata.mapId !== mapId) {
+    // Version 3 came from the earlier combined export (extract:maps --scenes):
+    // version 2 plus a `scene` key, now ignored. Its maps need the scene
+    // export (extract:scenes) re-run for their 3D view.
+    if (metadata.schemaVersion === 3 && !instanceLegacyMetadataWarned) {
+      instanceLegacyMetadataWarned = true;
+      console.warn('[instance watch] Map files from the old extract:maps --scenes export: re-run npm run extract:scenes for the 3D view.');
+    }
+    if (![1, 2, 3].includes(metadata.schemaVersion) || metadata.mapId !== mapId) {
       throw new Error('unsupported instance map metadata');
     }
     const loadImage = async (relativePath: string): Promise<HTMLImageElement> => {
@@ -6562,10 +7743,9 @@ async function loadInstanceMapAsset(mapId: number): Promise<void> {
 
 function getSelectedDungeonFloor(
   session: ActiveInstanceSession,
-  asset: LoadedInstanceMapAsset | null,
-): DungeonMapFloor | null {
-  const floors = asset?.metadata.floors;
-  if (asset?.metadata.projection?.type !== 'dungeonFloors' || !floors?.length) return null;
+  floors = getInstanceFloors(session.mapId),
+): DungeonFloor | null {
+  if (!floors.length) return null;
   const focused = selectedInstancePlayerName
     ? session.players.find((player) => player.name === selectedInstancePlayerName)
     : null;
@@ -6587,6 +7767,9 @@ function getSelectedDungeonFloor(
     const floor = getParticipantDungeonFloor(player, floors);
     if (floor) counts.set(floor.id, (counts.get(floor.id) ?? 0) + 1);
   }
+  // With nobody on a known floor the 3D view shows everyone; the flat view
+  // still needs a floor for its artwork.
+  if (!counts.size && isInstanceSceneShowing(session.mapId)) return null;
   const floor = [...floors].sort((left, right) =>
     (counts.get(right.id) ?? 0) - (counts.get(left.id) ?? 0) || left.floorIndex - right.floorIndex)[0] ?? null;
   if (floor) instanceSelectedFloorIds.set(session.key, floor.id);
@@ -6632,8 +7815,24 @@ function fitSelectedInstanceView(): void {
   if (!session) return;
   const profile = getInstanceMapProfile(session.mapId);
   instanceViewBounds.set(session.key, profile?.bounds ?? getInstanceCoordinateBounds(session.players));
+  instanceViewYaws.delete(session.key);
+  instanceViewPitches.delete(session.key);
+  instanceSceneFrames.delete(session.key);
+  instanceRotation = null;
   setInstanceViewTransform({ zoom: 1, panX: 0, panY: 0 });
   renderInstanceCanvas();
+}
+
+// The 3D view can zoom in until the canvas's shorter side spans this many
+// yards, close enough to watch a unit's model; the flat map stops sooner.
+const INSTANCE_CLOSEST_YARDS = 12;
+
+function getInstanceMaxZoom(): number {
+  const context = instanceIsoContext;
+  const zoom = getInstanceViewTransform().zoom;
+  if (!context || context.view.pixelsPerUnit <= 0 || zoom <= 0) return INSTANCE_MAX_ZOOM;
+  const pixelsPerYardAtFit = context.view.pixelsPerUnit / zoom;
+  return Math.max(INSTANCE_MAX_ZOOM, Math.min(context.width, context.height) / INSTANCE_CLOSEST_YARDS / pixelsPerYardAtFit);
 }
 
 function adjustInstanceZoom(multiplier: number, anchorX?: number, anchorY?: number): void {
@@ -6647,6 +7846,7 @@ function adjustInstanceZoom(multiplier: number, anchorX?: number, anchorY?: numb
     x,
     y,
     transform.zoom * multiplier,
+    getInstanceMaxZoom(),
   ));
   renderInstanceCanvas();
 }
@@ -6835,7 +8035,7 @@ function renderInstancePlayerList(session: ActiveInstanceSession | null): void {
     $instancePlayerList.innerHTML = '<p class="placeholder">No active participants</p>';
     return;
   }
-  const floors = instanceMapAssets.get(session.mapId)?.metadata.floors ?? [];
+  const floors = getInstanceFloors(session.mapId);
   $instancePlayerList.innerHTML = [...session.players]
     .sort((left, right) => Number(left.isBot) - Number(right.isBot) || left.name.localeCompare(right.name))
     .map((player) => {
@@ -6856,6 +8056,10 @@ function renderInstancePlayerList(session: ActiveInstanceSession | null): void {
         details.push(`${groupLabel} ${player.groupId}${subgroup}`);
       }
       if (player.targetName) details.push(`Target: ${player.targetName}`);
+      const action = player.isBot && instanceShowDecisions
+        ? getCurrentBotAction(instanceLiveBots.get(player.name, performance.now()))
+        : null;
+      if (action) details.push(`Doing: ${action}`);
       const markerColor = getInstanceFactionColor(player.teamId) ?? '#94a3b8';
       const selected = player.name === selectedInstancePlayerName ? ' selected' : '';
       const factionClass = player.teamId === TEAM_ALLIANCE ? ' alliance' : player.teamId === TEAM_HORDE ? ' horde' : '';
@@ -6873,74 +8077,18 @@ function renderInstancePlayerList(session: ActiveInstanceSession | null): void {
     }).join('');
 }
 
-function renderInstanceCanvas(): void {
-  if (!$instanceWatchCanvas) return;
-  const wrapper = $instanceWatchCanvas.parentElement;
-  if (!wrapper) return;
-  const rect = wrapper.getBoundingClientRect();
-  const width = Math.max(320, Math.floor(rect.width));
-  const height = Math.max(280, Math.floor(rect.height));
-  $instanceWatchCanvas.width = width;
-  $instanceWatchCanvas.height = height;
-  const ctx = $instanceWatchCanvas.getContext('2d');
-  if (!ctx) return;
-  instanceMarkerHitAreas = [];
-  instanceBaseViewport = null;
-
-  ctx.fillStyle = '#08111d';
-  ctx.fillRect(0, 0, width, height);
-  const session = getSelectedInstanceSession();
-  $instanceWatchEmpty?.classList.toggle('hidden', Boolean(session));
-  if (!session) return;
-
-  if (!instanceMapAssets.has(session.mapId) && !instanceMapAssetLoads.has(session.mapId)) {
-    void loadInstanceMapAsset(session.mapId);
-  }
-  const loadedAsset = instanceMapAssets.get(session.mapId) ?? null;
-  const profile = getInstanceMapProfile(session.mapId);
-  const projectionType = loadedAsset?.metadata.projection?.type;
-  const floor = getSelectedDungeonFloor(session, loadedAsset);
-  const asset = projectionType === 'minimapTiles'
-    || projectionType === 'dungeonFloors'
-    || (projectionType === 'worldMapArea' && (profile || loadedAsset?.metadata.worldMapBounds))
-    ? loadedAsset
-    : null;
-  const assetImage = floor ? asset?.floorImages.get(floor.id) : asset?.image;
-  const bounds = floor?.bounds ?? asset?.metadata.worldMapBounds ?? getStableInstanceBounds(session);
-  const assetWidth = floor?.width ?? asset?.metadata.width;
-  const assetHeight = floor?.height ?? asset?.metadata.height;
-  const aspectRatio = assetWidth && assetHeight
-    ? assetWidth / assetHeight
-    : profile?.aspectRatio;
-  const baseViewport = aspectRatio
-    ? getInstanceProjectionViewport(width, height, aspectRatio)
-    : { x: 0, y: 0, width, height };
-  instanceBaseViewport = baseViewport;
-  const viewTransform = getInstanceViewTransform();
-  const viewport = applyInstanceViewTransform(baseViewport, viewTransform);
-  const project = (position: Pick<MapPlayerPosition, 'position_x' | 'position_y'>) => {
-    if (asset?.metadata.projection?.type === 'minimapTiles') {
-      const metadata = asset.metadata;
-      const projected = projectMinimapTilePosition(position, {
-        gridSize: metadata.gridSize ?? 64,
-        worldUnitsPerTile: metadata.worldUnitsPerTile ?? 533.3333333333334,
-        minTileX: metadata.minTileX ?? 0,
-        minTileY: metadata.minTileY ?? 0,
-        maxTileX: metadata.maxTileX ?? metadata.minTileX ?? 0,
-        maxTileY: metadata.maxTileY ?? metadata.minTileY ?? 0,
-      }, viewport.width, viewport.height);
-      return { x: viewport.x + projected.x, y: viewport.y + projected.y };
-    }
-    const point = projectInstancePosition(position, bounds, viewport.width, viewport.height);
-    return { x: point.x + viewport.x, y: point.y + viewport.y };
-  };
-
-  if (asset && assetImage) {
-    ctx.drawImage(assetImage, viewport.x, viewport.y, viewport.width, viewport.height);
+function drawInstanceFlatBackground(
+  ctx: CanvasRenderingContext2D,
+  viewport: InstanceProjectionViewport,
+  image: HTMLImageElement | undefined,
+  hasProfile: boolean,
+): void {
+  if (image) {
+    ctx.drawImage(image, viewport.x, viewport.y, viewport.width, viewport.height);
     ctx.fillStyle = 'rgba(3, 10, 18, 0.18)';
     ctx.fillRect(viewport.x, viewport.y, viewport.width, viewport.height);
   } else {
-    if (profile) {
+    if (hasProfile) {
       ctx.fillStyle = '#0a1624';
       ctx.fillRect(viewport.x, viewport.y, viewport.width, viewport.height);
     }
@@ -6955,16 +8103,363 @@ function renderInstanceCanvas(): void {
   }
   ctx.strokeStyle = 'rgba(96,165,250,0.28)';
   ctx.strokeRect(viewport.x + 0.5, viewport.y + 0.5, viewport.width - 1, viewport.height - 1);
+}
 
-  const visiblePlayers = floor && asset?.metadata.floors
-    ? session.players.filter((player) => getParticipantDungeonFloor(player, asset.metadata.floors ?? [])?.id === floor.id)
-    : session.players;
-  const pendingLabels: { name: string; x: number; y: number; priority: number; color: string }[] = [];
+// Glides the pan towards a follow target: each frame closes part of the gap
+// (INSTANCE_FOLLOW_EASE_MS takes it most of the way), and a new target only
+// moves the destination, so a unit moving every frame is tracked smoothly.
+function followInstancePan(targetX: number, targetY: number): void {
+  const { panX, panY, zoom } = getInstanceViewTransform();
+  if (Math.abs(targetX - panX) + Math.abs(targetY - panY) <= 0.5) return;
+  if (prefersReducedMotion()) {
+    instanceFollowAnimation = null;
+    setInstanceViewTransform({ zoom, panX: targetX, panY: targetY });
+    requestAnimationFrame(() => renderInstanceCanvas(true));
+    return;
+  }
+  const running = Boolean(instanceFollowAnimation);
+  instanceFollowAnimation = { toX: targetX, toY: targetY, lastAt: instanceFollowAnimation?.lastAt ?? performance.now() };
+  if (!running) requestAnimationFrame(stepInstanceFollow);
+}
+
+function stepInstanceFollow(now: number): void {
+  const animation = instanceFollowAnimation;
+  if (!animation || !instanceFollowSelected) {
+    instanceFollowAnimation = null;
+    return;
+  }
+  // The frame's timestamp can come before the last step's.
+  const elapsed = Math.max(0, now - animation.lastAt);
+  animation.lastAt = Math.max(animation.lastAt, now);
+  // About 95% of the way in INSTANCE_FOLLOW_EASE_MS.
+  const share = 1 - Math.exp((-3 * elapsed) / INSTANCE_FOLLOW_EASE_MS);
+  const { panX, panY, zoom } = getInstanceViewTransform();
+  const nextX = panX + (animation.toX - panX) * share;
+  const nextY = panY + (animation.toY - panY) * share;
+  const arrived = Math.abs(animation.toX - nextX) + Math.abs(animation.toY - nextY) <= 0.5;
+  setInstanceViewTransform({ zoom, panX: arrived ? animation.toX : nextX, panY: arrived ? animation.toY : nextY });
+  renderInstanceCanvas(true);
+  if (arrived) instanceFollowAnimation = null;
+  else requestAnimationFrame(stepInstanceFollow);
+}
+
+function prefersReducedMotion(): boolean {
+  return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+}
+
+function renderInstanceCanvas(followPass = false): void {
+  const startedAt = performance.now();
+  drawInstanceCanvas(followPass);
+  if (!instanceDebug) return;
+  const now = performance.now();
+  noteInstanceDebug('render', now - startedAt, now);
+  if (now - instanceDebugRenderedAt >= INSTANCE_DEBUG_INTERVAL_MS) renderInstanceDebugOverlay(now);
+}
+
+function drawInstanceCanvas(followPass: boolean): void {
+  if (!$instanceWatchCanvas) return;
+  const wrapper = $instanceWatchCanvas.parentElement;
+  if (!wrapper) return;
+  const rect = wrapper.getBoundingClientRect();
+  const width = Math.max(320, Math.floor(rect.width));
+  const height = Math.max(280, Math.floor(rect.height));
+  $instanceWatchCanvas.width = width;
+  $instanceWatchCanvas.height = height;
+  const ctx = $instanceWatchCanvas.getContext('2d');
+  if (!ctx) return;
+  instanceMarkerHitAreas = [];
+  instanceBaseViewport = null;
+  instanceIsoContext = null;
+
+  ctx.fillStyle = '#08111d';
+  ctx.fillRect(0, 0, width, height);
+  const session = withLivePositions(getSelectedInstanceSession());
+  const battleground = getSelectedBattleground();
+  $instanceWatchEmpty?.classList.toggle('hidden', Boolean(session));
+  if (!session) {
+    if ($instanceWatchScene) $instanceWatchScene.hidden = true;
+    $instanceViewControls?.classList.add('hidden');
+    renderInstanceBotCard(null, performance.now());
+    return;
+  }
+
+  if (!instanceMapAssets.has(session.mapId) && !instanceMapAssetLoads.has(session.mapId)) {
+    void loadInstanceMapAsset(session.mapId);
+  }
+  void loadInstanceScene(session.mapId);
+  const loadedAsset = instanceMapAssets.get(session.mapId) ?? null;
+  const profile = getInstanceMapProfile(session.mapId);
+  const projectionType = loadedAsset?.metadata.projection?.type;
+  const floors = getInstanceFloors(session.mapId);
+  const floor = getSelectedDungeonFloor(session, floors);
+  const asset = projectionType === 'minimapTiles'
+    || projectionType === 'dungeonFloors'
+    || (projectionType === 'worldMapArea' && (profile || loadedAsset?.metadata.worldMapBounds))
+    ? loadedAsset
+    : null;
+  // The flat view's map of that floor, if it has one.
+  const mapFloor = floor ? asset?.metadata.floors?.find((candidate) => candidate.id === floor.id) : undefined;
+  const assetImage = floor ? asset?.floorImages.get(floor.id) : asset?.image;
+  const bounds = floor?.bounds ?? asset?.metadata.worldMapBounds ?? getStableInstanceBounds(session);
+  const assetWidth = mapFloor?.width ?? asset?.metadata.width;
+  const assetHeight = mapFloor?.height ?? asset?.metadata.height;
+  const aspectRatio = assetWidth && assetHeight
+    ? assetWidth / assetHeight
+    : profile?.aspectRatio;
+  // Units on the floor shown; in 3D also those on no floor at all, as the
+  // scene draws what the floors don't cover (the flat view has only the
+  // floor's artwork).
+  const sceneFloors = isInstanceSceneShowing(session.mapId);
+  const onShownFloor = (unit: Pick<MapPlayerPosition, 'position_x' | 'position_y' | 'position_z' | 'wmoGroupId'>): boolean => {
+    if (!floor) return true;
+    const at = getParticipantDungeonFloor(unit, floors);
+    return at ? at.id === floor.id : sceneFloors;
+  };
+  const visiblePlayers = floor ? session.players.filter(onShownFloor) : session.players;
+  const live = instanceLiveStream?.key === session.key;
+  const liveNow = performance.now();
+  const creatures = live && instanceMobsMode !== 'off'
+    ? instanceLiveCreatures.samples(liveNow).filter((creature) => {
+      if (!onShownFloor({ position_x: creature.x, position_y: creature.y, position_z: creature.z, wmoGroupId: creature.wmoGroupId })) {
+        return false;
+      }
+      return instanceMobsMode === 'all' || isBossCreature(creature, instanceCreatureInfo.get(creature.entry))
+        || visiblePlayers.some((player) =>
+          Math.hypot(player.position_x - creature.x, player.position_y - creature.y) <= INSTANCE_MOBS_NEAR_YARDS
+          && Math.abs(player.position_z - creature.z) <= INSTANCE_MOBS_NEAR_HEIGHT);
+    })
+    : [];
+  // Scenery creatures: drawn without a ring, facing, path, or name.
+  const sceneryGuids = new Set(creatures.filter((creature) => {
+    const info = instanceCreatureInfo.get(creature.entry);
+    return isSceneryCreature(creature, info, isBossCreature(creature, info));
+  }).map((creature) => creature.guid));
+  const decisions = new Map<string, StreamBotDecision>();
+  if (instanceShowDecisions && live) {
+    for (const player of visiblePlayers) {
+      const decision = player.isBot ? instanceLiveBots.get(player.name, liveNow) : null;
+      if (decision) decisions.set(player.name, decision);
+    }
+  }
+  // Where the units shown stand, for combat effects: effects on units that
+  // aren't shown (the mobs selector, other floors) are skipped.
+  const combatPositions = new Map<UnitKey, Point3>();
+  if (live) {
+    for (const player of visiblePlayers) {
+      const guid = instanceLivePositions.guidOf(player.name);
+      if (guid !== null) combatPositions.set(unitKey(guid, false), [player.position_x, player.position_y, player.position_z]);
+    }
+    for (const creature of creatures) combatPositions.set(unitKey(creature.guid, true), [creature.x, creature.y, creature.z]);
+  }
+  const strikes = new Map(live ? instanceCombatEffects.advance(liveNow, (from, to) => {
+    const start = combatPositions.get(from);
+    const end = combatPositions.get(to);
+    return start && end ? Math.hypot(end[0] - start[0], end[1] - start[1], end[2] - start[2]) : null;
+  }).map((cue) => [cue.unit, cue.kind] as const) : []);
+  // Models are placed before the scene draws; units without one get markers.
+  const sceneView = getInstanceSceneView();
+  void loadInstanceMapLights(session.mapId);
+  sceneView?.setLighting(instanceMapLights.get(session.mapId) ?? null, instanceLighting, instanceObjectLights);
+  const modelIds = sceneView
+    ? sceneView.setUnits(instanceShowModels && live && instanceView3d
+      ? getInstanceUnitPoses(visiblePlayers, creatures, decisions, liveNow, strikes, sceneryGuids) : [], liveNow)
+    : new Set<string>();
+  const effectsDrawn = sceneView?.setEffects(live && instanceView3d ? instanceCombatEffects : null, combatPositions, liveNow,
+    live ? instanceLiveAuras.all(liveNow) : undefined, (spellId) => instanceSpellNames.isTaunt(spellId)) ?? 0;
+  sceneView?.setGameObjects(live && instanceView3d ? getInstanceGameObjectPoses(liveNow) : [], liveNow);
+  const bossPositions = creatures
+    .filter((creature) => isBossCreature(creature, instanceCreatureInfo.get(creature.entry)))
+    .map((creature): Point3 => [creature.x, creature.y, creature.z]);
+  const isoView = renderInstanceScene(session, floor, visiblePlayers, width, height, bossPositions);
+  // The flat map stops at its own closest zoom, which the 3D view can pass.
+  if (!isoView && getInstanceViewTransform().zoom > INSTANCE_MAX_ZOOM) {
+    const flatViewport = aspectRatio ? getInstanceProjectionViewport(width, height, aspectRatio) : { x: 0, y: 0, width, height };
+    setInstanceViewTransform(zoomInstanceViewAt(getInstanceViewTransform(), flatViewport, width / 2, height / 2, INSTANCE_MAX_ZOOM));
+  }
+  const modelShown = (id: string) => Boolean(isoView) && modelIds.has(id);
+  // Read after the scene, which may reset it when it reframes.
+  const viewTransform = getInstanceViewTransform();
+  if ($instanceWatchScene) $instanceWatchScene.hidden = !isoView;
+  const hasScene = Boolean(getInstanceScene(session.mapId) && getInstanceSceneView());
+  $instanceViewControls?.classList.toggle('hidden', !hasScene);
+  if ($instanceRotateLeftBtn) $instanceRotateLeftBtn.disabled = !isoView;
+  if ($instanceRotateRightBtn) $instanceRotateRightBtn.disabled = !isoView;
+  if ($instanceView3dBtn) $instanceView3dBtn.setAttribute('aria-pressed', String(instanceView3d));
+  $instanceCompass?.toggleAttribute('hidden', !isoView);
+  if (isoView) updateInstanceCompass();
+  let projection: MapProjection;
+  if (isoView) {
+    instanceBaseViewport = isoView.baseViewport;
+    projection = isoView.projection;
+    ctx.clearRect(0, 0, width, height);
+  } else {
+    const baseViewport = aspectRatio
+      ? getInstanceProjectionViewport(width, height, aspectRatio)
+      : { x: 0, y: 0, width, height };
+    instanceBaseViewport = baseViewport;
+    const viewport = applyInstanceViewTransform(baseViewport, viewTransform);
+    projection = createFlatProjection(asset?.metadata.projection?.type === 'minimapTiles'
+      ? { type: 'minimapTiles', tiles: resolveMinimapTileProjection(asset.metadata) }
+      : { type: 'bounds', bounds }, viewport);
+    drawInstanceFlatBackground(ctx, viewport, assetImage, Boolean(profile));
+  }
+  const project = (position: Pick<MapPlayerPosition, 'position_x' | 'position_y' | 'position_z'>) =>
+    projection.worldToScreen(position.position_x, position.position_y, position.position_z);
+
+  // Follow: glide the view so the selected player ends up at the centre.
+  const followed = instanceFollowSelected && !followPass
+    ? session.players.find((player) => player.name === selectedInstancePlayerName)
+    : undefined;
+  if (followed) {
+    const point = project(followed);
+    followInstancePan(viewTransform.panX + width / 2 - point.x, viewTransform.panY + height / 2 - point.y);
+  }
+
+  // An 'action' label is a bot's current action, under its name.
+  // A player's label in a battleground carries their side (crest, colour).
+  // A label can also carry its unit's raid marker, and a player's its
+  // side's colour outside battlegrounds.
+  const pendingLabels: {
+    name: string; x: number; y: number; priority: number; action?: boolean; faction?: Faction | null; marker?: number | null;
+    color?: string;
+  }[] = [];
+  const factionOf = (player: MapPlayerPosition): Faction | null => !battleground ? null
+    : player.teamId === TEAM_ALLIANCE ? 'alliance' : player.teamId === TEAM_HORDE ? 'horde' : null;
   const markerScale = getCanvasPlayerIconScale(viewTransform.zoom);
+  // In 3D, nameplates take the labels' place; (x, y) is over the unit's head.
+  const plateStyle = isoView && instancePlatesMode !== 'labels' ? instancePlatesMode : null;
+  // `size` scales a plate (players' pets get smaller ones).
+  const pendingPlates: { plate: Nameplate; x: number; y: number; priority: number; keep: boolean; size?: number }[] = [];
+  const partyLevel = Math.max(1, ...visiblePlayers.map((player) => player.level || 1));
+  const activeCasts = new Map<UnitKey, { spellId: number; startAt: number; endAt: number; channeled: boolean }>();
+  if (plateStyle && live) {
+    for (const cast of instanceCombatEffects.casts) if (!cast.release) activeCasts.set(cast.caster, cast);
+  }
+  const castOf = (unit: UnitKey): Nameplate['cast'] => {
+    const cast = activeCasts.get(unit);
+    if (!cast) return null;
+    // A cast's end includes a grace in case the "fired" event is late.
+    const length = cast.endAt - cast.startAt - (cast.channeled ? 0 : CAST_GRACE_MS);
+    return {
+      fraction: length > 0 ? clamp((liveNow - cast.startAt) / length, 0, 1) : 1,
+      name: instanceSpellNames.get(cast.spellId),
+      channeled: cast.channeled,
+      icon: instanceClientIcons.get(`spell-${cast.spellId}`),
+    };
+  };
+  // Players a shown mob is attacking.
+  const attackedPlayers = new Set(creatures
+    .filter((creature) => creature.alive && creature.inCombat && creature.targetIsPlayer)
+    .map((creature) => creature.targetGuid));
+  let pathsDrawn = 0;
+  // Paths, move targets, and target lines go under every marker.
   for (const player of visiblePlayers) {
-    const trail = (instanceTrails.get(player.name) ?? []).filter((point) =>
-      !floor || getParticipantDungeonFloor(point, asset?.metadata.floors ?? [])?.id === floor.id);
-    if (trail.length > 1) {
+    const moveTarget = decisions.get(player.name)?.moveTarget;
+    if (!moveTarget || moveTarget.ageMs > INSTANCE_MOVE_TARGET_MS) continue;
+    if (Math.hypot(moveTarget.x - player.position_x, moveTarget.y - player.position_y) < 2) continue;
+    drawInstanceMoveTarget(ctx, project(player), projection.worldToScreen(moveTarget.x, moveTarget.y, moveTarget.z),
+      CLASS_COLORS[player.class] || '#94a3b8', 1 - 0.7 * (moveTarget.ageMs / INSTANCE_MOVE_TARGET_MS), markerScale);
+  }
+  if (instanceShowPaths && live) {
+    for (const player of visiblePlayers) {
+      const path = instanceLivePaths.get(player.name, liveNow);
+      if (!path) continue;
+      const points = trimPathToPosition(path.points, [player.position_x, player.position_y, player.position_z]);
+      drawInstancePath(ctx, player, points, path.truncated, projection.worldToScreen,
+        CLASS_COLORS[player.class] || '#4fc3f7', markerScale);
+      pathsDrawn += 1;
+    }
+    for (const creature of creatures) {
+      const path = creature.alive && !sceneryGuids.has(creature.guid)
+        ? instanceLivePaths.get(creaturePathKey(creature.guid), liveNow) : null;
+      if (!path) continue;
+      const points = trimPathToPosition(path.points, [creature.x, creature.y, creature.z]);
+      drawInstancePath(ctx, { position_x: creature.x, position_y: creature.y, position_z: creature.z }, points,
+        path.truncated, projection.worldToScreen, creature.hostile ? '#f87171' : '#fde047', markerScale * 0.75);
+      pathsDrawn += 1;
+    }
+  }
+  if (creatures.length) {
+    const playersByGuid = new Map(visiblePlayers.flatMap((player) => {
+      const guid = instanceLivePositions.guidOf(player.name);
+      return guid === null ? [] : [[guid, player] as const];
+    }));
+    ctx.save();
+    ctx.strokeStyle = 'rgba(239,68,68,0.45)';
+    ctx.lineWidth = 1;
+    for (const creature of creatures) {
+      const target = creature.alive && creature.inCombat && creature.targetIsPlayer
+        ? playersByGuid.get(creature.targetGuid)
+        : undefined;
+      if (!target) continue;
+      const from = projection.worldToScreen(creature.x, creature.y, creature.z);
+      const to = project(target);
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.stroke();
+    }
+    ctx.restore();
+    // Dead first, so the living draw over corpses.
+    const ordered = [...creatures].sort((left, right) => Number(left.alive) - Number(right.alive));
+    for (const creature of ordered) {
+      const info = instanceCreatureInfo.get(creature.entry);
+      const point = projection.worldToScreen(creature.x, creature.y, creature.z);
+      const key = unitKey(creature.guid, true);
+      const marker = live ? instanceLiveMarkers.get(key, liveNow) : null;
+      const model = modelShown(key);
+      const boss = isBossCreature(creature, info);
+      const scenery = sceneryGuids.has(creature.guid);
+      // A model has its own ring on the floor, with health and combat.
+      if (!model) {
+        if (!scenery) {
+          drawInstanceAuraHalo(ctx, live ? instanceCombatEffects.tint(key, instanceAuraShownAsArt(isoView)) : null,
+            point, 9 * markerScale);
+        }
+        drawInstanceCreature(ctx, creature, info, point, markerScale, scenery);
+      }
+      if (plateStyle) {
+        const extras = live ? getInstancePlateExtras(key, liveNow) : {};
+        const marked = marker !== null;
+        if (info && creature.alive && !scenery && (boss || marked || creature.inCombat || viewTransform.zoom >= INSTANCE_MOB_LABEL_ZOOM)) {
+          const plateY = model
+            ? projection.worldToScreen(creature.x, creature.y, creature.z + INSTANCE_CREATURE_MODEL_HEIGHT).y - 2
+            : point.y - 10 * markerScale;
+          pendingPlates.push({
+            plate: {
+              name: info.name,
+              level: String(info.maxLevel),
+              levelColor: levelColor(info.maxLevel, partyLevel),
+              elite: info.rank === 1 || info.rank === 2,
+              boss,
+              healthPct: creature.healthPct,
+              barColor: creature.playerControlled ? INSTANCE_PLATE_FRIENDLY_COLOR
+                : creature.hostile ? INSTANCE_PLATE_HOSTILE_COLOR : INSTANCE_PLATE_NEUTRAL_COLOR,
+              alive: true,
+              threat: creature.inCombat && creature.targetIsPlayer,
+              selected: false,
+              cast: castOf(key),
+              note: null,
+              ...extras,
+            },
+            x: point.x,
+            y: plateY,
+            priority: boss ? 1 : creature.inCombat ? 0 : -1,
+            keep: boss || marked || creature.inCombat,
+            size: creature.playerControlled ? INSTANCE_PET_PLATE_SIZE : 1,
+          });
+        }
+      } else if (info && creature.alive && !scenery && (boss || marker !== null || viewTransform.zoom >= INSTANCE_MOB_LABEL_ZOOM)) {
+        const labelY = model
+          ? projection.worldToScreen(creature.x, creature.y, creature.z + INSTANCE_CREATURE_MODEL_HEIGHT).y
+          : point.y - 4 * markerScale;
+        pendingLabels.push({ name: info.name, x: point.x + 6 * markerScale, y: labelY, priority: boss || marker !== null ? 1 : -1, marker });
+      }
+    }
+  }
+  for (const player of visiblePlayers) {
+    const trail = (instanceTrails.get(player.name) ?? []).filter(onShownFloor);
+    if (instanceShowTrails && trail.length > 1) {
       ctx.beginPath();
       trail.forEach((point, index) => {
         const projected = project(point);
@@ -6976,65 +8471,341 @@ function renderInstanceCanvas(): void {
     }
 
     const point = project(player);
-    const color = getInstanceFactionColor(player.teamId) ?? '#94a3b8';
-    if (player.inCombat) {
-      ctx.beginPath();
-      ctx.arc(point.x, point.y, 11 * markerScale, 0, Math.PI * 2);
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 2;
-      ctx.stroke();
-    }
+    const playerGuid = live ? instanceLivePositions.guidOf(player.name) : null;
+    const model = playerGuid !== null && modelShown(unitKey(playerGuid, false));
+    const faction = factionOf(player);
+    // With a model, labels and the click target sit over its head.
+    // A rider sits higher: its model's own overhead point. A passenger the
+    // client hides is drawn as its vehicle: no marker of its own, and its
+    // name over the vehicle.
+    const passenger = playerGuid !== null ? instanceLivePassengers.get(playerGuid, liveNow) : null;
+    const hiddenPassenger = Boolean(passenger?.hidden);
+    const riderTop = !sceneView || playerGuid === null ? null
+      : hiddenPassenger && passenger
+        ? sceneView.anchor(combatPositions, unitKey(passenger.vehicleGuid, passenger.vehicleCreature), 'overhead')
+        : model && (player.mounted || passenger) ? sceneView.anchor(combatPositions, unitKey(playerGuid, false), 'overhead') : null;
+    const top = riderTop
+      ? projection.worldToScreen(riderTop[0], riderTop[1], riderTop[2]).y
+      : model
+        ? projection.worldToScreen(player.position_x, player.position_y, player.position_z + INSTANCE_PLAYER_MODEL_HEIGHT).y
+        : point.y;
+    const color = getInstancePlayerColor(player);
     const markerRadius = (player.isBot ? 6 : 8) * markerScale;
-    ctx.beginPath();
-    ctx.arc(point.x, point.y, markerRadius, 0, Math.PI * 2);
-    ctx.fillStyle = color;
-    ctx.fill();
-    drawCanvasClassIcon(ctx, player.class, point.x, point.y, markerRadius * 1.65);
-    drawCanvasStateIcon(ctx, player, point.x + markerRadius * 0.7, point.y - markerRadius - 6 * markerScale,
-      markerScale);
-    if (player.name === selectedInstancePlayerName) {
+    // A model has its own ring on the floor (combat and selection included).
+    if (!model && !hiddenPassenger) {
+      drawInstanceAuraHalo(ctx, playerGuid !== null ? instanceCombatEffects.tint(unitKey(playerGuid, false), instanceAuraShownAsArt(isoView)) : null, point,
+        markerRadius + 7 * markerScale);
+      if (player.inCombat) {
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, 11 * markerScale, 0, Math.PI * 2);
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, markerRadius, 0, Math.PI * 2);
+      ctx.fillStyle = player.alive ? color : '#475569';
+      ctx.fill();
+      drawCanvasClassIcon(ctx, player.class, point.x, point.y, markerRadius * 1.65);
+    }
+    // State icons (combat swords and the like) are for the flat map; the 3D
+    // view shows combat on the ring and the models.
+    if (!isoView) drawCanvasStateIcon(ctx, player, point.x + markerRadius * 0.7, point.y - markerRadius - 6 * markerScale, markerScale);
+    if (!model && !hiddenPassenger && player.name === selectedInstancePlayerName) {
       ctx.beginPath();
       ctx.arc(point.x, point.y, markerRadius + 4, 0, Math.PI * 2);
       ctx.strokeStyle = '#fbbf24';
       ctx.lineWidth = 2;
       ctx.stroke();
     }
-    instanceMarkerHitAreas.push({ name: player.name, x: point.x, y: point.y, radius: markerRadius + 6 });
+    instanceMarkerHitAreas.push(model
+      ? { name: player.name, x: point.x, y: (point.y + top) / 2, radius: Math.max(markerRadius + 6, (point.y - top) / 2 + 4) }
+      : { name: player.name, x: point.x, y: point.y, radius: markerRadius + 6 });
 
-    const headingLength = 13 * markerScale;
-    ctx.beginPath();
-    ctx.moveTo(point.x, point.y);
-    ctx.lineTo(point.x - Math.sin(player.orientation) * headingLength, point.y - Math.cos(player.orientation) * headingLength);
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
-    ctx.stroke();
+    // A model shows which way it faces.
+    if (!model && !hiddenPassenger) {
+      const headingLength = 13 * markerScale;
+      ctx.beginPath();
+      ctx.moveTo(point.x, point.y);
+      ctx.lineTo(point.x - Math.sin(player.orientation) * headingLength, point.y - Math.cos(player.orientation) * headingLength);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
 
-    if (visiblePlayers.length <= 60) {
+    if (plateStyle) {
+      const level = player.level || 1;
+      pendingPlates.push({
+        plate: {
+          name: player.name,
+          level: String(level),
+          levelColor: levelColor(level, partyLevel),
+          elite: false,
+          boss: false,
+          healthPct: player.alive ? player.healthPct ?? 100 : 0,
+          barColor: CLASS_COLORS[player.class] || '#94a3b8',
+          alive: player.alive,
+          threat: playerGuid !== null && attackedPlayers.has(playerGuid),
+          selected: player.name === selectedInstancePlayerName,
+          cast: playerGuid !== null ? castOf(unitKey(playerGuid, false)) : null,
+          note: getCurrentBotAction(decisions.get(player.name)) ?? null,
+          faction,
+          factionIcon: faction ? instanceClientIcons.get(`faction-${faction}`) : null,
+          power: player.alive && player.powerPct !== undefined && POWER_COLORS[player.powerType ?? -1]
+            ? { pct: player.powerPct, color: POWER_COLORS[player.powerType ?? 0] } : null,
+          ...(playerGuid !== null ? getInstancePlateExtras(unitKey(playerGuid, false), liveNow) : {}),
+        },
+        x: point.x,
+        y: model || riderTop ? top - 2 : point.y - markerRadius - 4,
+        priority: (player.name === selectedInstancePlayerName ? 4 : 0) + (!player.isBot ? 2 : 0) + (player.inCombat ? 1 : 0),
+        keep: true,
+      });
+    } else if (visiblePlayers.length <= 60) {
+      const labelY = model || riderTop ? top - 1 : point.y - markerRadius - 1;
       pendingLabels.push({
         name: player.name,
         x: point.x + markerRadius + 4,
-        y: point.y - markerRadius - 1,
+        y: labelY,
         priority: (!player.isBot ? 2 : 0) + (player.inCombat ? 1 : 0),
-        color,
+        faction,
+        marker: playerGuid !== null ? instanceLiveMarkers.get(unitKey(playerGuid, false), liveNow) : null,
+        color: getInstanceFactionColor(player.teamId) ?? undefined,
       });
+      const action = getCurrentBotAction(decisions.get(player.name));
+      if (action) {
+        pendingLabels.push({
+          name: action,
+          x: point.x + markerRadius + 4,
+          y: labelY + 15,
+          priority: player.name === selectedInstancePlayerName ? 1.5 : -0.5,
+          action: true,
+        });
+      }
     }
   }
 
+  if (plateStyle) drawInstancePlates(ctx, plateStyle, pendingPlates, playerIconScale / INSTANCE_PLATE_BASE_ICON_SCALE);
+
   const occupiedLabels: { left: number; right: number; top: number; bottom: number }[] = [];
-  ctx.font = '11px sans-serif';
   for (const label of pendingLabels.sort((left, right) => right.priority - left.priority)) {
-    const labelWidth = ctx.measureText(label.name).width;
+    ctx.font = label.action ? 'italic 10px sans-serif' : '11px sans-serif';
+    ctx.fillStyle = label.action ? '#fcd34d' : label.faction ? FACTION_NAME_COLORS[label.faction] : label.color ?? '#e5edf7';
+    // Room for the raid marker and the side's crest before the name.
+    const markerIcon = label.marker !== undefined && label.marker !== null ? instanceClientIcons.get(`marker-${label.marker + 1}`) : null;
+    const markerRoom = markerIcon ? 14 : 0;
+    const crest = (label.faction ? 12 : 0) + markerRoom;
+    const labelWidth = ctx.measureText(label.name).width + crest;
     const rect = { left: label.x - 2, right: label.x + labelWidth + 2, top: label.y - 11, bottom: label.y + 3 };
     const overlaps = occupiedLabels.some((used) =>
       rect.left < used.right && rect.right > used.left && rect.top < used.bottom && rect.bottom > used.top);
     if (overlaps) continue;
     occupiedLabels.push(rect);
-    ctx.fillStyle = label.color;
-    ctx.fillText(label.name, label.x, label.y);
+    if (markerIcon) ctx.drawImage(markerIcon, label.x, label.y - 10, 12, 12);
+    if (label.faction) {
+      drawFactionCrest(ctx, label.faction, label.x + markerRoom + 4.5, label.y - 4, 11, instanceClientIcons.get(`faction-${label.faction}`));
+    }
+    ctx.fillText(label.name, label.x + crest, label.y);
   }
+
+  if (instanceShowNumbers && live) {
+    drawInstanceCombatNumbers(ctx, liveNow, markerScale, (unit) => {
+      const feet = combatPositions.get(unit);
+      if (!feet) return null;
+      const overhead = isoView && sceneView
+        ? sceneView.anchor(combatPositions, unit, 'overhead')
+        : [feet[0], feet[1], feet[2] + INSTANCE_PLAYER_MODEL_HEIGHT] as Point3;
+      return overhead ? projection.worldToScreen(overhead[0], overhead[1], overhead[2]) : null;
+    });
+  }
+
+  instanceDebugCounts = {
+    players: visiblePlayers.length,
+    mobsShown: creatures.length,
+    mobsStreamed: live ? instanceLiveCreatures.samples(liveNow).length : 0,
+    paths: pathsDrawn,
+    bots: decisions.size,
+    models: isoView ? modelIds.size : 0,
+    effects: isoView ? effectsDrawn : 0,
+    spellArt: isoView ? sceneView?.spellArt.effects ?? 0 : 0,
+    particles: isoView ? sceneView?.spellArt.particles ?? 0 : 0,
+  };
+  if (liveNow - instanceBotCardRenderedAt >= INSTANCE_BOT_CARD_INTERVAL_MS) renderInstanceBotCard(session, liveNow);
+}
+
+// The action a bot is carrying out now, or null if it has done nothing lately.
+function getCurrentBotAction(decision: StreamBotDecision | null | undefined): string | null {
+  const latest = decision?.actions[0];
+  return latest && latest.ageMs <= INSTANCE_CURRENT_ACTION_MS ? latest.name : null;
+}
+
+// A dotted line from a bot to where it last chose to move, ending in a diamond.
+function drawInstanceMoveTarget(
+  ctx: CanvasRenderingContext2D,
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  color: string,
+  opacity: number,
+  scale: number,
+): void {
+  const size = 4.5 * scale;
+  ctx.save();
+  ctx.globalAlpha = clamp(opacity, 0.2, 1);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.25;
+  ctx.setLineDash([2, 4]);
+  ctx.beginPath();
+  ctx.moveTo(from.x, from.y);
+  ctx.lineTo(to.x, to.y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.moveTo(to.x, to.y - size);
+  ctx.lineTo(to.x + size, to.y);
+  ctx.lineTo(to.x, to.y + size);
+  ctx.lineTo(to.x - size, to.y);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(8,17,29,0.75)';
+  ctx.fill();
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
+}
+
+// Names for the core's MovementGeneratorType values.
+const BOT_MOTION_LABELS: Record<number, string> = {
+  0: 'Standing still', 1: 'Wandering', 2: 'Walking waypoints', 3: 'Wandering', 4: 'Confused', 5: 'Chasing',
+  6: 'Returning home', 7: 'On a flight path', 8: 'Moving to a point', 9: 'Fleeing', 10: 'Distracted',
+  11: 'Fleeing for help', 12: 'Fleeing for help', 13: 'Fleeing', 14: 'Following', 15: 'Turning',
+  16: 'Moved by an effect', 17: 'Escorting', 18: 'In formation',
+};
+const BOT_MOVE_PRIORITY_LABELS = ['idle', 'wander', 'normal', 'combat', 'forced'];
+const BOT_STATE_LABELS: Record<StreamBotDecision['state'], string> = {
+  combat: 'In combat', idle: 'Out of combat', dead: 'Dead',
+};
+
+function formatInstanceAge(ageMs: number): string {
+  if (ageMs < 1000) return 'now';
+  if (ageMs < 60_000) return `${Math.floor(ageMs / 1000)} s ago`;
+  return `${Math.floor(ageMs / 60_000)} min ago`;
+}
+
+// A streamed unit's name: a player's from the stream, a creature's from the
+// world database.
+function getInstanceUnitName(guid: number, isPlayer: boolean): string {
+  if (isPlayer) return instanceLivePositions.nameOf(guid) ?? `Player #${guid}`;
+  const creature = instanceLiveCreatures.latest(guid);
+  if (!creature) return `Creature #${guid}`;
+  return instanceCreatureInfo.get(creature.entry)?.name ?? `Creature ${creature.entry}`;
+}
+
+// The sidebar card: the focused bot's decisions in detail, or every bot's
+// current action when no bot is focused.
+function renderInstanceBotCard(session: ActiveInstanceSession | null, now: number): void {
+  if (!$instanceBotCard || !$instanceBotDecisions) return;
+  instanceBotCardRenderedAt = now;
+  const live = Boolean(session && instanceLiveStream?.key === session.key);
+  const bots = live && instanceShowDecisions && session
+    ? session.players.flatMap((player) => {
+      const decision = player.isBot ? instanceLiveBots.get(player.name, now) : null;
+      return decision ? [{ player, decision }] : [];
+    })
+    : [];
+  $instanceBotCard.classList.toggle('hidden', !bots.length);
+  if (!bots.length) return;
+  const focused = bots.find(({ player }) => player.name === selectedInstancePlayerName);
+  const html = focused ? getInstanceBotDetailHtml(focused.player.name, focused.decision) : bots
+    .sort((left, right) => left.player.name.localeCompare(right.player.name))
+    .map(({ player, decision }) => {
+      const action = getCurrentBotAction(decision);
+      return `<div class="instance-bot-summary" data-instance-player="${escapeHtml(player.name)}">
+        <span class="instance-bot-state-dot ${decision.state}"></span>
+        <span class="instance-bot-summary-name">${escapeHtml(player.name)}</span>
+        <span class="instance-bot-summary-action">${action ? escapeHtml(action) : '—'}</span>
+      </div>`;
+    }).join('') + '<p class="instance-bot-hint">Select a bot for its strategies and recent actions.</p>';
+  // Ages tick every second; skip identical redraws so clicks are not lost.
+  if ($instanceBotDecisions.innerHTML !== html) $instanceBotDecisions.innerHTML = html;
+}
+
+function getInstanceBotDetailHtml(name: string, decision: StreamBotDecision): string {
+  const lines: string[] = [];
+  const motion = decision.motionType === null ? null : BOT_MOTION_LABELS[decision.motionType] ?? `Motion ${decision.motionType}`;
+  if (motion) {
+    const whom = decision.motionTargetGuid
+      ? ` <strong>${escapeHtml(getInstanceUnitName(decision.motionTargetGuid, decision.motionTargetIsPlayer))}</strong>`
+      : '';
+    lines.push(`${escapeHtml(motion)}${whom}`);
+  }
+  if (decision.targetGuid) {
+    lines.push(`Target <strong>${escapeHtml(getInstanceUnitName(decision.targetGuid, decision.targetIsPlayer))}</strong>`);
+  }
+  if (decision.moveTarget) {
+    const priority = BOT_MOVE_PRIORITY_LABELS[decision.movePriority] ?? String(decision.movePriority);
+    lines.push(`Chose a move ${formatInstanceAge(decision.moveTarget.ageMs)} (${escapeHtml(priority)} priority)`);
+  }
+  const actions = decision.actions.map((action) => `<tr${action.ageMs > INSTANCE_CURRENT_ACTION_MS ? ' class="old"' : ''}>
+      <td>${escapeHtml(action.name)}${action.repeats > 1 ? ` <span class="instance-bot-repeats">×${action.repeats}</span>` : ''}</td>
+      <td title="Relevance">${Math.round(action.relevance * 10) / 10}</td>
+      <td>${formatInstanceAge(action.ageMs)}</td>
+    </tr>`).join('');
+  const strategies = decision.strategies.map((strategy) => `<span>${escapeHtml(strategy)}</span>`).join('');
+  return `<div class="instance-bot-head"><strong>${escapeHtml(name)}</strong>
+      <span class="instance-bot-state ${decision.state}">${BOT_STATE_LABELS[decision.state]}</span></div>
+    ${lines.map((line) => `<div class="instance-bot-line">${line}</div>`).join('')}
+    <h4>Recent actions</h4>
+    ${actions ? `<table class="instance-bot-actions"><tbody>${actions}</tbody></table>` : '<p class="instance-bot-hint">None yet.</p>'}
+    <h4>Strategies ${decision.state === 'combat' ? 'in combat' : decision.state === 'dead' ? 'while dead' : 'out of combat'}</h4>
+    <div class="instance-bot-strategies">${strategies || '<span>none</span>'}</div>`;
+}
+
+// Records a debug statistic: an occurrence at `at` with an optional value.
+function noteInstanceDebug(kind: string, value = 0, at = performance.now()): void {
+  if (!instanceDebug) return;
+  const events = instanceDebugEvents.get(kind) ?? [];
+  events.push({ at, value });
+  while (events.length && at - events[0].at > INSTANCE_DEBUG_WINDOW_MS) events.shift();
+  instanceDebugEvents.set(kind, events);
+}
+
+function getInstanceDebugStats(kind: string, now: number): { rate: number; average: number; max: number; total: number } {
+  const events = (instanceDebugEvents.get(kind) ?? []).filter((event) => now - event.at <= INSTANCE_DEBUG_WINDOW_MS);
+  const total = events.reduce((sum, event) => sum + event.value, 0);
+  return {
+    rate: events.length / (INSTANCE_DEBUG_WINDOW_MS / 1000),
+    average: events.length ? total / events.length : 0,
+    max: events.reduce((max, event) => Math.max(max, event.value), 0),
+    total,
+  };
+}
+
+function renderInstanceDebugOverlay(now: number): void {
+  if (!$instanceDebugOverlay) return;
+  instanceDebugRenderedAt = now;
+  $instanceDebugOverlay.hidden = false;
+  const render = getInstanceDebugStats('render', now);
+  const frames = getInstanceDebugStats('frame', now);
+  const perSecond = (kind: string) => (getInstanceDebugStats(kind, now).total / (INSTANCE_DEBUG_WINDOW_MS / 1000)).toFixed(1);
+  const session = getSelectedInstanceSession();
+  const scene = $instanceWatchScene && !$instanceWatchScene.hidden
+    ? `3D · ${$instanceWatchScene.dataset.drawCalls ?? '?'} draws · ${Math.round(Number($instanceWatchScene.dataset.triangles ?? 0) / 1000)}k tris · ${$instanceWatchScene.dataset.buffer ?? '?'} px`
+    : 'flat map';
+  const floor = session ? getSelectedDungeonFloor(session) : null;
+  const transform = getInstanceViewTransform();
+  const counts = instanceDebugCounts;
+  const lines = [
+    `render  ${render.rate.toFixed(1)} fps · ${render.average.toFixed(1)} ms avg · ${render.max.toFixed(1)} max`,
+    `scene   ${scene}`,
+    `stream  ${instanceLiveStream?.status ?? 'off'} · ${frames.rate.toFixed(1)} frames/s · gap max ${Math.round(frames.max)} ms`,
+    `        per s: ${perSecond('paths')} paths · ${perSecond('creatures')} mobs · ${perSecond('bots')} bots · ${perSecond('combat')} combat events · ${perSecond('auras')} aura lists`,
+    `combat  ${counts.effects} effects drawn (${counts.spellArt} client art, ${counts.particles} particles) · ${instanceCombatEffects.dropped} events dropped by the server`,
+    `shown   ${counts.players} players · ${counts.mobsShown}/${counts.mobsStreamed} mobs · ${counts.paths} paths · ${counts.bots} bots · ${counts.models} models · ${getInstanceSceneView()?.indoorCount ?? 0} lit indoors`,
+    `view    zoom ${transform.zoom.toFixed(2)} · yaw ${Math.round(getInstanceViewYaw() * 180 / Math.PI)}° · pitch ${Math.round(getInstanceViewPitch() * 180 / Math.PI)}°${floor ? ` · floor ${floor.floorIndex}` : ''}`,
+  ];
+  $instanceDebugOverlay.textContent = lines.join('\n');
 }
 
 function renderInstanceWatcher(): void {
+  syncInstanceLiveStream();
   const session = getSelectedInstanceSession();
   if ($instanceSessionCount) $instanceSessionCount.textContent = String(activeInstanceSessions.length);
   renderInstanceSessionOptions();
@@ -7052,7 +8823,7 @@ function renderInstanceWatcher(): void {
         && (profile || loadedAsset.metadata.worldMapBounds))
     ));
     const representative = session?.players[0];
-    const selectedFloor = session && loadedAsset ? getSelectedDungeonFloor(session, loadedAsset) : null;
+    const selectedFloor = session ? getSelectedDungeonFloor(session) : null;
     const difficulty = getInstanceDifficultyLabel(representative?.mapType, representative?.difficulty);
     const age = getInstanceAgeLabel(representative?.sessionStartedAt);
     const details = session
@@ -7062,7 +8833,10 @@ function renderInstanceWatcher(): void {
         difficulty,
         age ? `active ${age}` : null,
         selectedFloor ? `floor ${selectedFloor.floorIndex}` : null,
-        hasArtwork ? 'client artwork' : profile ? 'client-calibrated bounds' : 'auto-fit bounds',
+        session && isInstanceSceneShowing(session.mapId)
+          ? '3D scene'
+          : hasArtwork ? 'client artwork' : profile ? 'client-calibrated bounds' : 'auto-fit bounds',
+        instanceLiveStream?.status === 'streaming' ? 'live stream' : null,
       ].filter(Boolean).join(' · ')
       : null;
     $instanceWatchSubtitle.textContent = details
@@ -7128,6 +8902,9 @@ async function refreshInstanceWatcher(forceDiscovery = false): Promise<void> {
       for (const key of instanceSelectedFloorIds.keys()) {
         if (!activeKeys.has(key)) instanceSelectedFloorIds.delete(key);
       }
+      for (const key of instanceSceneFrames.keys()) {
+        if (!activeKeys.has(key)) instanceSceneFrames.delete(key);
+      }
     } else if (selectedInstanceKey) {
       activeBattlegrounds.delete(selectedInstanceKey);
       activeInstanceStates.delete(selectedInstanceKey);
@@ -7179,12 +8956,14 @@ function startInstanceWatcherPolling(): void {
   }
   instanceRefreshInterval = setInterval(() => {
     if (getActiveMainTabId() === 'instances') void refreshInstanceWatcher();
+    else syncInstanceLiveStream();
   }, 1000);
 }
 
 function stopInstanceWatcherPolling(): void {
   if (instanceRefreshInterval) clearInterval(instanceRefreshInterval);
   instanceRefreshInterval = null;
+  syncInstanceLiveStream();
 }
 
 $instanceSessionSelect?.addEventListener('change', () => {
@@ -7217,6 +8996,15 @@ $instanceWatchCanvas?.addEventListener('wheel', (event) => {
     (event.clientY - rect.top) * scaleY);
 }, { passive: false });
 $instanceWatchCanvas?.addEventListener('pointerdown', (event) => {
+  if (event.button === 1 || (event.button === 0 && event.shiftKey)) {
+    // Also stops the browser's middle-click autoscroll.
+    event.preventDefault();
+    if (beginInstanceOrbit(event)) {
+      $instanceWatchCanvas.setPointerCapture(event.pointerId);
+      $instanceWatchCanvas.classList.add('panning');
+    }
+    return;
+  }
   if (event.button !== 0) return;
   const transform = getInstanceViewTransform();
   instancePanStart = {
@@ -7230,11 +9018,19 @@ $instanceWatchCanvas?.addEventListener('pointerdown', (event) => {
   $instanceWatchCanvas.classList.add('panning');
 });
 $instanceWatchCanvas?.addEventListener('pointermove', (event) => {
+  if (instanceOrbitStart) {
+    updateInstanceOrbit(event);
+    return;
+  }
   if (!instancePanStart) return;
   const rect = $instanceWatchCanvas.getBoundingClientRect();
   const deltaX = (event.clientX - instancePanStart.x) * $instanceWatchCanvas.width / rect.width;
   const deltaY = (event.clientY - instancePanStart.y) * $instanceWatchCanvas.height / rect.height;
-  if (Math.hypot(deltaX, deltaY) > 3) instancePanStart.moved = true;
+  if (Math.hypot(deltaX, deltaY) > 3 && !instancePanStart.moved) {
+    instancePanStart.moved = true;
+    // Dragging the map by hand takes over from following.
+    if (instanceFollowSelected) setInstanceFollowSelected(false);
+  }
   const transform = getInstanceViewTransform();
   setInstanceViewTransform({
     zoom: transform.zoom,
@@ -7244,6 +9040,12 @@ $instanceWatchCanvas?.addEventListener('pointermove', (event) => {
   renderInstanceCanvas();
 });
 $instanceWatchCanvas?.addEventListener('pointerup', (event) => {
+  if (instanceOrbitStart) {
+    instanceOrbitStart = null;
+    $instanceWatchCanvas.releasePointerCapture(event.pointerId);
+    $instanceWatchCanvas.classList.remove('panning');
+    return;
+  }
   if (!instancePanStart) return;
   const moved = instancePanStart.moved;
   instancePanStart = null;
@@ -7258,8 +9060,67 @@ $instanceWatchCanvas?.addEventListener('pointerup', (event) => {
 });
 $instanceWatchCanvas?.addEventListener('pointercancel', () => {
   instancePanStart = null;
+  instanceOrbitStart = null;
   $instanceWatchCanvas.classList.remove('panning');
 });
+$instanceWatchCanvas?.addEventListener('keydown', (event) => {
+  if (event.altKey || event.ctrlKey || event.metaKey) return;
+  const key = event.key.toLowerCase();
+  if (key !== 'q' && key !== 'e') return;
+  event.preventDefault();
+  rotateInstanceView(key === 'q' ? -1 : 1);
+});
+$instanceRotateLeftBtn?.addEventListener('click', () => rotateInstanceView(-1));
+$instanceRotateRightBtn?.addEventListener('click', () => rotateInstanceView(1));
+$instanceView3dBtn?.addEventListener('click', () => setInstanceView3d(!instanceView3d));
+$instanceFollowBtn?.setAttribute('aria-pressed', String(instanceFollowSelected));
+$instanceFollowBtn?.addEventListener('click', () => setInstanceFollowSelected(!instanceFollowSelected));
+$instancePathsBtn?.setAttribute('aria-pressed', String(instanceShowPaths));
+$instancePathsBtn?.addEventListener('click', () => setInstanceShowPaths(!instanceShowPaths));
+$instanceTrailsBtn?.setAttribute('aria-pressed', String(instanceShowTrails));
+$instanceTrailsBtn?.addEventListener('click', () => setInstanceShowTrails(!instanceShowTrails));
+$instanceDecisionsBtn?.setAttribute('aria-pressed', String(instanceShowDecisions));
+$instanceDecisionsBtn?.addEventListener('click', () => setInstanceShowDecisions(!instanceShowDecisions));
+$instanceModelsBtn?.setAttribute('aria-pressed', String(instanceShowModels));
+$instanceModelsBtn?.addEventListener('click', () => setInstanceShowModels(!instanceShowModels));
+$instanceNumbersBtn?.setAttribute('aria-pressed', String(instanceShowNumbers));
+$instanceNumbersBtn?.addEventListener('click', () => setInstanceShowNumbers(!instanceShowNumbers));
+// Pointer-down too, as the card redraws every second and a click could
+// straddle a redraw.
+for (const type of ['pointerdown', 'click'] as const) {
+  $instanceBotDecisions?.addEventListener(type, (event) => {
+    const row = (event.target as HTMLElement).closest<HTMLElement>('[data-instance-player]');
+    const name = row?.dataset.instancePlayer;
+    if (name && name !== selectedInstancePlayerName) focusInstancePlayer(name);
+  });
+}
+if (instanceDebug) {
+  setInterval(() => {
+    if (getActiveMainTabId() === 'instances') renderInstanceDebugOverlay(performance.now());
+  }, INSTANCE_DEBUG_INTERVAL_MS);
+}
+if ($instanceLightingMode) {
+  $instanceLightingMode.value = instanceLighting;
+  $instanceLightingMode.addEventListener('change', () => setInstanceLighting($instanceLightingMode.value as SceneLighting));
+}
+if ($instancePlatesMode) {
+  $instancePlatesMode.value = instancePlatesMode;
+  $instancePlatesMode.addEventListener('change', () => setInstancePlatesMode($instancePlatesMode.value as InstancePlatesMode));
+}
+if ($instanceMobsMode) {
+  $instanceMobsMode.value = instanceMobsMode;
+  $instanceMobsMode.addEventListener('change', () => setInstanceMobsMode($instanceMobsMode.value as InstanceMobsMode));
+}
+setInstanceFadeRange(instanceFadeRange, false);
+$instanceFadeRange?.addEventListener('input', () => setInstanceFadeRange(Number($instanceFadeRange.value)));
+setInstanceHorizontalFade(instanceHorizontalFade, false);
+$instanceHorizontalFade?.addEventListener('input', () => setInstanceHorizontalFade(Number($instanceHorizontalFade.value)));
+setInstanceRenderScale(instanceRenderScale, false);
+$instanceRenderScale?.addEventListener('input', () => setInstanceRenderScale(Number($instanceRenderScale.value)));
+setInstanceFades(instanceFades, false);
+$instanceFadesBtn?.addEventListener('click', () => setInstanceFades(!instanceFades));
+setInstanceObjectLights(instanceObjectLights, false);
+$instanceObjectLightsBtn?.addEventListener('click', () => setInstanceObjectLights(!instanceObjectLights));
 $instanceAutoRefresh?.addEventListener('change', () => {
   if ($instanceAutoRefresh.checked) {
     void refreshInstanceWatcher();
@@ -7564,22 +9425,10 @@ function renderSessionReplayCanvas(): void {
     ? getInstanceProjectionViewport(width, height, imageWidth / imageHeight)
     : { x: 0, y: 0, width, height };
   if (image) ctx.drawImage(image, viewport.x, viewport.y, viewport.width, viewport.height);
-  const project = (point: SessionRoutePoint): { x: number; y: number } => {
-    if (metadata?.projection?.type === 'minimapTiles') {
-      const projected = projectMinimapTilePosition({ position_x: point.x, position_y: point.y }, {
-        gridSize: metadata.gridSize ?? 64,
-        worldUnitsPerTile: metadata.worldUnitsPerTile ?? 533.3333333333334,
-        minTileX: metadata.minTileX ?? 0,
-        minTileY: metadata.minTileY ?? 0,
-        maxTileX: metadata.maxTileX ?? metadata.minTileX ?? 0,
-        maxTileY: metadata.maxTileY ?? metadata.minTileY ?? 0,
-      }, viewport.width, viewport.height);
-      return { x: viewport.x + projected.x, y: viewport.y + projected.y };
-    }
-    const projected = projectInstancePosition({ position_x: point.x, position_y: point.y }, bounds,
-      viewport.width, viewport.height);
-    return { x: viewport.x + projected.x, y: viewport.y + projected.y };
-  };
+  const projection = createFlatProjection(metadata?.projection?.type === 'minimapTiles'
+    ? { type: 'minimapTiles', tiles: resolveMinimapTileProjection(metadata) }
+    : { type: 'bounds', bounds }, viewport);
+  const project = (point: SessionRoutePoint) => projection.worldToScreen(point.x, point.y, point.z);
 
   const replayMarkerScale = getCanvasPlayerIconScale();
   const participantColors = new Map(record.participants.map((participant) => [participant.name,

@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' blob:">
+  <title>Spell Preview</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: #0b1220; color: #e2e8f0; display: flex; flex-direction: column; height: 100vh; }
+    form { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; padding: 10px 16px; background: #111827; font-size: 14px; }
+    label { display: flex; gap: 6px; align-items: center; }
+    input[type=number] { width: 80px; background: #0b1220; color: inherit; border: 1px solid #334155; border-radius: 4px; padding: 3px 6px; }
+    button { background: #1e293b; color: inherit; border: 1px solid #334155; border-radius: 4px; padding: 4px 10px; cursor: pointer; }
+    #preview-status { margin-left: auto; color: #94a3b8; font-variant-numeric: tabular-nums; }
+    #preview-canvas { flex: 1; width: 100%; min-height: 0; display: block; }
+  </style>
+</head>
+<body>
+  <form id="preview-form">
+    <label>Spell <input name="spell" type="number" value="116"></label>
+    <label>Missile speed <input name="speed" type="number" value="28" step="any"></label>
+    <label>Cast ms <input name="cast" type="number" value="1500"></label>
+    <label>Channel ms <input name="channel" type="number" value="0"></label>
+    <label>Bolt spell <input name="bolt" type="number" value="0" title="A spell the channel fires each second, such as Arcane Missiles' 7268"></label>
+    <label>Area yd <input name="area" type="number" value="0" step="any" title="The spell's radius, for an area spell"></label>
+    <label>Lasting ms <input name="lasting" type="number" value="0" title="How long a lasting area stays, such as Consecration's"></label>
+    <label><input name="ground" type="checkbox"> On the target's ground</label>
+    <label>Aura ms <input name="aura" type="number" value="0" title="How long the spell's aura stays on its target (the ally, for a heal)"></label>
+    <label>Caster display <input name="caster" type="number" value="0" title="A creature display ID to cast with instead of the gnome, such as 22657 for a proto-drake"></label>
+    <label><input name="heal" type="checkbox"> Heal (target an ally)</label>
+    <label>Speed <input name="rate" type="number" value="1" step="0.05" min="0.05"></label>
+    <label><input name="glows" type="checkbox" checked> Level 1 glows</label>
+    <button type="submit">Play</button>
+    <button type="button" data-preset='{"spell":116,"speed":28,"cast":1500}'>Frostbolt</button>
+    <button type="button" data-preset='{"spell":133,"speed":24,"cast":1500}'>Fireball</button>
+    <button type="button" data-preset='{"spell":686,"speed":20,"cast":1500}'>Shadow Bolt</button>
+    <button type="button" data-preset='{"spell":635,"cast":1500,"heal":true}'>Holy Light</button>
+    <button type="button" data-preset='{"spell":5143,"speed":20,"channel":3000,"bolt":7268}'>Arcane Missiles</button>
+    <button type="button" data-preset='{"spell":10,"channel":8000,"area":8,"ground":true}'>Blizzard</button>
+    <button type="button" data-preset='{"spell":5740,"channel":8000,"area":8,"ground":true}'>Rain of Fire</button>
+    <button type="button" data-preset='{"spell":26573,"area":8,"lasting":8000}'>Consecration</button>
+    <button type="button" data-preset='{"spell":2120,"cast":2000,"area":8,"lasting":8000,"ground":true}'>Flamestrike</button>
+    <button type="button" data-preset='{"spell":43265,"area":10,"lasting":10000,"ground":true}'>Death and Decay</button>
+    <button type="button" data-preset='{"spell":1449,"area":10}'>Arcane Explosion</button>
+    <button type="button" data-preset='{"spell":50653,"cast":2000,"caster":22657}'>Proto-Drake Flame Breath</button>
+    <button type="button" data-preset='{"spell":17,"heal":true,"aura":8000}'>Power Word: Shield</button>
+    <button type="button" data-preset='{"spell":348,"cast":1500,"aura":8000}'>Immolate</button>
+    <button type="button" data-preset='{"spell":853,"aura":4000}'>Hammer of Justice</button>
+    <button type="button" data-preset='{"spell":139,"heal":true,"aura":8000}'>Renew</button>
+    <button type="button" data-preset='{"spell":45438,"heal":true,"aura":6000}'>Ice Block</button>
+    <span id="preview-status"></span>
+  </form>
+  <canvas id="preview-canvas"></canvas>
+  <script src="dist/spell-preview.js"></script>
+</body>
+</html>

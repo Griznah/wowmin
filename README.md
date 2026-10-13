@@ -83,6 +83,34 @@ accessed from a browser.
   floor from WMO/height context and only that floor's markers and trails are
   shown
 
+### 3D Instance Watch (New)
+- An isometric 3D view of every instance, raid, battleground, and arena,
+  built from the WoW 3.3.5a client: buildings, props, terrain with its
+  texture layers, and water, lava, and slime; the flat map stays one click
+  away (**3D** button) and is used wherever a scene isn't available
+- Players and mobs drawn with their own game models (race, gear, druid forms,
+  pets, mounts, vehicles and their passengers), animated walking, running,
+  fighting, casting, sitting (to eat or drink), and dying, with floor rings
+  showing side, combat, selection, and health
+- Live from the companion module's UDP position stream (10 updates a second):
+  smooth movement, mobs, bot paths and decisions (with `mod-playerbots`),
+  battleground banners, flags, and doors, raid markers, and debuffs
+- The client's own spell art for casts, missiles, impacts, channels, ground
+  effects, auras, and chains (Chain Heal), with wand bolts in the wand's
+  school and models coloured and made see-through as the client does it
+  (Frostbolt's slow, Ice Block, Shadowform), plus floating combat numbers
+- TidyPlates-style nameplates (Neon, Grey, or Quatre) with health, power, cast
+  bars with spell names and icons, debuffs, threat, and battleground crests
+- A party fade that keeps the floors and rooms around the party solid and
+  fades the rest, by height and by distance, so multi-level dungeons stay
+  readable; turned off, the whole map is shown, as suits battlegrounds
+- Rotate (Q/E, or middle-drag to rotate and tilt freely), zoom about the
+  pointer, and Follow a participant
+- Built for battleground scale: in testing on a GeForce RTX 2060 SUPER, about
+  25 fps with 80 players and 200 mobs and 20 to 25 fps for a busy Arathi Basin
+  at 1600x1400; `?debug` on the page URL shows frame rate, draw calls, and
+  stream rates
+
 ### Dungeon Clear
 - Dedicated **Dungeon Clear** tab embeds the existing DC Test Deck from
   `mod-dungeon-clear`
@@ -126,6 +154,11 @@ accessed from a browser.
   optional, compile-time extension) and shares a single 1 s poll across the
   Live Map, Instance Watch, and session recorder, configurable via
   `WOWMIN_TELEMETRY_POLL_MS` (default 1000, minimum 500)
+- For the 3D Instance Watch it also streams the watched instance over UDP at
+  10 Hz (positions, mobs, paths, appearances, combat events, auras, game
+  objects, markers). The stream runs only while a page is watching: WoWMin
+  renews it every few seconds with the `wowmin stream <mapId> <instanceId>`
+  SOAP command, and the module stops sending when renewals stop
 
 ### Economy Monitor
 - Dedicated **Economy** tab for monitoring the live in-game auction house and character wealth
@@ -197,9 +230,25 @@ wowmin telemetry [mapId] [instanceId]
 ```
 There is no need to actually issue that command, WoWmin handles using it on it's own. 
 
-No worldserver configuration changes are required. Without the module, the
-Live Map falls back to saved database positions (stale between character
-saves) and the Instance Watch / Session History tabs have no live data.
+No worldserver configuration changes are required for the 1 s telemetry.
+Without the module, the Live Map falls back to saved database positions
+(stale between character saves) and the Instance Watch / Session History tabs
+have no live data.
+
+The 3D Instance Watch's live stream is off by default. Enable it in the
+module's `mod-wowmin-telemetry.conf`, pointing it at the machine WoWMin runs
+on:
+
+```ini
+WowMinTelemetry.Stream.Enable = 1
+# Where WoWMin listens (WOWMIN_STREAM_HOST / WOWMIN_STREAM_PORT); an IP address
+WowMinTelemetry.Stream.Host = "127.0.0.1"
+WowMinTelemetry.Stream.Port = 7979
+```
+
+With a module that has no stream (or with it disabled), Instance Watch keeps
+working on the 1 s telemetry: the flat map, or the 3D scene with markers in
+place of models, and no mobs, paths, spell art, or combat numbers.
 
 ### Enable SOAP on your worldserver
 
@@ -263,6 +312,18 @@ export WOWMIN_DATA_DIR="$PWD/.wowmin-data"
 npm start
 ```
 
+Instead of exporting them, you can put these settings in a file (one
+`NAME=value` per line). The web service reads them at startup, in this order of
+precedence:
+
+1. variables already set in the environment (an export, or a systemd unit's
+   `EnvironmentFile`);
+2. the system file: `/etc/wowmin.env`, or `%ProgramData%\wowmin\wowmin.env` on
+   Windows;
+3. `.env` in the project root (kept out of git), as the fallback.
+
+Keep these files private (`chmod 600`), as they hold passwords.
+
 Open `http://server-address:3000/` and sign in with the configured HTTP
 credentials. The browser UI provides SOAP, database, map, economy, inventory,
 profile, and remote-log APIs. Because those APIs include raw
@@ -317,6 +378,22 @@ WOWMIN_TELEMETRY_POLL_MS=1000
 WOWMIN_SESSION_ROUTE_INTERVAL_MS=5000
 # How long a vanished session must stay absent before it is finalized (ms)
 WOWMIN_SESSION_COMPLETION_GRACE_MS=15000
+```
+
+The 3D Instance Watch reads the module's live stream on a UDP port, and draws
+players, mobs, spell art, and icons from a WoW 3.3.5a client's `Data` folder.
+Each model, spell's art, and icon is built from the client files the first
+time it is seen (in a worker process) and cached under `assets/models/` (not
+in git; a cache version bump rebuilds them). Without the client folder the
+3D scene still draws, with markers in place of models. The scenes themselves
+are generated once with the extractor (see [Generating 3D scenes](#generating-3d-instance-scenes)).
+
+```ini
+# Where the module's stream arrives (match WowMinTelemetry.Stream.Host/Port)
+WOWMIN_STREAM_HOST=127.0.0.1
+WOWMIN_STREAM_PORT=7979
+# A WoW 3.3.5a client's Data folder, for unit models, spell art, and icons
+WOWMIN_CLIENT_DATA=/path/to/WoW/Data
 ```
 
 Completed session records use readable names such as `WSG-3-Oct08-26.json` and are kept indefinitely
@@ -471,6 +548,10 @@ when Test Deck is not available from the browser at the default
 4. **Click a participant marker or sidebar row** to focus the view on them; **Fit** restores a view that fits everyone, **−**/**+** zoom around the cursor, and **Clear focus** releases the focused participant.
 5. Battlegrounds additionally show the match phase, team scores, alive counts, decoded objectives, resurrection state, and the server-selected bot strategy (read-only).
 6. The encounter card lists boss states and the session death history; the participant list shows faction, group/subgroup, LFG role, health and power, and target.
+7. Where a 3D scene has been generated, the map opens in 3D (the **3D** button switches back to the flat map). **Q**/**E** rotate by a quarter turn; middle-drag or Shift+drag rotates and tilts freely; the compass under the buttons shows where north is; the scroll wheel zooms about the pointer.
+8. **Fade** keeps the area around the party solid and fades the rest; **Height fade** and **Horizontal fade** set how far. Turn **Fade** off to see a whole battleground. **Render scale** lowers the 3D resolution on slow GPUs.
+9. **Mobs** (Near party, All, Off), **Plates** (Neon, Grey, Quatre, or plain Labels), and the **Follow**, **Trails**, **Paths**, **Decisions**, **Models**, and **Numbers** toggles choose what is drawn; each remembers its setting per browser.
+10. Add `?debug` to the page URL for a frame-rate, draw-call, and stream-rate overlay, and open `/spell-preview` to play any spell's client art on test models.
 
 ### Dungeon Clear
 1. Add WoWMin's exact origin to Test Deck's
@@ -605,6 +686,36 @@ npm run extract:maps -- --source "/path/to/WoW" --map 489
 
 # Every instance, raid, battleground, and arena (recommended once)
 npm run extract:maps -- --source "/path/to/WoW" --all-instances
+```
+
+### Generating 3D instance scenes
+
+The 3D Instance Watch draws each map from a scene (`assets/instances/<mapId>.glb`
+plus its manifest `<mapId>.scene.json`, not in git) exported from the client by
+a separate command. It does not need the flat artwork above, and the flat
+artwork does not need it: either can be re-run on its own.
+
+```bash
+# One map
+npm run extract:scenes -- --source "/path/to/WoW" --map 529
+
+# Every instance, raid, battleground, and arena (about 1.5 GB, 15 to 20 minutes)
+npm run extract:scenes -- --source "/path/to/WoW" --all-instances
+```
+
+A scene holds the map's buildings and their props, the props placed on the
+map, and the terrain and liquids of the area players use (each dungeon floor,
+or the world map's bounds), with props sharing a model drawn instanced. Every
+map with client map files gets a scene, with or without flat artwork. Re-run
+the export after upgrading WoWMin if the release notes say the scene format
+changed; maps without a scene use the flat map.
+
+To check that a change to one export leaves the other alone, export into a
+fresh folder and compare it with the previous one; 2D and 3D differences are
+reported separately:
+
+```bash
+npm run check:exports -- ./assets/instances ./instances-new
 ```
 
 #### Classic/TBC dungeon artwork with WDM patches

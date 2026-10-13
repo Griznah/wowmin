@@ -57,17 +57,10 @@ test('rejects spaced npm shorthand before positional values are misread', async 
   );
 });
 
-test('resolves client artwork aliases missing from WorldMapArea', async () => {
-  const { getClientMapDirectoryAliases } = await extractor;
-  assert.deepEqual(getClientMapDirectoryAliases(389), ['Ragefire']);
-  assert.deepEqual(getClientMapDirectoryAliases(33), []);
-});
-
-test('lettered locale patches override numbered patches in order', async () => {
-  const { archivePriority } = await extractor;
-  const names = ['patch-enUS-N.MPQ', 'patch-3.MPQ', 'locale-enUS.MPQ', 'patch-enUS-M.MPQ'];
-  assert.deepEqual(names.sort((a, b) => archivePriority(a) - archivePriority(b)),
-    ['locale-enUS.MPQ', 'patch-3.MPQ', 'patch-enUS-M.MPQ', 'patch-enUS-N.MPQ']);
+test('points npm config scene options at the scene command', async () => {
+  const { parseArgs } = await extractor;
+  assert.throws(() => withNpmConfig({ source: '/tmp/wow-client', all_instances: 'true', scenes: 'true' }, () => parseArgs([])),
+    /extract:scenes/);
 });
 
 test('cleans audited map-530 padding without removing real edge water', async () => {
@@ -104,27 +97,4 @@ test('cleans audited opaque grey padding before JPEG encoding', async () => {
   };
   assert.equal(cleanMap530Placeholder(image, 530), 1);
   assert.deepEqual([...image.data], [0, 0, 0, 255]);
-});
-
-test('WorldMapArea resolves patched artwork directory without sub-area bounds replacement', async () => {
-  const { parseWorldMapAreaDbc } = await extractor;
-  const strings = Buffer.from('\0ShadowfangKeep\0OtherFloor\0');
-  const buffer = Buffer.alloc(20 + 2 * 44 + strings.length);
-  buffer.write('WDBC');
-  buffer.writeUInt32LE(2, 4);
-  buffer.writeUInt32LE(11, 8);
-  buffer.writeUInt32LE(44, 12);
-  buffer.writeUInt32LE(strings.length, 16);
-  strings.copy(buffer, 108);
-  for (let index = 0; index < 2; index += 1) {
-    const offset = 20 + index * 44;
-    buffer.writeUInt32LE(33, offset + 4);
-    buffer.writeUInt32LE(209, offset + 8);
-    buffer.writeUInt32LE(index === 0 ? 1 : 16, offset + 12);
-    [400, 100, 300, 50].forEach((value, component) =>
-      buffer.writeFloatLE(value + index * 1000, offset + 16 + component * 4));
-  }
-  const area = parseWorldMapAreaDbc(buffer).get(33);
-  assert.deepEqual(area.directories, ['ShadowfangKeep', 'OtherFloor']);
-  assert.deepEqual(area.bounds, { minX: 50, maxX: 300, minY: 100, maxY: 400 });
 });

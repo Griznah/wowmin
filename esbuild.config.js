@@ -43,12 +43,20 @@ const rendererConfig = {
   format: 'iife',
 };
 
+// Spell preview dev tool (/spell-preview).
+const spellPreviewConfig = {
+  ...rendererConfig,
+  entryPoints: [path.join(__dirname, 'renderer/scripts/spell-preview.ts')],
+  outfile: 'dist/spell-preview.js',
+};
+
 async function build() {
   try {
     await Promise.all([
       esbuild.build(webServerConfig),
       esbuild.build(webApiConfig),
       esbuild.build(rendererConfig),
+      esbuild.build(spellPreviewConfig),
     ]);
     console.log('Build completed successfully');
   } catch (error) {
@@ -62,6 +70,7 @@ async function watch() {
     esbuild.context(webServerConfig),
     esbuild.context(webApiConfig),
     esbuild.context(rendererConfig),
+    esbuild.context(spellPreviewConfig),
   ]);
 
   await Promise.all(contexts.map(ctx => ctx.watch()));

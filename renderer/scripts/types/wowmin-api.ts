@@ -17,6 +17,7 @@ import type {
   MapBotWaypoint,
   MapBotWaypointRequest,
   MapOnlineCounts,
+  CreatureInfo,
   MapPlayerSnapshot,
   OnlinePlayerRow,
   QueryResult,
@@ -24,6 +25,7 @@ import type {
   SessionRecord,
   SoapConfig,
   SoapResult,
+  StreamListeners,
 } from '../../../src/types/api';
 
 export interface BootstrapConfig {
@@ -68,8 +70,12 @@ export interface WowminAPI {
     connect(config: DbConfig): Promise<DbConnectionState>;
     disconnect(): Promise<void>;
     getPlayerPositions(mapId?: number, instanceId?: number): Promise<MapPlayerSnapshot>;
+    // The live position stream (mod-wowmin-telemetry) for one instance;
+    // returns a function that closes it.
+    streamPositions(mapId: number, instanceId: number, listeners: StreamListeners): () => void;
     getOnlineCounts(): Promise<MapOnlineCounts>;
     getBotWaypoint(request: MapBotWaypointRequest): Promise<MapBotWaypoint | null>;
+    getCreatureInfo(entries: number[]): Promise<CreatureInfo[]>;
   };
   sessions: {
     list(): Promise<SessionIndexEntry[]>;

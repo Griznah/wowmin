@@ -36,9 +36,11 @@ export function buildContentSecurityPolicy(dungeonClearUrl: string): string {
     "default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src 'self' https://fonts.gstatic.com",
-    "script-src 'self'",
-    "img-src 'self' https: data:",
-    "connect-src 'self'",
+    // The 3D view decodes meshopt-compressed models with WebAssembly, and
+    // GLTFLoader reads embedded images through blob URLs.
+    "script-src 'self' 'wasm-unsafe-eval'",
+    "img-src 'self' https: data: blob:",
+    "connect-src 'self' blob:",
     `frame-src ${frameOrigin}`,
     "object-src 'none'",
     "base-uri 'self'",
