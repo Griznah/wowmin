@@ -170,8 +170,9 @@ function resolveStaticFile(urlPath: string): string | null {
 }
 
 const assetsRoot = path.join(projectRoot, 'assets');
+const modelCacheRoot = path.resolve(process.env.WOWMIN_MODEL_CACHE_DIR || path.join(assetsRoot, 'models'));
 const unitModels = new UnitModels(
-  path.join(assetsRoot, 'models'),
+  modelCacheRoot,
   path.join(projectRoot, 'scripts', 'scene', 'unit-model-worker.mjs'),
 );
 
@@ -183,7 +184,8 @@ function serveFile(request: IncomingMessage, response: ServerResponse, filePath:
     }
     // Extracted map assets (scenes run to megabytes) may be cached, but are
     // revalidated on every use so a re-extraction shows up immediately.
-    if (filePath.startsWith(`${assetsRoot}${path.sep}`)) {
+    if (filePath.startsWith(`${assetsRoot}${path.sep}`)
+      || filePath.startsWith(`${modelCacheRoot}${path.sep}`)) {
       const etag = `W/"${stats.size.toString(36)}-${Math.floor(stats.mtimeMs).toString(36)}"`;
       response.setHeader('Cache-Control', 'no-cache');
       response.setHeader('ETag', etag);

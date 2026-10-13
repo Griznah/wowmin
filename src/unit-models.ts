@@ -4,8 +4,9 @@ import * as path from 'path';
 
 // Builds unit models (creatures, and characters with their gear), spell
 // effect models, and spell art lookups on demand from the WoW client's Data
-// directory, in a child process, and caches them under assets/models/. Needs
-// WOWMIN_CLIENT_DATA; without it only what is already cached is served.
+// directory, in a child process, and caches them under the configured model
+// cache directory. Needs WOWMIN_CLIENT_DATA; without it only what is already
+// cached is served.
 
 const BUILD_TIMEOUT_MS = 60000;
 // Bumped when the converter's output changes, so models are rebuilt: built
