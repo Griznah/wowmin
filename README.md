@@ -335,7 +335,9 @@ A hardened systemd unit template is provided at `deploy/wowmin.service.example` 
 `/etc/systemd/system/wowmin.service`, adjust the install path, and
 `systemctl daemon-reload`). It
 expects `/etc/wowmin.env` to define the variables above and stores profiles in
-`/var/lib/wowmin` when `WOWMIN_DATA_DIR=/var/lib/wowmin` is set. Start from
+`/var/lib/wowmin` when `WOWMIN_DATA_DIR=/var/lib/wowmin` is set. Set
+`WOWMIN_MODEL_CACHE_DIR=/var/lib/wowmin/models` so generated client assets use
+the service's writable state directory. Start from
 [`deploy/wowmin.env.example`](deploy/wowmin.env.example).
 
 For server-managed connections, set all three of `WOWMIN_SOAP_USERNAME`,
@@ -383,10 +385,12 @@ WOWMIN_SESSION_COMPLETION_GRACE_MS=15000
 The 3D Instance Watch reads the module's live stream on a UDP port, and draws
 players, mobs, spell art, and icons from a WoW 3.3.5a client's `Data` folder.
 Each model, spell's art, and icon is built from the client files the first
-time it is seen (in a worker process) and cached under `assets/models/` (not
-in git; a cache version bump rebuilds them). Without the client folder the
-3D scene still draws, with markers in place of models. The scenes themselves
-are generated once with the extractor (see [Generating 3D scenes](#generating-3d-instance-scenes)).
+time it is seen (in a worker process) and cached under
+`WOWMIN_MODEL_CACHE_DIR`. When that variable is unset, the cache remains under
+`assets/models/` (not in git). A cache version bump rebuilds the files. Without
+the client folder the 3D scene still draws, with markers in place of models.
+The scenes themselves are generated once with the extractor (see
+[Generating 3D scenes](#generating-3d-instance-scenes)).
 
 ```ini
 # Where the module's stream arrives (match WowMinTelemetry.Stream.Host/Port)
@@ -394,6 +398,8 @@ WOWMIN_STREAM_HOST=127.0.0.1
 WOWMIN_STREAM_PORT=7979
 # A WoW 3.3.5a client's Data folder, for unit models, spell art, and icons
 WOWMIN_CLIENT_DATA=/path/to/WoW/Data
+# Optional cache location; recommended for the hardened systemd service
+WOWMIN_MODEL_CACHE_DIR=/var/lib/wowmin/models
 ```
 
 Completed session records use readable names such as `WSG-3-Oct08-26.json` and are kept indefinitely
