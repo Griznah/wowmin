@@ -28,10 +28,12 @@ const { settingsFiles, loadSettingsFiles } = loadModule();
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
 test('loads the system settings file before the project .env', () => {
-  assert.deepEqual(plain(settingsFiles('linux', {}, '/srv/wowmin')), ['/etc/wowmin.env', '/srv/wowmin/.env']);
-  assert.deepEqual(plain(settingsFiles('win32', { ProgramData: 'C:\\ProgramData' }, '/srv/wowmin')),
-    ['C:\\ProgramData\\wowmin\\wowmin.env', '/srv/wowmin/.env']);
-  assert.deepEqual(plain(settingsFiles('win32', {}, '/srv/wowmin')), ['/srv/wowmin/.env'], 'no ProgramData, no system file');
+  const projectRoot = path.join(path.sep, 'srv', 'wowmin');
+  const projectEnv = path.join(projectRoot, '.env');
+  assert.deepEqual(plain(settingsFiles('linux', {}, projectRoot)), ['/etc/wowmin.env', projectEnv]);
+  assert.deepEqual(plain(settingsFiles('win32', { ProgramData: 'C:\\ProgramData' }, projectRoot)),
+    ['C:\\ProgramData\\wowmin\\wowmin.env', projectEnv]);
+  assert.deepEqual(plain(settingsFiles('win32', {}, projectRoot)), [projectEnv], 'no ProgramData, no system file');
 });
 
 test('the environment wins over the system file, and the system file over .env', () => {
