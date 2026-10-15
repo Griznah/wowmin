@@ -1,6 +1,6 @@
 import * as mysql from 'mysql2/promise';
 import type { ExecuteValues } from 'mysql2';
-import { DbConfig, QueryResult, FieldInfo } from '../types/electron';
+import { DbConfig, QueryResult, FieldInfo } from '../types/api';
 
 /**
  * Database Service for MySQL connections to AzerothCore databases
@@ -77,6 +77,21 @@ export class DatabaseService {
       this.pool = null;
       this._connected = false;
       this._config = null;
+    }
+  }
+
+  async checkConnection(): Promise<boolean> {
+    if (!this.pool || !this._connected) return false;
+    let connection: mysql.PoolConnection | null = null;
+    try {
+      connection = await this.pool.getConnection();
+      await connection.ping();
+      connection.release();
+      return true;
+    } catch {
+      connection?.release();
+      await this.disconnect().catch(() => undefined);
+      return false;
     }
   }
 

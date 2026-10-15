@@ -8,7 +8,6 @@ Type=simple
 WorkingDirectory=/Source/wowmin
 EnvironmentFile=/etc/wowmin.env
 Environment=NODE_ENV=production
-Environment=WOWMIN_WEB_MODE=1
 ExecStart=/usr/bin/node /Source/wowmin/dist/web-server.js
 Restart=on-failure
 RestartSec=3

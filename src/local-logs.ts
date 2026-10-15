@@ -1,6 +1,6 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import type { LogMonitorInspectionResult, LogMonitorFileTailResult, LogMonitorAppenderInfo, LogMonitorLoggerInfo, LogMonitorFileInfo } from './types/electron';
+import type { LogMonitorInspectionResult, LogMonitorFileTailResult, LogMonitorAppenderInfo, LogMonitorLoggerInfo, LogMonitorFileInfo } from './types/api';
 
 const configPath = process.env.WOWMIN_WORLD_CONFIG || '/stuff/Source/azerothcore-wotlk/env/dist/etc/worldserver.conf';
 const logsDirectory = process.env.WOWMIN_LOG_DIR || '/stuff/Source/azerothcore-wotlk/env/dist/bin';

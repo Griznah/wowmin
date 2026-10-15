@@ -1,5 +1,5 @@
 import type { PlayerInfo } from '../types/state';
-import type { OnlinePlayerRow } from '../../../src/types/electron';
+import type { OnlinePlayerRow } from '../../../src/types/api';
 import { getMapName, getZoneName, RACE_NAMES, CLASS_NAMES } from './helpers';
 
 function toPlayer(row: OnlinePlayerRow): PlayerInfo {

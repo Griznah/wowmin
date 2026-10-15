@@ -1,6 +1,6 @@
 import * as http from 'http';
 import { parseStringPromise } from 'xml2js';
-import { SoapConfig, SoapResult } from './types/electron';
+import { SoapConfig, SoapResult } from './types/api';
 
 interface SoapDocument {
   'SOAP-ENV:Envelope'?: SoapEnvelope;

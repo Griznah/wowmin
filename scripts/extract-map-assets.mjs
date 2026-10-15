@@ -3,7 +3,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -12,31 +11,9 @@ import jpeg from 'jpeg-js';
 import BLPFile from 'js-blp';
 import { PNG } from 'pngjs';
 
-const require = createRequire(import.meta.url);
-const { MpqArchive } = require('stormlib-js');
-
-const CONTINENTS = [
-  {
-    mapId: 0,
-    label: 'Eastern Kingdoms',
-    candidates: ['Azeroth', 'EasternKingdoms'],
-  },
-  {
-    mapId: 1,
-    label: 'Kalimdor',
-    candidates: ['Kalimdor'],
-  },
-  {
-    mapId: 530,
-    label: 'Outland',
-    candidates: ['Expansion01', 'Outland'],
-  },
-  {
-    mapId: 571,
-    label: 'Northrend',
-    candidates: ['Northrend'],
-  },
-];
+import { archiveReader, extractMpqFile, findMpqArchives, locateDataDir, openArchives, walkFiles } from './client-archives.mjs';
+import { CONTINENTS, describeMaps, readMapTables, resolveMapTargets } from './map-catalog.mjs';
+import { assertNpmValueOptionsHaveValues, readNpmConfigBoolean, readNpmConfigValue } from './npm-config.mjs';
 
 // Audited common.MPQ map-530 edge textures. Both js-blp and Pillow show
 // these opaque white/grey placeholders in the original BLP pixels. Gate by
@@ -78,21 +55,7 @@ const DEFAULTS = {
   keepWorkspace: false,
 };
 
-function readNpmConfigValue(name) {
-  const value = process.env[`npm_config_${name}`];
-  if (value === undefined || value === '' || value === 'true') {
-    return undefined;
-  }
-  return value;
-}
-
-function readNpmConfigBoolean(name) {
-  const value = readNpmConfigValue(name);
-  if (value === undefined) {
-    return undefined;
-  }
-  return !['false', '0', 'no', 'off'].includes(value.toLowerCase());
-}
+const NPM_VALUE_OPTIONS = ['source', 'output', 'map', 'map_dir', 'workspace', 'quality'];
 
 function printUsage() {
   console.log(`WoW Admin map extractor
@@ -100,7 +63,7 @@ function printUsage() {
 Usage:
   npm run extract:maps -- --source /path/to/WoW
   npm run extract:maps -- --source /path/to/World/Minimaps
-  npm run extract:maps --source /path/to/WoW
+  npm run extract:maps --source=/path/to/WoW --all-instances
 
 Options:
   --source, -s        WoW client root, Data dir, or extracted World/Minimaps dir
@@ -115,7 +78,8 @@ Options:
 
 Notes:
   - A plain positional path is also accepted as the source for npm convenience.
-  - npm config-style flags also work, e.g. npm run extract:maps --source /path --output ./maps.
+  - Without the standalone -- separator, value options must use equals syntax, e.g.
+    npm run extract:maps --source=/path --output=./maps.
   - If --source already contains World/Minimaps, the script stitches tiles directly.
   - With --map or --all-instances, targets are resolved from DBFilesClient/Map.dbc.
     For an already-extracted minimap tree, also pass --map-dir when Map.dbc is unavailable.
@@ -124,7 +88,12 @@ Notes:
 `);
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
+  assertNpmValueOptionsHaveValues(NPM_VALUE_OPTIONS);
+  // 3D scenes have their own command now.
+  if (readNpmConfigBoolean('scenes') || readNpmConfigValue('scene_texture_max')) {
+    throw new Error('3D scenes are no longer made by extract:maps; run npm run extract:scenes.');
+  }
   const npmOutput = readNpmConfigValue('output');
   const npmMaps = readNpmConfigValue('map');
   const options = {
@@ -241,26 +210,6 @@ function pathExists(targetPath) {
   }
 }
 
-function walkFiles(rootDir) {
-  const files = [];
-  const stack = [rootDir];
-
-  while (stack.length > 0) {
-    const current = stack.pop();
-    const entries = fs.readdirSync(current, { withFileTypes: true });
-    for (const entry of entries) {
-      const fullPath = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(fullPath);
-      } else if (entry.isFile()) {
-        files.push(fullPath);
-      }
-    }
-  }
-
-  return files;
-}
-
 function locateMinimapRoot(sourcePath) {
   const directCandidates = [
     sourcePath,
@@ -292,25 +241,6 @@ function locateMinimapRoot(sourcePath) {
   return null;
 }
 
-function locateDataDir(sourcePath) {
-  const candidates = [
-    sourcePath,
-    path.join(sourcePath, 'Data'),
-    path.join(sourcePath, 'data'),
-  ];
-
-  for (const candidate of candidates) {
-    if (path.basename(candidate).toLowerCase() !== 'data') {
-      continue;
-    }
-    if (pathExists(candidate) && fs.statSync(candidate).isDirectory()) {
-      return candidate;
-    }
-  }
-
-  return null;
-}
-
 function findExtractionTool() {
   const candidates = ['7zz', '7z', 'bsdtar'];
   for (const candidate of candidates) {
@@ -330,191 +260,6 @@ function canListMpqArchive(tool, archivePath) {
 
   const result = spawnSync(tool, ['l', archivePath], { encoding: 'utf8' });
   return !result.error && result.status === 0;
-}
-
-export function archivePriority(filePath) {
-  const name = path.basename(filePath).toLowerCase();
-  if (/^common-2.*\.mpq$/.test(name)) return 15;
-  if (/^common.*\.mpq$/.test(name)) return 10;
-  if (/^expansion.*\.mpq$/.test(name)) return 20;
-  if (/^lichking.*\.mpq$/.test(name)) return 25;
-  if (/^locale-.*\.mpq$/.test(name)) return 30;
-  const patch = name.match(/^patch(?:-[a-z]{4})?(?:-([0-9]+|[a-z]))?\.mpq$/);
-  if (patch) {
-    const suffix = patch[1] ?? '0';
-    // Custom lettered patches must override base/numbered patches, with N
-    // taking precedence over M. Previously they fell into the generic bucket.
-    return 50 + (/^\d+$/.test(suffix) ? Number(suffix) : 100 + suffix.charCodeAt(0) - 97);
-  }
-  return 40;
-}
-
-function readDbcString(buffer, stringBlockOffset, stringOffset) {
-  if (stringOffset === 0) return '';
-  const start = stringBlockOffset + stringOffset;
-  let end = start;
-  while (end < buffer.length && buffer[end] !== 0) end += 1;
-  return buffer.toString('utf8', start, end);
-}
-
-function parseMapDbc(buffer, requestedMapIds, allInstances = false) {
-  if (buffer.subarray(0, 4).toString('ascii') !== 'WDBC') {
-    throw new Error('DBFilesClient/Map.dbc has an unsupported header.');
-  }
-  const recordCount = buffer.readUInt32LE(4);
-  const fieldCount = buffer.readUInt32LE(8);
-  const recordSize = buffer.readUInt32LE(12);
-  if (fieldCount < 6 || recordSize < 24) {
-    throw new Error(`DBFilesClient/Map.dbc has an unexpected layout (${fieldCount} fields, ${recordSize}-byte records).`);
-  }
-  const stringBlockOffset = 20 + recordCount * recordSize;
-  const requested = new Set(requestedMapIds);
-  const entries = [];
-  const mapTypeLabels = ['world', 'instance', 'raid', 'battleground', 'arena'];
-  for (let index = 0; index < recordCount; index += 1) {
-    const offset = 20 + index * recordSize;
-    const mapId = buffer.readUInt32LE(offset);
-    const mapType = buffer.readUInt32LE(offset + 8);
-    if (!(allInstances ? mapType >= 1 && mapType <= 4 : requested.has(mapId))) continue;
-    const internalName = readDbcString(buffer, stringBlockOffset, buffer.readUInt32LE(offset + 4));
-    const displayName = readDbcString(buffer, stringBlockOffset, buffer.readUInt32LE(offset + 20));
-    entries.push({
-      mapId,
-      mapType,
-      mapTypeLabel: mapTypeLabels[mapType] ?? `type-${mapType}`,
-      label: displayName || internalName || `Map ${mapId}`,
-      candidates: [internalName],
-    });
-  }
-  return entries;
-}
-
-export function parseWorldMapAreaDbc(buffer) {
-  if (buffer.subarray(0, 4).toString('ascii') !== 'WDBC') return new Map();
-  const recordCount = buffer.readUInt32LE(4);
-  const fieldCount = buffer.readUInt32LE(8);
-  const recordSize = buffer.readUInt32LE(12);
-  if (fieldCount < 8 || recordSize < 32) return new Map();
-
-  const boundsByMap = new Map();
-  const stringBlockOffset = 20 + recordCount * recordSize;
-  for (let index = 0; index < recordCount; index += 1) {
-    const offset = 20 + index * recordSize;
-    const mapId = buffer.readUInt32LE(offset + 4);
-    const y1 = buffer.readFloatLE(offset + 16);
-    const y2 = buffer.readFloatLE(offset + 20);
-    const x1 = buffer.readFloatLE(offset + 24);
-    const x2 = buffer.readFloatLE(offset + 28);
-    if (![x1, x2, y1, y2].every(Number.isFinite) || x1 === x2 || y1 === y2) continue;
-    const directory = readDbcString(buffer, stringBlockOffset, buffer.readUInt32LE(offset + 12));
-    const existing = boundsByMap.get(mapId);
-    // Preserve all directory aliases without letting a sub-area overwrite the
-    // full-map projection (N adds many microdungeon WorldMapArea entries).
-    const aliases = [...new Set([...(existing?.directories ?? []), directory].filter(Boolean))];
-    if (existing && buffer.readUInt32LE(offset + 8) !== 0) {
-      existing.directories = aliases;
-      continue;
-    }
-    boundsByMap.set(mapId, {
-      bounds: {
-        minX: Math.min(x1, x2),
-        maxX: Math.max(x1, x2),
-        minY: Math.min(y1, y2),
-        maxY: Math.max(y1, y2),
-      },
-      directories: aliases,
-    });
-  }
-  return boundsByMap;
-}
-
-function parseDungeonMapDbc(buffer) {
-  if (buffer.subarray(0, 4).toString('ascii') !== 'WDBC') return new Map();
-  const recordCount = buffer.readUInt32LE(4);
-  const fieldCount = buffer.readUInt32LE(8);
-  const recordSize = buffer.readUInt32LE(12);
-  if (fieldCount !== 8 || recordSize !== 32) return new Map();
-
-  const floorsByMap = new Map();
-  for (let index = 0; index < recordCount; index += 1) {
-    const offset = 20 + index * recordSize;
-    const id = buffer.readUInt32LE(offset);
-    const mapId = buffer.readUInt32LE(offset + 4);
-    const floorIndex = buffer.readUInt32LE(offset + 8);
-    const clientMinX = buffer.readFloatLE(offset + 12);
-    const clientMaxX = buffer.readFloatLE(offset + 16);
-    const clientMinY = buffer.readFloatLE(offset + 20);
-    const clientMaxY = buffer.readFloatLE(offset + 24);
-    if (![clientMinX, clientMaxX, clientMinY, clientMaxY].every(Number.isFinite)) continue;
-    if (!floorsByMap.has(mapId)) floorsByMap.set(mapId, []);
-    floorsByMap.get(mapId).push({
-      id,
-      floorIndex,
-      bounds: {
-        minX: Math.min(clientMinY, clientMaxY),
-        maxX: Math.max(clientMinY, clientMaxY),
-        minY: Math.min(clientMinX, clientMaxX),
-        maxY: Math.max(clientMinX, clientMaxX),
-      },
-      chunks: [],
-    });
-  }
-  for (const floors of floorsByMap.values()) floors.sort((left, right) => left.floorIndex - right.floorIndex);
-  return floorsByMap;
-}
-
-function parseDungeonMapChunkDbc(buffer, floorsByMap) {
-  if (buffer.subarray(0, 4).toString('ascii') !== 'WDBC') return;
-  const recordCount = buffer.readUInt32LE(4);
-  const fieldCount = buffer.readUInt32LE(8);
-  const recordSize = buffer.readUInt32LE(12);
-  if (fieldCount !== 5 || recordSize !== 20) return;
-
-  const floorsById = new Map();
-  for (const floors of floorsByMap.values()) {
-    for (const floor of floors) floorsById.set(floor.id, floor);
-  }
-  for (let index = 0; index < recordCount; index += 1) {
-    const offset = 20 + index * recordSize;
-    const mapId = buffer.readUInt32LE(offset + 4);
-    const wmoGroupId = buffer.readUInt32LE(offset + 8);
-    const dungeonMapId = buffer.readUInt32LE(offset + 12);
-    const minZ = buffer.readFloatLE(offset + 16);
-    const floor = floorsById.get(dungeonMapId);
-    if (!floor || !floorsByMap.has(mapId) || !Number.isFinite(minZ)) continue;
-    floor.chunks.push({ wmoGroupId, minZ });
-  }
-  for (const floors of floorsByMap.values()) {
-    for (const floor of floors) floor.chunks.sort((left, right) => left.minZ - right.minZ);
-  }
-}
-
-function findMpqArchives(dataDir) {
-  const archives = [];
-  const entries = walkFiles(dataDir);
-  for (const entry of entries) {
-    if (/\.mpq$/i.test(entry)) {
-      archives.push(entry);
-    }
-  }
-
-  archives.sort((a, b) => {
-    const priorityDiff = archivePriority(a) - archivePriority(b);
-    return priorityDiff !== 0 ? priorityDiff : a.localeCompare(b);
-  });
-
-  return archives;
-}
-
-function extractMpqFile(archive, fileNames) {
-  for (const fileName of fileNames) {
-    try {
-      return archive.extractFile(fileName);
-    } catch {
-      // keep trying alternate path forms
-    }
-  }
-  return null;
 }
 
 function parseMd5TranslateTable(buffer) {
@@ -672,105 +417,29 @@ function tryExtractMinimapsWithStormlib(
 ) {
   if (archives.length === 0) return null;
 
-  const openedArchives = [];
+  const openedArchives = openArchives(archives, (archivePath, message) =>
+    console.warn(`  ! Skipping ${path.basename(archivePath)} for built-in MPQ extraction: ${message}`));
   try {
-    for (const archivePath of archives) {
-      try {
-        openedArchives.push({
-          archivePath,
-          archive: MpqArchive.open(archivePath),
-        });
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        console.warn(`  ! Skipping ${path.basename(archivePath)} for built-in MPQ extraction: ${errorMessage}`);
-      }
-    }
-
     if (openedArchives.length === 0) {
       return null;
     }
 
-    let trsBuffer = null;
-    let mapDbcBuffer = null;
-    let worldMapAreaDbcBuffer = null;
-    let dungeonMapDbcBuffer = null;
-    let dungeonMapChunkDbcBuffer = null;
-    for (const { archive } of openedArchives) {
-      const candidateTrs = extractMpqFile(archive, [
-        'textures\\Minimap\\md5translate.trs',
-        'textures/minimap/md5translate.trs',
-        'Textures\\Minimap\\md5translate.trs',
-        'Textures/Minimap/md5translate.trs',
-      ]);
-      if (candidateTrs) trsBuffer = candidateTrs;
-      const candidateMapDbc = extractMpqFile(archive, [
-        'DBFilesClient\\Map.dbc',
-        'DBFilesClient/Map.dbc',
-        'dbfilesclient\\map.dbc',
-        'dbfilesclient/map.dbc',
-      ]);
-      if (candidateMapDbc) mapDbcBuffer = candidateMapDbc;
-      const candidateWorldMapAreaDbc = extractMpqFile(archive, [
-        'DBFilesClient\\WorldMapArea.dbc',
-        'DBFilesClient/WorldMapArea.dbc',
-        'dbfilesclient\\worldmaparea.dbc',
-        'dbfilesclient/worldmaparea.dbc',
-      ]);
-      if (candidateWorldMapAreaDbc) worldMapAreaDbcBuffer = candidateWorldMapAreaDbc;
-      const candidateDungeonMapDbc = extractMpqFile(archive, [
-        'DBFilesClient\\DungeonMap.dbc',
-        'DBFilesClient/DungeonMap.dbc',
-        'dbfilesclient\\dungeonmap.dbc',
-        'dbfilesclient/dungeonmap.dbc',
-      ]);
-      if (candidateDungeonMapDbc) dungeonMapDbcBuffer = candidateDungeonMapDbc;
-      const candidateDungeonMapChunkDbc = extractMpqFile(archive, [
-        'DBFilesClient\\DungeonMapChunk.dbc',
-        'DBFilesClient/DungeonMapChunk.dbc',
-        'dbfilesclient\\dungeonmapchunk.dbc',
-        'dbfilesclient/dungeonmapchunk.dbc',
-      ]);
-      if (candidateDungeonMapChunkDbc) dungeonMapChunkDbcBuffer = candidateDungeonMapChunkDbc;
-    }
-
+    const readFile = archiveReader(openedArchives);
+    const trsBuffer = readFile('textures\\Minimap\\md5translate.trs');
     if (!trsBuffer) return null;
 
+    const tables = readMapTables(readFile);
     let targets = CONTINENTS;
     if (requestedMapIds.length > 0 || allInstances) {
       if (mapDirOverride) {
         if (requestedMapIds.length !== 1) throw new Error('--map-dir can only be used with one --map value.');
         targets = [{ mapId: requestedMapIds[0], label: `Map ${requestedMapIds[0]}`, candidates: [mapDirOverride] }];
       } else {
-        if (!mapDbcBuffer) throw new Error('Could not extract DBFilesClient/Map.dbc; pass --map-dir explicitly.');
-        targets = parseMapDbc(mapDbcBuffer, requestedMapIds, allInstances).map((target) => {
-          const continent = target.mapType === 0 ? CONTINENTS.find((entry) => entry.mapId === target.mapId) : null;
-          return continent ? { ...target, ...continent } : target;
-        });
-        const resolvedIds = new Set(targets.map((target) => target.mapId));
-        const missing = requestedMapIds.filter((mapId) => !resolvedIds.has(mapId));
-        if (missing.length > 0) throw new Error(`Map ID(s) not found in Map.dbc: ${missing.join(', ')}`);
+        if (!tables.map) throw new Error('Could not extract DBFilesClient/Map.dbc; pass --map-dir explicitly.');
+        targets = resolveMapTargets(tables, requestedMapIds, allInstances);
       }
     }
-
-    if (worldMapAreaDbcBuffer) {
-      const boundsByMap = parseWorldMapAreaDbc(worldMapAreaDbcBuffer);
-      targets = targets.map((target) => {
-        // A continent spans many WorldMapArea zones. Keep the terrain atlas,
-        // rather than accidentally choosing one zone's parchment and bounds.
-        if (target.mapType === 0 && CONTINENTS.some((entry) => entry.mapId === target.mapId)) return target;
-        const area = boundsByMap.get(target.mapId);
-        return {
-          ...target,
-          worldMapBounds: area?.bounds ?? null,
-          candidates: [...new Set([...(area?.directories ?? []), ...target.candidates])],
-        };
-      });
-    }
-    if (dungeonMapDbcBuffer) {
-      const floorsByMap = parseDungeonMapDbc(dungeonMapDbcBuffer);
-      if (dungeonMapChunkDbcBuffer) parseDungeonMapChunkDbc(dungeonMapChunkDbcBuffer, floorsByMap);
-      targets = targets.map((target) => ({ ...target, floors: floorsByMap.get(target.mapId) ?? [] }));
-    }
+    targets = describeMaps(targets, tables, { aliases: !mapDirOverride });
 
     let resolvedTargets = [];
     if (requestedMapIds.length > 0 || allInstances) {

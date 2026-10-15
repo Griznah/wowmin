@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "allowJs": true,
+    "checkJs": true
+  },
+  "include": [
+    "esbuild.config.js",
+    "postcss.config.js",
+    "tailwind.config.js",
+    "scripts/build-css.js"
+  ],
+  "exclude": ["node_modules", "dist"]
+}

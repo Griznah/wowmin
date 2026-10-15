@@ -1,4 +1,4 @@
-import type { MapBattlegroundState, MapPlayerPosition } from '../../../src/types/electron';
+import type { CreatureInfo, MapBattlegroundState, MapPlayerPosition, StreamCreatureSample } from '../../../src/types/api';
 import { getMapName } from './helpers';
 
 export interface ActiveInstanceSession {
@@ -36,14 +36,19 @@ export interface InstanceViewTransform {
   panY: number;
 }
 
-export interface DungeonMapFloor {
+// A DungeonMap.dbc floor: the flat view's floor maps and the 3D scene's
+// floors both carry one, under the same id.
+export interface DungeonFloor {
   id: number;
   floorIndex: number;
+  bounds: InstanceCoordinateBounds;
+  chunks: Array<{ wmoGroupId: number; minZ: number }>;
+}
+
+export interface DungeonMapFloor extends DungeonFloor {
   image: string;
   width: number;
   height: number;
-  bounds: InstanceCoordinateBounds;
-  chunks: Array<{ wmoGroupId: number; minZ: number }>;
 }
 
 export interface MinimapTileProjection {
@@ -171,14 +176,18 @@ export function applyInstanceViewTransform(
   };
 }
 
+// The flat map's closest zoom; the 3D view may allow closer.
+export const INSTANCE_MAX_ZOOM = 6;
+
 export function zoomInstanceViewAt(
   transform: InstanceViewTransform,
   viewport: InstanceProjectionViewport,
   anchorX: number,
   anchorY: number,
   zoom: number,
+  maxZoom = INSTANCE_MAX_ZOOM,
 ): InstanceViewTransform {
-  const nextZoom = Math.min(6, Math.max(1, zoom));
+  const nextZoom = Math.min(Math.max(INSTANCE_MAX_ZOOM, maxZoom), Math.max(1, zoom));
   if (nextZoom === 1) return { zoom: 1, panX: 0, panY: 0 };
 
   const current = applyInstanceViewTransform(viewport, transform);
@@ -259,10 +268,10 @@ export function getInstanceCoordinateBounds(players: MapPlayerPosition[]): Insta
   };
 }
 
-export function getParticipantDungeonFloor(
+export function getParticipantDungeonFloor<Floor extends DungeonFloor>(
   player: Pick<MapPlayerPosition, 'position_x' | 'position_y' | 'position_z' | 'wmoGroupId'>,
-  floors: DungeonMapFloor[],
-): DungeonMapFloor | null {
+  floors: Floor[],
+): Floor | null {
   if (player.wmoGroupId !== undefined && player.wmoGroupId >= 0) {
     const matchingChunks = floors.flatMap((floor) => floor.chunks
       .filter((chunk) => chunk.wmoGroupId === player.wmoGroupId)
@@ -307,4 +316,33 @@ export function projectInstancePosition(
   const x = ((bounds.maxY - position.position_y) / (bounds.maxY - bounds.minY)) * width;
   const y = ((bounds.maxX - position.position_x) / (bounds.maxX - bounds.minX)) * height;
   return { x, y };
+}
+
+// creature_template unit_flags and flags_extra bits.
+const UNIT_FLAG_NON_ATTACKABLE = 0x2;
+const UNIT_FLAG_IMMUNE_TO_PC = 0x100;
+const UNIT_FLAG_NOT_SELECTABLE = 0x2000000;
+const CREATURE_FLAG_EXTRA_TRIGGER = 0x80;
+// Creature types a player's summon has when it is an object rather than a
+// pet: not specified (healing flowers and the like), totem, non-combat pet.
+const SUMMONED_OBJECT_TYPES = new Set([10, 11, 12]);
+
+// Whether a creature is scenery or a summoned object, drawn without a name,
+// nameplate, ring, facing, or path: units players can't select (Arathi
+// Basin's workers) or that are script triggers; units that can't be
+// attacked and offer nothing to talk to, unless they're fighting; and
+// players' summoned objects. The module says so from the unit's live flags;
+// creature_template's flags cover older modules. Bosses never are.
+export function isSceneryCreature(
+  creature: Pick<StreamCreatureSample, 'inCombat' | 'playerControlled' | 'scenery'>,
+  info: Pick<CreatureInfo, 'unitFlags' | 'flagsExtra' | 'npcFlags' | 'creatureType'> | null | undefined,
+  boss: boolean,
+): boolean {
+  if (boss) return false;
+  if (creature.scenery) return true;
+  if (!info) return false;
+  const unitFlags = info.unitFlags ?? 0;
+  if (unitFlags & UNIT_FLAG_NOT_SELECTABLE || (info.flagsExtra ?? 0) & CREATURE_FLAG_EXTRA_TRIGGER) return true;
+  if (!creature.inCombat && unitFlags & (UNIT_FLAG_NON_ATTACKABLE | UNIT_FLAG_IMMUNE_TO_PC) && !info.npcFlags) return true;
+  return creature.playerControlled && SUMMONED_OBJECT_TYPES.has(info.creatureType ?? 0);
 }

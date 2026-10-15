@@ -1,4 +1,4 @@
-import type { SessionRecord, SessionRoutePoint, SessionTotals } from '../../../src/types/electron';
+import type { SessionRecord, SessionRoutePoint, SessionTotals } from '../../../src/types/api';
 
 const MAX_ROUTE_JUMP_DISTANCE = 250;
 const MAX_DEAD_ROUTE_JUMP_DISTANCE = 50;

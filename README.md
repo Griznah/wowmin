@@ -1,10 +1,9 @@
 # WoW Admin – AzerothCore Admin Tool
 
-A server administration tool (Electron + Node.js + TypeScript) for an
+A web-based server administration tool (Node.js + TypeScript) for an
 [AzerothCore](https://www.azerothcore.org/) World of Warcraft server, using
-SOAP and direct database access. The same UI can run as a **native Node.js web
-service** in the browser (the primary, fully tested route) or as an Electron
-desktop app.
+SOAP and direct database access. It runs as a native Node.js service and is
+accessed from a browser.
 
 > This repository is a fork of
 > [scarecr0w12/wowmin](https://github.com/scarecr0w12/wowmin) ("WoW Admin",
@@ -72,8 +71,11 @@ desktop app.
   multi-floor instances), with stable projection bounds and letterboxing
 - Live participant markers with faction colors, health bars, movement trails,
   headings, and combat indicators
-- Group/raid membership, subgroup, faction/team, core LFG role, and runtime
-  session age per participant
+- Participant rows with race/class artwork, compact live state icons, wrapped
+  two-line status text, and Tank/Heal/DPS beside each dungeon/raid participant;
+  roles use the core LFG assignment or `mod-playerbots` talent/gear inference
+  for manually assembled groups. Emoji fallbacks preserve the same layout when
+  client icons have not been extracted
 - Battleground match state: phase, team scores, alive counts, decoded
   objectives (scores, captures, timers, flag state), and resurrection state;
   the active server-selected bot strategy is shown read-only when available
@@ -83,6 +85,49 @@ desktop app.
 - Floor-aware dungeons: participants are classified onto the correct dungeon
   floor from WMO/height context and only that floor's markers and trails are
   shown
+- Contextual sidebar order: battlegrounds show Active Sessions, Battleground,
+  Participants, Bot Decisions, and Encounters; dungeons/raids hide only the
+  Battleground card and keep the other cards visible with empty-state guidance
+
+### 3D Instance Watch (New)
+- An isometric 3D view of every instance, raid, battleground, and arena,
+  built from the WoW 3.3.5a client: buildings, props, terrain with its
+  texture layers, and water, lava, and slime; the flat map stays one click
+  away (**3D** button) and is used wherever a scene isn't available
+- Players and mobs drawn with their own game models (race, gear, druid forms,
+  pets, mounts, vehicles and their passengers), animated walking, running,
+  fighting, casting, sitting (to eat or drink), and dying, with floor rings
+  showing side, combat, selection, and health
+- Live from the companion module's UDP position stream (10 updates a second):
+  smooth movement, mobs, bot paths and decisions (with `mod-playerbots`),
+  battleground banners, flags, and doors, raid markers, and debuffs
+- The client's own spell art for casts, missiles, impacts, channels, ground
+  effects, auras, and chains (Chain Heal), with wand bolts in the wand's
+  school and models coloured and made see-through as the client does it
+  (Frostbolt's slow, Ice Block, Shadowform), plus floating combat numbers
+- TidyPlates-style nameplates (Neon, Grey, or Quatre) with health, power, cast
+  bars with spell names and icons, debuffs, threat, and battleground crests
+- A party fade that keeps the floors and rooms around the party solid and
+  fades the rest, by height and by distance, so multi-level dungeons stay
+  readable; turned off, the whole map is shown, as suits battlegrounds. When
+  flat-map mode is selected, 3D-only controls (fade ranges, render scale,
+  plates, lighting, models, fade, and lights) are hidden
+- Rotate (Q/E, or middle-drag to rotate and tilt freely), zoom about the
+  pointer, and Follow a participant
+- Built for battleground scale: in testing on a GeForce RTX 2060 SUPER, about
+  25 fps with 80 players and 200 mobs and 20 to 25 fps for a busy Arathi Basin
+  at 1600x1400; `?debug` on the page URL shows frame rate, draw calls, and
+  stream rates
+
+### Dungeon Clear
+- Dedicated **Dungeon Clear** tab embeds the existing DC Test Deck from
+  `mod-dungeon-clear`
+- The deck runs independently and retains its own GM-account login, permissions,
+  audit logging, and live test workflow
+- The iframe URL is configurable with `WOWMIN_DUNGEON_CLEAR_URL` and otherwise
+  defaults to the current browser hostname on port `8790`
+- A reload control and direct-open fallback remain available when the deck is
+  unavailable or its iframe allowlist is not configured
 
 ### Session History & Replay (New in 3.0.0)
 - Completed instance, raid, battleground, and arena runs are recorded
@@ -100,9 +145,10 @@ desktop app.
 - Replay renders the map artwork with per-participant colored routes (broken
   across death/release/teleport jumps), a chronological event log, and running
   totals at the seek position
-- Interrupted checkpoints from crashes or shutdowns are purged automatically
-  at startup; completed history is only ever removed by the explicit
-  **Purge all** button
+- Instance Watch includes a persisted **Record sessions** checkbox that is off
+  by default on a new install. Turning it off discards recordings currently in progress without touching completed
+  history; interrupted checkpoints are also purged at startup, and completed
+  history is only removed by the explicit **Purge all** button
 
 ### Live telemetry – `mod-wowmin-telemetry`
 - Live position/state telemetry is produced by the standalone companion module
@@ -117,6 +163,13 @@ desktop app.
   optional, compile-time extension) and shares a single 1 s poll across the
   Live Map, Instance Watch, and session recorder, configurable via
   `WOWMIN_TELEMETRY_POLL_MS` (default 1000, minimum 500)
+- For the 3D Instance Watch it also streams the watched instance over UDP at
+  10 Hz (positions, roles, mobs, paths, appearances, combat events, auras,
+  game objects, markers). Live-stream protocol v2 adds each participant's role
+  mask while WoWMin retains v1 parsing. The stream runs only while a page is
+  watching: WoWMin renews it every few seconds with the
+  `wowmin stream <mapId> <instanceId>` SOAP command, and the module stops
+  sending when renewals stop
 
 ### Economy Monitor
 - Dedicated **Economy** tab for monitoring the live in-game auction house and character wealth
@@ -135,16 +188,6 @@ desktop app.
 - Optional live follow mode refreshes the selected log preview every few seconds for a lightweight `tail -f` workflow
 - Save remote log connection details and follow-mode settings as part of an existing connection profile
 - Works with password-based SSH/SFTP access today
-
-### App Updates
-- Electron desktop builds automatically check GitHub releases on startup for
-  newer app versions; the header status indicator shows current version, update
-  availability, or check errors
-- Manual **Check** button to refresh release status on demand; the **Open
-  Release** button opens the latest GitHub release page in the default browser
-  when an update is available
-- The native web service skips upstream release checks by default
-  (`WOWMIN_WEB_MODE=1`)
 
 ### Dashboard
 - Server info at a glance (uptime, online players, peak)
@@ -168,10 +211,12 @@ desktop app.
 
 | Requirement | Notes |
 |---|---|
-| **Node.js** ≥ 18 | https://nodejs.org |
+| **Node.js** ≥ 20 | Required by Tailwind CSS v4's native build tooling; https://nodejs.org |
+| **Modern browser** | Chrome/Edge 111+, Firefox 128+, or Safari 16.4+ (the Tailwind CSS v4 compatibility baseline) |
 | **AzerothCore worldserver** | SOAP must be enabled (see below) |
 | **MySQL/MariaDB** | For database editing features |
 | **`mod-wowmin-telemetry`** | Optional but strongly recommended for live map/instance telemetry (see below) |
+| **DC Test Deck** | Optional; commit `cd74fa3` or newer is required for the embedded Dungeon Clear tab (setup below) |
 | **WoW 3.3.5a client files** | Only if you want map background artwork extracted locally |
 
 ### Live telemetry – `mod-wowmin-telemetry`
@@ -194,10 +239,27 @@ Once it is running, the module registers the administrator-only SOAP command:
 ```
 wowmin telemetry [mapId] [instanceId]
 ```
+There is no need to actually issue that command, WoWmin handles using it on it's own. 
 
-No worldserver configuration changes are required. Without the module, the
-Live Map falls back to saved database positions (stale between character
-saves) and the Instance Watch / Session History tabs have no live data.
+No worldserver configuration changes are required for the 1 s telemetry.
+Without the module, the Live Map falls back to saved database positions
+(stale between character saves) and the Instance Watch / Session History tabs
+have no live data.
+
+The 3D Instance Watch's live stream is off by default. Enable it in the
+module's `mod-wowmin-telemetry.conf`, pointing it at the machine WoWMin runs
+on:
+
+```ini
+WowMinTelemetry.Stream.Enable = 1
+# Where WoWMin listens (WOWMIN_STREAM_HOST / WOWMIN_STREAM_PORT); an IP address
+WowMinTelemetry.Stream.Host = "127.0.0.1"
+WowMinTelemetry.Stream.Port = 7979
+```
+
+With a module that has no stream (or with it disabled), Instance Watch keeps
+working on the 1 s telemetry: the flat map, or the 3D scene with markers in
+place of models, and no mobs, paths, spell art, or combat numbers.
 
 ### Enable SOAP on your worldserver
 
@@ -234,43 +296,48 @@ The **Economy** tab uses the `acore_characters` database for auction-house and c
 npm install
 
 # Build TypeScript and Tailwind CSS
-npm run build:ts
-npm run build:css
+npm run build
 
-# Run the test suite (no server or client required)
+# Run validation (no worldserver or client required)
+npm run typecheck
 npm test
 
-# Or build everything and start the desktop app
+# Configure the environment, then start the web service
 npm start
 ```
 
-> **Testing note:** the browser-based web service is the route that has been
-> fully exercised in practice. The Electron desktop build should work
-> identically (it shares the same main-process and renderer code), but it has
-> not been validated end-to-end on every platform; report issues if you rely
-> on it.
+## Web Service
 
-## Native Web Service
-
-The same UI can run in a browser without Docker or a graphical desktop. Build it,
-set HTTP Basic Authentication credentials, and start the Node.js service:
+Build the UI, set HTTP Basic Authentication credentials, and start the Node.js
+service:
 
 ```bash
 npm ci
-npm run build:ts
-npm run build:css
+npm run build
 
 export WOWMIN_HOST=0.0.0.0
 export WOWMIN_PORT=3000
 export WOWMIN_USERNAME=admin
 export WOWMIN_PASSWORD='replace-with-a-strong-password'
 export WOWMIN_DATA_DIR="$PWD/.wowmin-data"
-npm run start:web
+npm start
 ```
 
+Instead of exporting them, you can put these settings in a file (one
+`NAME=value` per line). The web service reads them at startup, in this order of
+precedence:
+
+1. variables already set in the environment (an export, or a systemd unit's
+   `EnvironmentFile`);
+2. the system file: `/etc/wowmin.env`, or `%ProgramData%\wowmin\wowmin.env` on
+   Windows;
+3. `.env` in the project root (kept out of git), as the fallback.
+
+Keep these files private (`chmod 600`), as they hold passwords.
+
 Open `http://server-address:3000/` and sign in with the configured HTTP
-credentials. The browser UI keeps the desktop app's SOAP, database, map,
-economy, inventory, profile, and remote-log APIs. Because those APIs include raw
+credentials. The browser UI provides SOAP, database, map, economy, inventory,
+profile, and remote-log APIs. Because those APIs include raw
 SQL and server administration commands, do not expose the service without
 authentication; use a TLS reverse proxy when access crosses an untrusted
 network.
@@ -280,14 +347,18 @@ A hardened systemd unit template is provided at `deploy/wowmin.service.example` 
 `systemctl daemon-reload`). It
 expects `/etc/wowmin.env` to define the variables above and stores profiles in
 `/var/lib/wowmin` when `WOWMIN_DATA_DIR=/var/lib/wowmin` is set. Set
-`WOWMIN_WEB_MODE=1` to disable upstream GitHub release checks in the service.
+`WOWMIN_MODEL_CACHE_DIR=/var/lib/wowmin/models` so generated client assets use
+the service's writable state directory. Start from
+[`deploy/wowmin.env.example`](deploy/wowmin.env.example).
 
 For server-managed connections, set all three of `WOWMIN_SOAP_USERNAME`,
-`WOWMIN_SOAP_PASSWORD`, and `WOWMIN_DB_PASSWORD` in the environment. The browser
-then auto-connects SOAP, world DB, characters map DB and economy DB after HTTP
-login, hides the corresponding credential forms, disables saved profiles in
-web mode, and reads logs locally rather than requiring SSH credentials. The
-remaining settings are:
+`WOWMIN_SOAP_PASSWORD`, and `WOWMIN_DB_PASSWORD` in the environment. The Node
+service then owns the shared SOAP, world DB, characters map DB, and economy DB
+connections; browsers only consume their status and cannot disconnect them for
+other users. Unavailable services do not prevent startup, retry with bounded
+backoff, and are health-checked so runtime outages can recover. Credential forms remain hidden, saved profiles are disabled in managed
+mode, and logs are read locally rather than through browser-supplied SSH
+credentials. The remaining settings are:
 
 ```ini
 WOWMIN_SOAP_HOST=127.0.0.1
@@ -297,8 +368,18 @@ WOWMIN_DB_PORT=3306
 WOWMIN_DB_USERNAME=acore
 WOWMIN_WORLD_DB=acore_world
 WOWMIN_CHARACTERS_DB=acore_characters
+WOWMIN_ECONOMY_DB=acore_characters
+# Optional per-service host/port/username/password overrides:
+# WOWMIN_WORLD_DB_HOST / _PORT / _USERNAME / _PASSWORD
+# WOWMIN_CHARACTERS_DB_HOST / _PORT / _USERNAME / _PASSWORD
+# WOWMIN_ECONOMY_DB_HOST / _PORT / _USERNAME / _PASSWORD
+WOWMIN_CONNECTION_RETRY_INITIAL_MS=5000
+WOWMIN_CONNECTION_RETRY_MAX_MS=60000
+WOWMIN_CONNECTION_HEALTH_MS=30000
 WOWMIN_WORLD_CONFIG=/path/to/azerothcore/env/dist/etc/worldserver.conf
 WOWMIN_LOG_DIR=/path/to/azerothcore/env/dist/bin
+# Optional override; default is http(s)://<current-browser-host>:8790/
+WOWMIN_DUNGEON_CLEAR_URL=http://server-address:8790/
 ```
 
 Live telemetry and session recording settings (all optional):
@@ -312,13 +393,126 @@ WOWMIN_SESSION_ROUTE_INTERVAL_MS=5000
 WOWMIN_SESSION_COMPLETION_GRACE_MS=15000
 ```
 
+The 3D Instance Watch reads the module's live stream on a UDP port, and draws
+players, mobs, spell art, and icons from a WoW 3.3.5a client's `Data` folder.
+Each model, spell's art, and icon is built from the client files the first
+time it is seen (in a worker process) and cached under
+`WOWMIN_MODEL_CACHE_DIR`. When that variable is unset, the cache remains under
+`assets/models/` (not in git). A cache version bump rebuilds the files. Without
+the client folder the 3D scene still draws, with markers in place of models.
+The scenes themselves are generated once with the extractor (see
+[Generating 3D scenes](#generating-3d-instance-scenes)).
+
+```ini
+# Where the module's stream arrives (match WowMinTelemetry.Stream.Host/Port)
+WOWMIN_STREAM_HOST=127.0.0.1
+WOWMIN_STREAM_PORT=7979
+# A WoW 3.3.5a client's Data folder, for unit models, spell art, and icons
+WOWMIN_CLIENT_DATA=/path/to/WoW/Data
+# Optional cache location; recommended for the hardened systemd service
+WOWMIN_MODEL_CACHE_DIR=/var/lib/wowmin/models
+```
+
 Completed session records use readable names such as `WSG-3-Oct08-26.json` and are kept indefinitely
 under `$WOWMIN_DATA_DIR/sessions/`; only the explicit **Purge all** button in the
 Session history tab deletes them. Abandoned checkpoints from crashes are
 removed automatically at startup.
 
-Keep `/etc/wowmin.env` mode `0600` and restart the service after edits. Web
-mode disables upstream release checks; the Electron desktop build retains them.
+Each per-service database setting falls back to the shared `WOWMIN_DB_*`
+value, preserving existing single-host installations while supporting split
+hosts and credentials. During an outage, SOAP and database-backed features
+degrade independently; Live Map retains the latest telemetry snapshot and the
+Dashboard/Players views use SOAP rather than repeatedly probing a known-offline
+characters database.
+
+Keep `/etc/wowmin.env` mode `0600` and restart the service after edits.
+
+## Dungeon Clear / DC Test Deck setup
+
+WoWMin embeds the existing Test Deck; it does not install or start it. Test
+Deck remains a separate service from
+`azerothcore-wotlk/modules/mod-dungeon-clear/testdeck` and requires:
+
+- Python 3.9 or newer
+- a `mysql`/`mysql.exe` client
+- a built and running worldserver with `mod-dungeon-clear`
+- SOAP enabled in `worldserver.conf`
+- a dedicated SOAP bridge account with GM level 3
+- game accounts with GM level 1 or higher for Test Deck login
+
+Follow Test Deck's own README for the authoritative setup. Test Deck Setup is NOT covered here. 
+
+Test Deck commit `cd74fa3` or newer supports secure, opt-in direct iframe
+embedding. Keep its normal port `8790` and add the exact
+browser-visible WoWMin origin to the generated `testdeck.toml`:
+
+```toml
+[server]
+host = "0.0.0.0"
+port = 8790
+allowed_frame_ancestors = ["http://server-address:3000"]
+```
+
+An allowed origin has no trailing slash or path. Its scheme, hostname, and
+port must exactly match the address used to open WoWMin.
+
+If WoWMin is opened as
+`http://192.168.1.20:3000/`, for example, configure
+`"http://192.168.1.20:3000"`. 
+
+If WoWMin is opened as
+`http://127.0.0.1:3000/`, for example, configure
+`"http://127.0.0.1:3000"`.
+
+Multiple exact origins may be listed when needed.
+If Test Deck reports `forbidden: unexpected Host header` when reached through
+a hostname, add that hostname to `[server] allowed_hosts` as described in Test
+Deck's README.
+
+If users connect from another computer, allow TCP port `8790` through the host
+firewall. On Ubuntu with UFW use `sudo ufw allow 8790/tcp`; on a
+Fedora/RHEL-family host use `sudo firewall-cmd --permanent --add-port=8790/tcp`
+followed by `sudo firewall-cmd --reload`. On Windows, run this in an
+Administrator PowerShell:
+
+```powershell
+New-NetFirewallRule -DisplayName "DC Test Deck" `
+  -Direction Inbound -Protocol TCP -LocalPort 8790 `
+  -Action Allow -Profile Private
+```
+
+Verify the configured framing headers after restarting Test Deck:
+
+```bash
+# Linux / macOS
+curl -I http://127.0.0.1:8790/
+
+# Windows PowerShell or Command Prompt
+curl.exe -I http://127.0.0.1:8790/
+```
+
+The response must omit `X-Frame-Options` and its `Content-Security-Policy`
+`frame-ancestors` directive must contain the exact WoWMin origin. Open
+`http://server-address:8790/` directly to verify login, then open WoWMin's
+**Dungeon Clear** tab.
+
+If WoWMin uses HTTPS, Test Deck must also be served over HTTPS or the browser
+will block it as mixed content. Test Deck's `SameSite=Strict` login cookie also
+requires WoWMin and Test Deck to share a site; using the same hostname on ports
+`3000` and `8790` is the simplest setup. Set `WOWMIN_DUNGEON_CLEAR_URL` only
+when Test Deck is not available from the browser at the default
+`http(s)://<WoWMin-host>:8790/` URL.
+
+### Dungeon Clear troubleshooting
+
+| Symptom | What to check |
+|---|---|
+| Test Deck opens directly but the iframe is blank | Confirm `allowed_frame_ancestors` exactly matches the WoWMin address bar origin, has no trailing slash, and Test Deck was restarted after editing its configuration. |
+| The response still has `X-Frame-Options: DENY` | The allowlist is empty or the wrong Test Deck configuration file is being loaded. Run `python3 -m testdeck check` and restart it. |
+| Browser reports mixed content | WoWMin is HTTPS but Test Deck is HTTP. Serve Test Deck over HTTPS and set `WOWMIN_DUNGEON_CLEAR_URL` to that URL. |
+| Login succeeds and immediately returns to login | Open WoWMin and Test Deck with the same hostname/site, not `localhost` for one and a LAN address for the other. |
+| Test Deck reports an unexpected Host header | Add the browser-visible Test Deck hostname to `[server] allowed_hosts`, or use an address printed in its startup banner. |
+| Remote users cannot connect to `8790` | Check the firewall rule and confirm Test Deck is listening with `ss -ltnp` on Linux or `netstat -ano | findstr :8790` on Windows. |
 
 ## Docker
 
@@ -417,19 +611,38 @@ docker run -d --name wowmin \
 5. **Click a dot** or a row in the sidebar to select a player — a panel appears with their details and quick action buttons (Info, Freeze, Unfreeze, Summon, Kick, Ban). Actions are sent via the active SOAP connection. Selecting a player does not move the camera, pan, or zoom.
 6. Use the mouse wheel or **double-click** to zoom into the map; drag to pan while zoomed, or click the zoom percentage control to reset to `100%`.
 7. Optionally place map image files (`0.jpg`, `1.jpg`, `530.jpg`, `571.jpg`) in `assets/maps/` for visual map backgrounds (see `assets/maps/README.txt`). The app preserves the image aspect ratio automatically.
-8. To generate those from a WoW 3.3.5a client, run `npm run extract:maps -- --source /path/to/WoW` (or the npm shorthand `npm run extract:maps --source /path/to/WoW`) or point it at an extracted `World/Minimaps` folder.
+8. To generate those from a WoW 3.3.5a client, run `npm run extract:maps -- --source /path/to/WoW` or point it at an extracted `World/Minimaps` folder. The standalone `--` tells npm to forward the remaining arguments unchanged.
 9. Optionally extract race/gender portraits, class icons, and player-state icons with `npm run extract:icons -- --source /path/to/WoW`. If skipped, WoWMin uses emoji fallbacks.
 
 ### Instance / Battleground Watch
 1. Navigate to the **Instance Watch** tab (keyboard shortcut **Alt+7**). Active runtime instances, raids, battlegrounds, and arenas are discovered automatically and appear as cards in the sidebar; nothing to configure beyond a SOAP connection.
-2. Switch the **Session** dropdown to inspect another session; **Auto (1 s)** keeps the selected session fresh, with a full re-discovery every 10 s.
+2. Switch the **Session** dropdown to inspect another session; **Auto (1 s)** keeps the selected session fresh, with a full re-discovery every 10 s. Refreshes never replace or move an actively used dropdown.
 3. The map pane uses extracted client artwork when available (with per-floor dungeon artwork for multi-floor dungeons), otherwise calibrated or auto-fit bounds.
 4. **Click a participant marker or sidebar row** to focus the view on them; **Fit** restores a view that fits everyone, **−**/**+** zoom around the cursor, and **Clear focus** releases the focused participant.
-5. Battlegrounds additionally show the match phase, team scores, alive counts, decoded objectives, resurrection state, and the server-selected bot strategy (read-only).
-6. The encounter card lists boss states and the session death history; the participant list shows faction, group/subgroup, LFG role, health and power, and target.
+5. Battleground cards are ordered Active Sessions, Battleground, Participants, Bot Decisions, Encounters. Dungeon/raid cards are ordered Active Sessions, Participants, Encounters, Bot Decisions; only Battleground is hidden, and cards without current data remain visible with an explanation.
+6. The participant list shows live players and bots even during database fallback, with race/class artwork, state icons, a stable two-line wrapped status, and Tank/Heal/DPS beside dungeon/raid names. Roles prefer the core LFG assignment and fall back to `mod-playerbots` classification for manually assembled groups. Without extracted icons the same layout uses emoji fallbacks.
+7. Where a 3D scene has been generated, the map opens in 3D (the **3D** button switches back to the flat map). **Q**/**E** rotate by a quarter turn; middle-drag or Shift+drag rotates and tilts freely; the compass under the buttons shows where north is; the scroll wheel zooms about the pointer.
+8. **Fade** keeps the area around the party solid and fades the rest; **Height fade** and **Horizontal fade** set how far. Turn **Fade** off to see a whole battleground. **Render scale** lowers the 3D resolution on slow GPUs. These and the other 3D-only controls are hidden while flat-map mode is selected.
+9. **Mobs** (Near party, All, Off), **Plates** (Neon, Grey, Quatre, or plain Labels), and the **Follow**, **Trails**, **Paths**, **Decisions**, **Models**, and **Numbers** toggles choose what is drawn; each remembers its setting per browser.
+10. **Record sessions**, below the heading, is off by default when no saved preference exists and persists across service restarts. Unchecking it deletes active checkpoints but leaves every completed session file in place.
+11. Add `?debug` to the page URL for a frame-rate, draw-call, and stream-rate overlay, and open `/spell-preview` to play any spell's client art on test models.
+
+### Dungeon Clear
+1. Add WoWMin's exact origin to Test Deck's
+   `[server] allowed_frame_ancestors`, then start Test Deck on its normal port
+   `8790`.
+2. Navigate to the **Dungeon Clear** tab. WoWMin hides its connection header and
+   gives the embedded deck the full workspace.
+3. Log in inside Test Deck with a game account whose GM level meets Test Deck's
+   `[auth] min_gmlevel` setting (default 1).
+4. Use Test Deck normally to launch, watch, stop, and review runs. WoWMin does
+   not replace Test Deck's authentication or command bridge.
+5. Use **Reload** after restarting Test Deck. Use **Open directly** when the
+   frame stays blank so the Test Deck or configuration error is visible in its
+   own tab.
 
 ### Session history & replay
-1. Navigate to the **Session history** tab (keyboard shortcut **Alt+8**). Completed runs from `$WOWMIN_DATA_DIR/sessions/` are loaded at startup and remain available without a SOAP, worldserver, or database connection.
+1. Navigate to the **Session history** tab (keyboard shortcut **Alt+9**). Completed runs from `$WOWMIN_DATA_DIR/sessions/` are loaded at startup and remain available without a SOAP, worldserver, or database connection.
 2. **Click a record** to load it into the embedded replay panel.
 3. Use **Play**, **Pause**, **Stop**, the seek slider, and the speed selector (0.5×–16×) to scrub through the run. Routes are drawn incrementally per participant, the event log follows the playhead, and the running totals reflect the seek position.
 4. **Purge all** permanently deletes every completed session record after a confirmation prompt; it does not affect in-progress recordings. Abandoned checkpoints are already removed automatically at startup.
@@ -475,12 +688,6 @@ docker run -d --name wowmin \
 - Logger-to-file matching is resolved in-app, so the live file picker only shows files currently associated with the selected logger instead of every readable file in the logs directory.
 - Live follow pauses automatically when you leave the **Logs** tab, so it does not keep polling in the background unnecessarily.
 
-### App Updates
-1. Launch the app normally.
-2. The header automatically checks GitHub for the latest release and shows your current version.
-3. If a newer release exists, the banner changes state and exposes an **Open Release** button.
-4. Use **Check** any time to manually refresh the release status.
-
 ### Extracting player and state icons
 
 WoWMin can use the race/gender portraits, class atlas, and state/spell icons
@@ -508,8 +715,8 @@ You can now generate the live-map backgrounds directly from WoW minimap tiles:
 # From a WoW 3.3.5a client root (the extractor now reads WoW MPQs directly; external tools are only a fallback)
 npm run extract:maps -- --source "/path/to/WoW 3.3.5a"
 
-# npm shorthand also works
-npm run extract:maps --source "/path/to/WoW 3.3.5a"
+# Without the separator, npm value options require equals syntax
+npm run extract:maps --source="/path/to/WoW 3.3.5a"
 
 # Or from an already extracted World/Minimaps directory
 npm run extract:maps -- --source "/path/to/World/Minimaps"
@@ -549,10 +756,40 @@ The same extractor produces the artwork used by the Instance Watch tab:
 
 ```bash
 # One map
-npm run extract:maps --source "/path/to/WoW" --map 489
+npm run extract:maps -- --source "/path/to/WoW" --map 489
 
 # Every instance, raid, battleground, and arena (recommended once)
-npm run extract:maps --source "/path/to/WoW" --all-instances
+npm run extract:maps -- --source "/path/to/WoW" --all-instances
+```
+
+### Generating 3D instance scenes
+
+The 3D Instance Watch draws each map from a scene (`assets/instances/<mapId>.glb`
+plus its manifest `<mapId>.scene.json`, not in git) exported from the client by
+a separate command. It does not need the flat artwork above, and the flat
+artwork does not need it: either can be re-run on its own.
+
+```bash
+# One map
+npm run extract:scenes -- --source "/path/to/WoW" --map 529
+
+# Every instance, raid, battleground, and arena (about 1.5 GB, 15 to 20 minutes)
+npm run extract:scenes -- --source "/path/to/WoW" --all-instances
+```
+
+A scene holds the map's buildings and their props, the props placed on the
+map, and the terrain and liquids of the area players use (each dungeon floor,
+or the world map's bounds), with props sharing a model drawn instanced. Every
+map with client map files gets a scene, with or without flat artwork. Re-run
+the export after upgrading WoWMin if the release notes say the scene format
+changed; maps without a scene use the flat map.
+
+To check that a change to one export leaves the other alone, export into a
+fresh folder and compare it with the previous one; 2D and 3D differences are
+reported separately:
+
+```bash
+npm run check:exports -- ./assets/instances ./instances-new
 ```
 
 #### Classic/TBC dungeon artwork with WDM patches
@@ -596,10 +833,10 @@ wow-admin/
 ├── tailwind.config.js      # Tailwind CSS configuration
 ├── esbuild.config.js       # Build configuration
 ├── src/
-│   ├── main.ts             # Electron main process (shared with web mode)
-│   ├── preload.ts          # Context bridge (IPC)
-│   ├── web-server.ts       # Native web service entry point (npm run start:web)
-│   ├── web-electron-shim.ts# Exposes the IPC surface to browser tabs
+│   ├── web-server.ts       # Authenticated HTTP service and static-file server
+│   ├── api-backend.ts      # SOAP, database, telemetry, and session API handlers
+│   ├── api-router.ts       # Internal API channel dispatcher
+│   ├── dungeon-clear-config.ts # Test Deck URL and CSP configuration
 │   ├── soap-client.ts      # SOAP/HTTP client for AzerothCore
 │   ├── live-map-telemetry.ts # WMAP protocol (v1–v7) parser + command builder
 │   ├── session-recorder.ts # Session recording, persistence, index, purge
@@ -608,7 +845,7 @@ wow-admin/
 │   ├── database/
 │   │   └── db-service.ts   # MySQL database service
 │   └── types/
-│       └── electron.ts     # TypeScript type definitions
+│       └── api.ts          # Shared API and domain types
 ├── renderer/
 │   ├── index.html          # App UI
 │   ├── styles.css          # Base styling
@@ -617,9 +854,10 @@ wow-admin/
 │   │   └── output.css      # Generated CSS
 │   └── scripts/
 │       ├── app.ts          # Main frontend logic (SOAP, DB, map, instances, replay)
-│       ├── web-api.ts      # Browser fetch implementation of the IPC surface
+│       ├── web-api.ts      # Browser fetch implementation of the API surface
 │       ├── types/
-│       │   └── state.ts    # Application state types
+│       │   ├── state.ts    # Application state types
+│       │   └── wowmin-api.ts # Browser API contract
 │       └── utils/
 │           ├── helpers.ts  # Utility functions
 │           ├── map-coords.ts # WoW coordinate conversion utilities
@@ -636,7 +874,8 @@ wow-admin/
 │   ├── extract-player-icons.mjs # WoW portrait/class/state icon extractor
 │   └── test-*.cjs          # Self-contained test suites (npm test)
 ├── deploy/
-│   └── wowmin.service.example # Hardened systemd unit template
+│   ├── wowmin.service.example # Hardened systemd unit template
+│   └── wowmin.env.example     # Environment configuration sample
 └── dist/                   # Compiled output
 ```
 
@@ -650,8 +889,9 @@ npm test          # runs all scripts/test-*.cjs with node:test
 npm run typecheck # tsc --noEmit over the whole project
 ```
 
-Coverage includes the telemetry protocol parser (versions 1–5, rejection of
-truncated/unknown snapshots), command building, session grouping and
+Coverage includes the managed connection lifecycle (serialized startup,
+degraded services, retry/recovery, and shutdown), telemetry protocol parser
+(versions 1–7, rejection of truncated/unknown snapshots), command building, session grouping and
 battleground decoding, map projection math (continents, calibrated
 battlegrounds, minimap tiles, dungeon floors, pan/zoom/fit), the session
 recorder (persistence, deduplication, checkpoint purge, explicit history
@@ -669,30 +909,26 @@ npm run build:ts:watch
 # Build Tailwind CSS (watch mode)
 npm run build:css:watch
 
-# Development mode (Electron)
+# Build once and start the local web service
 npm run dev
 ```
 
-## Building for Distribution
+## Building for deployment
 
 ```bash
-# Build for current platform
+npm ci
 npm run build
-
-# Build for specific platforms
-npm run build:win    # Windows
-npm run build:mac    # macOS
-npm run build:linux  # Linux
-npm run build:all    # Windows + Linux
+npm run typecheck
+npm test
 ```
 
-On Windows, the packaging commands intentionally run through `scripts/package.js`,
-which disables Electron Builder's `signAndEditExecutable` step so non-elevated
-shells and CI jobs can still produce the NSIS/portable installers.
+Deploy the repository with production dependencies and the generated `dist/`
+files, then run `npm start`. Tagged GitHub releases use GitHub's automatic
+source archives; this project does not produce platform-specific installers.
 
 ## Technology Stack
 
-- **Electron** - Cross-platform desktop application
+- **Node.js HTTP server** - Authenticated web service
 - **TypeScript** - Type-safe JavaScript
 - **Tailwind CSS** - Utility-first CSS framework
 - **mysql2** - MySQL client with Promise support
