@@ -1,6 +1,6 @@
 {
   "name": "wow-admin",
-  "version": "3.0.2",
+  "version": "3.1.0",
   "description": "Web-based AzerothCore administration tool with SOAP, database editing, live worldserver telemetry, instance watch, and session replay",
   "engines": {
     "node": ">=20"
